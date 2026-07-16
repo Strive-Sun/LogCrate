@@ -9,6 +9,7 @@ interface Props {
   activeKey: string | null;
   selectedArchive: string | null;
   width?: number;
+  unreadIds: Set<string>;
   filter: string[];
   showAll: boolean;
   passesFilter: (n: { name: string; kind: string; isLog?: boolean }) => boolean;
@@ -17,6 +18,18 @@ interface Props {
   onSelectArchive: (name: string, unreadId?: string) => void;
   onOpenFile: (name: string, unreadId?: string) => void;
   onAddDir: () => void;
+}
+
+/** 节点是否为未读的新到达项(id 即文件路径) */
+function isUnread(node: TreeNode, unreadIds: Set<string>): boolean {
+  return unreadIds.has(node.id);
+}
+
+/** 递归判断:目录(或其子孙)是否含未读的新到达项 */
+function hasUnreadDescendant(node: TreeNode, unreadIds: Set<string>): boolean {
+  return !!node.children?.some(
+    (c) => isUnread(c, unreadIds) || hasUnreadDescendant(c, unreadIds),
+  );
 }
 
 export function DirTree(props: Props) {
@@ -55,7 +68,7 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
   const toggleArchive = async () => {
     const next = !open;
     setOpen(next);
-    props.onSelectArchive(node.name, node.unread ? node.id : undefined);
+    props.onSelectArchive(node.name, props.unreadIds.has(node.id) ? node.id : undefined);
     if (next && entries === null) {
       setLoading(true);
       const es = await api.listArchiveEntries(node.name); // 只读中央目录,不解压
@@ -64,10 +77,17 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
     }
   };
 
+  const unread = isUnread(node, props.unreadIds);
+
   if (node.kind === 'dir') {
+    const dirHasNew = hasUnreadDescendant(node, props.unreadIds);
     return (
       <div>
-        <div className="tree-node" style={pad} onClick={() => setOpen((v) => !v)}>
+        <div
+          className={'tree-node' + (dirHasNew ? ' new-dir' : '')}
+          style={pad}
+          onClick={() => setOpen((v) => !v)}
+        >
           <span className="twisty">{open ? '▾' : '▸'}</span>
           <span className="ico">📁</span>
           <span className="label">{node.name}</span>
@@ -82,14 +102,18 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
     return (
       <div>
         <div
-          className={'tree-node' + (props.selectedArchive === node.name ? ' selected' : '')}
+          className={
+            'tree-node' +
+            (props.selectedArchive === node.name ? ' selected' : '') +
+            (unread ? ' new-file' : '')
+          }
           style={pad}
           onClick={toggleArchive}
         >
           <span className="twisty">{open ? '▾' : '▸'}</span>
           <span className="ico">📦</span>
           <span className="label">{node.name}</span>
-          {node.unread && <span className="dot-unread" />}
+          {unread && <span className="dot-unread" />}
         </div>
         {open && loading && (
           <div className="tree-node" style={{ paddingLeft: 10 + (depth + 1) * 14, color: 'var(--fg-dim)' }}>
@@ -123,14 +147,18 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
   // 裸文本文件:叶子节点
   return (
     <div
-      className={'tree-node' + (props.activeKey === node.name ? ' selected' : '')}
+      className={
+        'tree-node' +
+        (props.activeKey === node.name ? ' selected' : '') +
+        (unread ? ' new-file' : '')
+      }
       style={pad}
-      onClick={() => props.onOpenFile(node.name, node.unread ? node.id : undefined)}
+      onClick={() => props.onOpenFile(node.name, unread ? node.id : undefined)}
     >
       <span className="twisty" />
       <span className="ico">{node.isLog === false ? '⬡' : '📄'}</span>
       <span className={'label' + (node.isLog === false ? ' notlog' : '')}>{node.name}</span>
-      {node.unread && <span className="dot-unread" />}
+      {unread && <span className="dot-unread" />}
     </div>
   );
 }

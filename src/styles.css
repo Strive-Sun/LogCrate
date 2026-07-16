@@ -16,6 +16,11 @@
   --debug: #888;
   --hover: #2e2e35;
   --sel: #33436b;
+  /* 新到达高亮:新文件本身 vs 含新文件的目录,用不同色区分 */
+  --new-file-bg: rgba(255, 92, 92, 0.16);
+  --new-file-fg: #ff8a8a;
+  --new-dir-bg: rgba(224, 160, 48, 0.15);
+  --new-dir-fg: #e0a030;
   --log-font: 'Cascadia Code', 'Consolas', 'SF Mono', 'Menlo', monospace;
   --ui-font: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
 }
@@ -37,6 +42,10 @@
   --debug: #999;
   --hover: #ececef;
   --sel: #cfe2f8;
+  --new-file-bg: rgba(226, 59, 59, 0.12);
+  --new-file-fg: #c62828;
+  --new-dir-bg: rgba(181, 118, 16, 0.14);
+  --new-dir-fg: #9a6410;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -178,6 +187,14 @@ body.resizing { cursor: col-resize; user-select: none; }
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--unread); flex-shrink: 0;
 }
+/* 新到达高亮:新文件本身 */
+.tree-node.new-file { background: var(--new-file-bg); }
+.tree-node.new-file .label { color: var(--new-file-fg); font-weight: 600; }
+/* 含新文件的目录 */
+.tree-node.new-dir { background: var(--new-dir-bg); }
+.tree-node.new-dir .label { color: var(--new-dir-fg); font-weight: 600; }
+/* 选中态优先级高于新到达高亮 */
+.tree-node.selected.new-file, .tree-node.selected.new-dir { background: var(--sel); }
 .add-dir-btn {
   margin: 8px 12px;
   padding: 6px;

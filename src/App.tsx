@@ -12,6 +12,8 @@ export function App() {
   const [newItems, setNewItems] = useState<NewLogItem[]>([]);
   // 徽章数字直接由未读列表长度派生,保证徽章与列表始终一致
   const count = newItems.length;
+  // 未读项 id 集合(id 即文件路径),用于左树高亮;不依赖后端 unread 标记
+  const unreadIds = new Set(newItems.map((it) => it.id));
   const seen = useRef<Set<string>>(new Set());
 
   // 当前选中的压缩包(用于左侧树高亮)与当前查看的条目 key
@@ -143,6 +145,7 @@ export function App() {
           activeKey={activeKey}
           selectedArchive={selectedArchive}
           width={treeWidth}
+          unreadIds={unreadIds}
           filter={filter}
           showAll={showAll}
           passesFilter={passesFilter}
