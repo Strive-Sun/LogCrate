@@ -21,14 +21,27 @@ pub struct DetectedItem {
 }
 
 /// 持久化配置
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WatchConfig {
+    #[serde(default)]
     pub dirs: Vec<String>,
     #[serde(default = "default_suffixes")]
     pub suffixes: Vec<String>,
     #[serde(default)]
     pub show_all: bool,
+}
+
+/// 手写 Default 以复用 default_suffixes,保证内存态默认(全新安装、
+/// 配置缺失)与前端默认后缀一致,避免后端把所有裸文件通知都压制。
+impl Default for WatchConfig {
+    fn default() -> Self {
+        Self {
+            dirs: Vec::new(),
+            suffixes: default_suffixes(),
+            show_all: false,
+        }
+    }
 }
 
 fn default_suffixes() -> Vec<String> {
@@ -133,6 +146,28 @@ impl WatchState {
             cfg.show_all = show_all;
         }
         self.persist();
+    }
+
+    /// 读取当前持久化的后缀筛选配置(suffixes, show_all)。
+    pub fn get_filter(&self) -> (Vec<String>, bool) {
+        let cfg = self.config.lock().unwrap();
+        (cfg.suffixes.clone(), cfg.show_all)
+    }
+
+    /// 依据当前持久化的后缀筛选,判断一个到达项是否应计入新日志通知。
+    /// 语义与前端目录树筛选一致:压缩包(archive)始终通知;`show_all`
+    /// 开启时不过滤;否则仅当裸文件名匹配任一配置后缀时通知。
+    /// 每次调用读取最新配置,保证筛选规则变更后对后续到达即时生效。
+    pub fn should_notify(&self, item: &DetectedItem) -> bool {
+        if item.kind == "archive" {
+            return true;
+        }
+        let cfg = self.config.lock().unwrap();
+        if cfg.show_all {
+            return true;
+        }
+        let lower = item.name.to_lowercase();
+        cfg.suffixes.iter().any(|s| lower.ends_with(&s.to_lowercase()))
     }
 
     /// 注册一个目录的 notify 监听;回调在稳定检测通过后触发

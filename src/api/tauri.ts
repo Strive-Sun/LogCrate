@@ -149,6 +149,11 @@ export const tauriApi = {
     await invoke('set_filter', { suffixes, showAll });
   },
 
+  /** 读取持久化的后缀筛选配置,供启动时同步 */
+  async getFilter(): Promise<[string[], boolean]> {
+    return invoke<[string[], boolean]>('get_filter');
+  },
+
   /** 订阅到达事件;返回取消函数 */
   subscribeNewLogs(onDetect: (item: NewLogItem) => void): () => void {
     const un = listen<DetectedItem>('new-archive-detected', (e) => {

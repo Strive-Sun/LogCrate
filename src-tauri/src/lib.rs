@@ -97,6 +97,12 @@ fn set_filter(state: State<AppState>, suffixes: Vec<String>, show_all: bool) {
     state.watch.set_filter(suffixes, show_all);
 }
 
+/// 返回当前持久化的后缀筛选配置,供前端启动时同步,避免前后端筛选分叉。
+#[tauri::command]
+fn get_filter(state: State<AppState>) -> (Vec<String>, bool) {
+    state.watch.get_filter()
+}
+
 /// 重命名文件:仅改文件名,保持在同一目录内;拒绝路径穿越与覆盖已存在文件。
 #[tauri::command]
 fn rename_file(path: String, new_name: String) -> Result<String, String> {
@@ -267,7 +273,12 @@ fn close_log_session(state: State<AppState>, session_id: String) {
 
 fn spawn_watch(watch: &Arc<WatchState>, app: &tauri::AppHandle, dir: &str) {
     let app2 = app.clone();
+    let watch2 = watch.clone();
     let _ = watch.start_watch(dir, move |item: DetectedItem| {
+        // 应用用户配置的后缀筛选:不匹配的新文件不计入通知
+        if !watch2.should_notify(&item) {
+            return;
+        }
         let _ = app2.emit("new-archive-detected", &item);
     });
 }
@@ -305,6 +316,7 @@ pub fn run() {
             add_watch_dir,
             remove_watch_dir,
             set_filter,
+            get_filter,
             rename_file,
             delete_file,
             open_path,

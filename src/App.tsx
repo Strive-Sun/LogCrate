@@ -24,6 +24,8 @@ export function App() {
   // 后缀筛选
   const [filter, setFilter] = useState<string[]>(['.log', '.txt', '.out']);
   const [showAll, setShowAll] = useState(false);
+  // 用户一旦本地修改筛选,忽略启动时异步返回的旧配置,避免覆盖新值
+  const filterEdited = useRef(false);
 
   // 左栏宽度(可拖动调整),持久化到 localStorage
   const [treeWidth, setTreeWidth] = useState<number>(() => {
@@ -71,6 +73,13 @@ export function App() {
   useEffect(() => {
     refreshTree();
     api.newLogItems().then(setNewItems);
+    // 启动时同步后端持久化的后缀筛选,避免前后端筛选分叉(通知与可见树不一致)
+    api.getFilter().then(([suffixes, showAllCfg]) => {
+      // 若用户在响应返回前已修改筛选,则不用旧配置覆盖
+      if (filterEdited.current) return;
+      setFilter(suffixes);
+      setShowAll(showAllCfg);
+    });
     // 订阅后端到达事件
     const unsub = api.subscribeNewLogs((item) => {
       // 已读过的项不再加回;同一 id 只保留一条,避免重复事件导致计数虚高
@@ -91,7 +100,8 @@ export function App() {
       if (node.kind === 'dir' || node.kind === 'archive') return true;
       if (showAll) return true;
       const lower = node.name.toLowerCase();
-      return filter.some((s) => lower.endsWith(s));
+      // 后缀也转小写,与后端 should_notify 的大小写不敏感匹配保持一致
+      return filter.some((s) => lower.endsWith(s.toLowerCase()));
     },
     [filter, showAll],
   );
@@ -236,10 +246,12 @@ export function App() {
           showAll={showAll}
           passesFilter={passesFilter}
           onFilterChange={(f) => {
+            filterEdited.current = true;
             setFilter(f);
             void api.setFilter(f, showAll);
           }}
           onShowAllChange={(v) => {
+            filterEdited.current = true;
             setShowAll(v);
             void api.setFilter(filter, v);
           }}

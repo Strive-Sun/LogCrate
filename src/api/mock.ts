@@ -248,6 +248,10 @@ export const mockApi = {
 
   async setFilter(_suffixes: string[], _showAll: boolean): Promise<void> {},
 
+  async getFilter(): Promise<[string[], boolean]> {
+    return [['.log', '.txt', '.out'], false];
+  },
+
   subscribeNewLogs(_onDetect: (item: NewLogItem) => void): () => void {
     return () => {};
   },
