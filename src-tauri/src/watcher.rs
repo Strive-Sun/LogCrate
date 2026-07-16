@@ -92,6 +92,40 @@ impl WatchState {
         self.persist();
     }
 
+    /// 重命名监控目录:磁盘改名 + 更新配置中的路径 + 停掉旧监听。
+    /// 返回新路径(调用方负责对新路径重建监听)。
+    pub fn rename_dir(&self, old: &str, new_name: &str) -> anyhow::Result<String> {
+        let src = Path::new(old);
+        if !src.is_dir() {
+            anyhow::bail!("目录不存在: {old}");
+        }
+        let name = new_name.trim();
+        if name.is_empty() {
+            anyhow::bail!("名称不能为空");
+        }
+        if name.contains('/') || name.contains('\\') {
+            anyhow::bail!("名称不能包含路径分隔符");
+        }
+        let parent = src.parent().ok_or_else(|| anyhow::anyhow!("无法确定父目录"))?;
+        let dst = parent.join(name);
+        if dst.exists() {
+            anyhow::bail!("已存在同名目录: {name}");
+        }
+        std::fs::rename(src, &dst)?;
+        let dst_str = dst.to_string_lossy().into_owned();
+        {
+            let mut cfg = self.config.lock().unwrap();
+            for d in cfg.dirs.iter_mut() {
+                if d == old {
+                    *d = dst_str.clone();
+                }
+            }
+        }
+        self.watchers.lock().unwrap().remove(old);
+        self.persist();
+        Ok(dst_str)
+    }
+
     pub fn set_filter(&self, suffixes: Vec<String>, show_all: bool) {
         {
             let mut cfg = self.config.lock().unwrap();

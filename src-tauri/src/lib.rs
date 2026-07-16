@@ -131,6 +131,75 @@ fn delete_file(path: String) -> Result<(), String> {
     trash::delete(&p).map_err(|e| e.to_string())
 }
 
+/// 在系统文件管理器中打开/定位路径(资源管理器 / Finder / 文件管理器)。
+#[tauri::command]
+fn open_path(path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Err("路径不存在".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // 目录直接打开,文件则在资源管理器中定位并选中
+        let mut cmd = std::process::Command::new("explorer");
+        if p.is_dir() {
+            cmd.arg(&p);
+        } else {
+            cmd.arg("/select,").arg(&p);
+        }
+        cmd.spawn().map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("open");
+        if p.is_file() {
+            cmd.arg("-R");
+        }
+        cmd.arg(&p).spawn().map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let target = if p.is_file() {
+            p.parent().unwrap_or(&p).to_path_buf()
+        } else {
+            p.clone()
+        };
+        std::process::Command::new("xdg-open")
+            .arg(target)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 重命名监控目录:磁盘改名 + 更新配置,并对新路径重建监听。
+#[tauri::command]
+fn rename_watch_dir(
+    state: State<AppState>,
+    app: tauri::AppHandle,
+    path: String,
+    new_name: String,
+) -> Result<String, String> {
+    let new_path = state
+        .watch
+        .rename_dir(&path, &new_name)
+        .map_err(|e| e.to_string())?;
+    spawn_watch(&state.watch, &app, &new_path);
+    Ok(new_path)
+}
+
+/// 删除监控目录:整个文件夹移入回收站,并从配置中移除监控。
+#[tauri::command]
+fn delete_watch_dir(state: State<AppState>, path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Err("目录不存在".into());
+    }
+    trash::delete(&p).map_err(|e| e.to_string())?;
+    state.watch.remove_dir(&path);
+    Ok(())
+}
+
 #[tauri::command]
 fn list_archive_entries(path: String) -> Result<Vec<ArchiveEntry>, String> {
     let mut reader = open_archive(&PathBuf::from(&path)).map_err(|e| e.to_string())?;
@@ -238,6 +307,9 @@ pub fn run() {
             set_filter,
             rename_file,
             delete_file,
+            open_path,
+            rename_watch_dir,
+            delete_watch_dir,
             list_archive_entries,
             open_log_session,
             read_lines,

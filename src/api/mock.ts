@@ -235,6 +235,17 @@ export const mockApi = {
 
   async deleteFile(_path: string): Promise<void> {},
 
+  async openPath(_path: string): Promise<void> {
+    alert('浏览器 mock 模式下无法打开文件管理器;在 Tauri 桌面应用中可用。');
+  },
+
+  async renameWatchDir(path: string, newName: string): Promise<string> {
+    const parent = path.replace(/[/\\][^/\\]*$/, '');
+    return `${parent}/${newName}`;
+  },
+
+  async deleteWatchDir(_path: string): Promise<void> {},
+
   async setFilter(_suffixes: string[], _showAll: boolean): Promise<void> {},
 
   subscribeNewLogs(_onDetect: (item: NewLogItem) => void): () => void {

@@ -19,10 +19,16 @@ interface Props {
   onSelectArchive: (name: string, unreadId?: string) => void;
   onOpenFile: (name: string, unreadId?: string) => void;
   onAddDir: () => void;
-  /** 重命名磁盘文件(同目录);成功后应触发刷新 */
-  onRename: (path: string, newName: string) => Promise<void>;
+  /** 重命名文件/目录;node.kind 决定走文件还是监控目录的重命名 */
+  onRename: (node: TreeNode, newName: string) => Promise<void>;
   /** 删除文件(移入回收站);由上层弹确认并刷新 */
   onDelete: (node: TreeNode) => void;
+  /** 在系统文件管理器中打开 */
+  onOpenPath: (node: TreeNode) => void;
+  /** 移除监控(不删磁盘) */
+  onRemoveWatch: (node: TreeNode) => void;
+  /** 删除监控目录(整个文件夹移入回收站) */
+  onDeleteDir: (node: TreeNode) => void;
 }
 
 // 让深层 TreeItem 能触发右键菜单与重命名,而无需逐层透传
@@ -62,7 +68,7 @@ export function DirTree(props: Props) {
     commitRename: (node, name) => {
       setRenamingId(null);
       const trimmed = name.trim();
-      if (trimmed && trimmed !== node.name) void props.onRename(node.path ?? node.id, trimmed);
+      if (trimmed && trimmed !== node.name) void props.onRename(node, trimmed);
     },
     cancelRename: () => setRenamingId(null),
   };
@@ -93,10 +99,20 @@ export function DirTree(props: Props) {
           x={menu.x}
           y={menu.y}
           onClose={() => setMenu(null)}
-          items={[
-            { label: '重命名', onClick: () => ctx.startRename(menu.node) },
-            { label: '删除', danger: true, onClick: () => props.onDelete(menu.node) },
-          ]}
+          items={
+            menu.node.kind === 'dir'
+              ? [
+                  { label: '在资源管理器中打开', onClick: () => props.onOpenPath(menu.node) },
+                  { label: '重命名', onClick: () => ctx.startRename(menu.node) },
+                  { label: '移除监控(不删除文件)', onClick: () => props.onRemoveWatch(menu.node) },
+                  { label: '删除目录', danger: true, onClick: () => props.onDeleteDir(menu.node) },
+                ]
+              : [
+                  { label: '在资源管理器中打开', onClick: () => props.onOpenPath(menu.node) },
+                  { label: '重命名', onClick: () => ctx.startRename(menu.node) },
+                  { label: '删除', danger: true, onClick: () => props.onDelete(menu.node) },
+                ]
+          }
         />
       )}
     </div>
@@ -154,10 +170,11 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
           className={'tree-node' + (dirHasNew ? ' new-dir' : '')}
           style={pad}
           onClick={() => setOpen((v) => !v)}
+          onContextMenu={(e) => tree?.openMenu(e, node)}
         >
           <span className="twisty">{open ? '▾' : '▸'}</span>
           <span className="ico">📁</span>
-          <span className="label">{node.name}</span>
+          {renderLabel()}
         </div>
         {open &&
           node.children?.map((c) => <TreeItem key={c.id} {...props} node={c} depth={depth + 1} />)}

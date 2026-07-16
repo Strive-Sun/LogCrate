@@ -130,6 +130,21 @@ export const tauriApi = {
     await invoke('delete_file', { path });
   },
 
+  /** 在系统文件管理器中打开/定位路径 */
+  async openPath(path: string): Promise<void> {
+    await invoke('open_path', { path });
+  },
+
+  /** 重命名监控目录(磁盘 + 配置);返回新路径 */
+  async renameWatchDir(path: string, newName: string): Promise<string> {
+    return invoke<string>('rename_watch_dir', { path, newName });
+  },
+
+  /** 删除监控目录到回收站并移除监控 */
+  async deleteWatchDir(path: string): Promise<void> {
+    await invoke('delete_watch_dir', { path });
+  },
+
   async setFilter(suffixes: string[], showAll: boolean): Promise<void> {
     await invoke('set_filter', { suffixes, showAll });
   },

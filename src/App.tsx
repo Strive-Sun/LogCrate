@@ -125,13 +125,59 @@ export function App() {
     });
   }, []);
 
-  const renameFile = useCallback(
-    async (path: string, newName: string) => {
+  const renameNode = useCallback(
+    async (node: TreeNode, newName: string) => {
+      const path = node.path ?? node.id;
       try {
-        await api.renameFile(path, newName);
+        if (node.kind === 'dir') await api.renameWatchDir(path, newName);
+        else await api.renameFile(path, newName);
         refreshTree();
       } catch (e) {
         alert('重命名失败:' + String(e));
+      }
+    },
+    [refreshTree],
+  );
+
+  const openPath = useCallback(async (node: TreeNode) => {
+    try {
+      await api.openPath(node.path ?? node.id);
+    } catch (e) {
+      alert('打开失败:' + String(e));
+    }
+  }, []);
+
+  const removeWatch = useCallback(
+    async (node: TreeNode) => {
+      const path = node.path ?? node.id;
+      if (!window.confirm(`不再监控「${node.name}」?\n仅从列表移除,磁盘上的文件不会被删除。`)) return;
+      try {
+        await api.removeWatchDir(path);
+        refreshTree();
+      } catch (e) {
+        alert('移除失败:' + String(e));
+      }
+    },
+    [refreshTree],
+  );
+
+  const deleteDir = useCallback(
+    async (node: TreeNode) => {
+      const path = node.path ?? node.id;
+      if (
+        !window.confirm(
+          `确定删除整个目录「${node.name}」吗?\n目录及其全部内容将被移到系统回收站,并停止监控。`,
+        )
+      )
+        return;
+      try {
+        await api.deleteWatchDir(path);
+        setActiveKey(null);
+        setSession(null);
+        setSelectedArchive(null);
+        refreshTree();
+      } catch (e) {
+        alert('删除失败:' + String(e));
       }
     },
     [refreshTree],
@@ -203,8 +249,11 @@ export function App() {
             if (id) markSeen(id);
           }}
           onOpenFile={(name, id) => openEntry(name, id)}
-          onRename={renameFile}
+          onRename={renameNode}
           onDelete={deleteFile}
+          onOpenPath={openPath}
+          onRemoveWatch={removeWatch}
+          onDeleteDir={deleteDir}
         />
         <div className="col-resizer" onMouseDown={startResize} />
 
