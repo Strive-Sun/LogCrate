@@ -10,7 +10,8 @@ export function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [newItems, setNewItems] = useState<NewLogItem[]>([]);
-  const [count, setCount] = useState(0);
+  // 徽章数字直接由未读列表长度派生,保证徽章与列表始终一致
+  const count = newItems.length;
   const seen = useRef<Set<string>>(new Set());
 
   // 当前选中的压缩包(用于左侧树高亮)与当前查看的条目 key
@@ -60,14 +61,12 @@ export function App() {
 
   useEffect(() => {
     refreshTree();
-    api.newLogItems().then((items) => {
-      setNewItems(items);
-      setCount(items.length);
-    });
+    api.newLogItems().then(setNewItems);
     // 订阅后端到达事件
     const unsub = api.subscribeNewLogs((item) => {
+      // 已读过的项不再加回;同一 id 只保留一条,避免重复事件导致计数虚高
+      if (seen.current.has(item.id)) return;
       setNewItems((prev) => (prev.some((p) => p.id === item.id) ? prev : [item, ...prev]));
-      if (!seen.current.has(item.id)) setCount((c) => c + 1);
       refreshTree();
     });
     return unsub;
@@ -89,9 +88,7 @@ export function App() {
   );
 
   const markSeen = useCallback((id: string) => {
-    if (seen.current.has(id)) return;
     seen.current.add(id);
-    setCount((c) => Math.max(0, c - 1));
     setNewItems((items) => items.filter((it) => it.id !== id));
   }, []);
 
@@ -112,8 +109,11 @@ export function App() {
   );
 
   const markAllRead = useCallback(() => {
-    setCount(0);
-    setNewItems([]);
+    // 记住已读,避免重复事件把它们重新加回列表
+    setNewItems((items) => {
+      items.forEach((it) => seen.current.add(it.id));
+      return [];
+    });
   }, []);
 
   const hasDirs = tree.length > 0;
