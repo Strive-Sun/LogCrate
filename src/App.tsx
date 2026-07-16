@@ -22,6 +22,34 @@ export function App() {
   const [filter, setFilter] = useState<string[]>(['.log', '.txt', '.out']);
   const [showAll, setShowAll] = useState(false);
 
+  // 左栏宽度(可拖动调整),持久化到 localStorage
+  const [treeWidth, setTreeWidth] = useState<number>(() => {
+    const saved = Number(localStorage.getItem('logpeek.treeWidth'));
+    return saved >= 160 && saved <= 720 ? saved : 300;
+  });
+
+  const startResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = treeWidth;
+    const onMove = (ev: MouseEvent) => {
+      const w = Math.min(720, Math.max(160, startW + ev.clientX - startX));
+      setTreeWidth(w);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('resizing');
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    document.body.classList.add('resizing');
+  }, [treeWidth]);
+
+  useEffect(() => {
+    localStorage.setItem('logpeek.treeWidth', String(treeWidth));
+  }, [treeWidth]);
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
@@ -124,6 +152,7 @@ export function App() {
           nodes={tree}
           activeKey={activeKey}
           selectedArchive={selectedArchive}
+          width={treeWidth}
           passesFilter={passesFilter}
           onAddDir={addDir}
           onSelectArchive={(name, id) => {
@@ -132,7 +161,7 @@ export function App() {
           }}
           onOpenFile={(name, id) => openEntry(name, id)}
         />
-        <div className="col-resizer" />
+        <div className="col-resizer" onMouseDown={startResize} />
 
         {hasDirs ? (
           <LogContent session={session} activeKey={activeKey} />

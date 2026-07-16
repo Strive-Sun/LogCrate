@@ -7,6 +7,7 @@ interface Props {
   nodes: TreeNode[];
   activeKey: string | null;
   selectedArchive: string | null;
+  width?: number;
   passesFilter: (n: { name: string; kind: string; isLog?: boolean }) => boolean;
   onSelectArchive: (name: string, unreadId?: string) => void;
   onOpenFile: (name: string, unreadId?: string) => void;
@@ -15,7 +16,7 @@ interface Props {
 
 export function DirTree(props: Props) {
   return (
-    <div className="col col-tree">
+    <div className="col col-tree" style={props.width ? { width: props.width } : undefined}>
       <div className="col-head">监控目录</div>
       <div className="col-body">
         {props.nodes.map((n) => (
