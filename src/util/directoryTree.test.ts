@@ -3,7 +3,10 @@ import { describe, it } from 'node:test';
 import type { DirectoryChangeBatch, TreeNode } from '../api/types';
 import {
   applyDirectoryChanges,
+  findTreeNode,
+  isPathInsideDirectory,
   passesDirectoryFilter,
+  revealDirectoryChain,
   removedDirectoryNodes,
 } from './directoryTree';
 
@@ -21,6 +24,7 @@ const base: TreeNode[] = [
     path: 'C:\\logs',
     name: 'logs',
     kind: 'dir',
+    watchRoot: true,
     children: [file('C:\\logs\\b.log', 'b.log')],
   },
   { id: 'C:\\other', path: 'C:\\other', name: 'other', kind: 'dir', children: [] },
@@ -121,5 +125,57 @@ describe('目录树增量同步', () => {
       ['folder', 'a.log'],
     );
     assert.equal(next[0].children?.[0].children?.[0].name, 'kept.log');
+  });
+
+  it('为直属和深层通知计算逐层加载链', () => {
+    assert.deepEqual(revealDirectoryChain(base, 'C:\\logs\\direct.zip'), ['C:\\logs']);
+    assert.deepEqual(revealDirectoryChain(base, 'C:\\logs\\a\\b\\deep.zip'), [
+      'C:\\logs',
+      'C:\\logs\\a',
+      'C:\\logs\\a\\b',
+    ]);
+  });
+
+  it('重叠根选择最具体目录，并兼容 Windows 混合分隔符和大小写', () => {
+    const tree: TreeNode[] = [
+      { ...base[0], watchRoot: true },
+      {
+        id: 'C:\\logs\\nested',
+        path: 'C:\\logs\\nested',
+        name: 'nested',
+        kind: 'dir',
+        watchRoot: true,
+      },
+    ];
+    assert.deepEqual(revealDirectoryChain(tree, 'c:/LOGS/NESTED/day/result.zip'), [
+      'C:\\logs\\nested',
+      'C:\\logs\\nested\\day',
+    ]);
+  });
+
+  it('支持 macOS 路径并拒绝监控根之外的目标', () => {
+    const tree: TreeNode[] = [
+      {
+        id: '/Users/test/logs',
+        path: '/Users/test/logs',
+        name: 'logs',
+        kind: 'dir',
+        watchRoot: true,
+      },
+    ];
+    assert.deepEqual(revealDirectoryChain(tree, '/Users/test/logs/day/result.log'), [
+      '/Users/test/logs',
+      '/Users/test/logs/day',
+    ]);
+    assert.deepEqual(revealDirectoryChain(tree, '/Users/test/other/result.log'), []);
+    assert.equal(findTreeNode(base, 'C:\\logs\\b.log')?.name, 'b.log');
+  });
+
+  it('按路径边界判断折叠目录是否包含未读文件', () => {
+    assert.equal(isPathInsideDirectory('d:/LOGS/day/new.zip', 'D:\\logs'), true);
+    assert.equal(isPathInsideDirectory('D:\\logs-other\\new.zip', 'D:\\logs'), false);
+    assert.equal(isPathInsideDirectory('D:\\logs', 'D:\\logs'), false);
+    assert.equal(isPathInsideDirectory('/Users/test/logs/day/new.log', '/Users/test/logs'), true);
+    assert.equal(isPathInsideDirectory('/Users/test/Logs/day/new.log', '/Users/test/logs'), false);
   });
 });

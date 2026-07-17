@@ -1,7 +1,8 @@
-import { createContext, useContext, useState } from 'react';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import type { ArchiveEntry, TreeNode } from '../api';
 import { fmtSize } from '../util/format';
+import { isPathInsideDirectory, sameFilePath } from '../util/directoryTree';
 import { SuffixFilter } from './SuffixFilter';
 import { ContextMenu } from './ContextMenu';
 
@@ -9,6 +10,9 @@ interface Props {
   nodes: TreeNode[];
   activeKey: string | null;
   selectedArchive: string | null;
+  revealPath: string | null;
+  revealDirectories: readonly string[];
+  onRevealComplete: () => void;
   width?: number;
   unreadIds: Set<string>;
   filter: string[];
@@ -52,6 +56,12 @@ function isUnread(node: TreeNode, unreadIds: Set<string>): boolean {
 
 /** 递归判断:目录(或其子孙)是否含未读的新到达项 */
 function hasUnreadDescendant(node: TreeNode, unreadIds: Set<string>): boolean {
+  if (node.kind === 'dir') {
+    const directory = node.path ?? node.id;
+    for (const unreadId of unreadIds) {
+      if (isPathInsideDirectory(unreadId, directory)) return true;
+    }
+  }
   return !!node.children?.some((c) => isUnread(c, unreadIds) || hasUnreadDescendant(c, unreadIds));
 }
 
@@ -125,12 +135,32 @@ export function DirTree(props: Props) {
 
 function TreeItem(props: Props & { node: TreeNode; depth: number }) {
   const { node, depth } = props;
+  const { onRevealComplete, revealDirectories, revealPath } = props;
   const tree = useContext(TreeContext);
   const [open, setOpen] = useState(node.watchRoot === true);
   // 压缩包展开时惰性拉取的子条目
   const [entries, setEntries] = useState<ArchiveEntry[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(false);
+  const rowRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (
+      node.kind === 'dir' &&
+      revealDirectories.some((path) => sameFilePath(path, node.path ?? node.id))
+    ) {
+      setOpen(true);
+    }
+  }, [node.id, node.kind, node.path, revealDirectories]);
+
+  useEffect(() => {
+    if (!revealPath || !sameFilePath(revealPath, node.path ?? node.id)) return;
+    const frame = requestAnimationFrame(() => {
+      rowRef.current?.scrollIntoView({ block: 'nearest' });
+      onRevealComplete();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [node.id, node.path, onRevealComplete, revealPath]);
 
   const pad = { paddingLeft: 10 + depth * 14 };
 
@@ -190,6 +220,7 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
     return (
       <div>
         <div
+          ref={rowRef}
           className={'tree-node' + (dirHasNew ? ' new-dir' : '')}
           style={pad}
           onClick={() => void toggleDirectory()}
@@ -227,6 +258,7 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
     return (
       <div>
         <div
+          ref={rowRef}
           className={
             'tree-node' +
             (props.selectedArchive === node.id ? ' selected' : '') +
@@ -276,6 +308,7 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
   // 裸文本文件:叶子节点
   return (
     <div
+      ref={rowRef}
       className={
         'tree-node' + (props.activeKey === node.id ? ' selected' : '') + (unread ? ' new-file' : '')
       }

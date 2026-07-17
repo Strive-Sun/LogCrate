@@ -415,14 +415,18 @@ fn spawn_watch(watch: &Arc<WatchState>, app: &tauri::AppHandle, dir: &str) -> Re
             move |item: DetectedItem| {
                 // 稳定检测可能补全未知后缀文本文件的分类，先更新目录库存。
                 if let Some(parent) = PathBuf::from(&item.path).parent() {
-                    let batch = DirectoryChangeBatch {
-                        watch_dir: parent.to_string_lossy().into_owned(),
-                        changes: vec![DirectoryChange::Upsert { node: item.clone() }],
-                    };
-                    let _ = app2.emit("directory-changed", batch);
+                    if watch2.is_structure_watched(parent) {
+                        let batch = DirectoryChangeBatch {
+                            watch_dir: parent.to_string_lossy().into_owned(),
+                            changes: vec![DirectoryChange::Upsert { node: item.clone() }],
+                        };
+                        let _ = app2.emit("directory-changed", batch);
+                    }
                 }
                 // 应用用户配置的后缀筛选:不匹配的新文件不计入通知
-                if watch2.should_notify(&item) {
+                if watch2.is_watched_path(PathBuf::from(&item.path).as_path())
+                    && watch2.should_notify(&item)
+                {
                     let _ = app2.emit("new-archive-detected", &item);
                 }
             },

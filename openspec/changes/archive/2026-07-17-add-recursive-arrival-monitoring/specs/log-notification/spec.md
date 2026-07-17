@@ -1,8 +1,5 @@
-# log-notification Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change add-zip-log-monitoring. Update Purpose after archive.
-## Requirements
 ### Requirement: 新日志顶栏提示
 系统 SHALL 在任一监控根目录或其任意深度子目录中出现新日志压缩包时，通过顶栏提示用户，并显示待查看的新日志包计数。目录树节点是否已展开不得影响通知检测。
 
@@ -44,37 +41,3 @@ TBD - created by archiving change add-zip-log-monitoring. Update Purpose after a
 #### Scenario: 通知路径已失效
 - **WHEN** 用户点击通知时目标文件已被移动、删除或无法读取
 - **THEN** 系统移除该失效通知并提示无法定位，不保留指向不存在节点的选中状态
-
-### Requirement: 计数逐条递减
-系统 SHALL 在用户打开查看某个新日志包后,将新日志包计数减一,以反映尚未查看的新日志数量。
-
-#### Scenario: 查看一个新日志包后递减
-- **WHEN** 用户打开并查看某个尚未查看的新日志包
-- **THEN** 新日志包计数减一
-
-#### Scenario: 逐个查看至归零
-- **WHEN** 用户依次查看完所有新日志包
-- **THEN** 新日志包计数归零,顶栏提示消失
-
-#### Scenario: 重复查看不重复递减
-- **WHEN** 用户再次打开一个已查看过的日志包
-- **THEN** 计数不再减少
-
-### Requirement: 一键标记已读
-系统 SHALL 提供"全部标记已读"操作,允许用户一次性将新日志包计数清零。
-
-#### Scenario: 一键清零
-- **WHEN** 用户触发"全部标记已读"操作
-- **THEN** 新日志包计数清零,顶栏提示消失,且不改变各日志包在磁盘上的存在状态
-
-### Requirement: 通知列表随文件变更更新
-系统 SHALL 在被监控的日志包文件被删除或替换时,相应更新通知列表与计数,避免列表指向已不存在或已改变的文件。
-
-#### Scenario: 未查看的日志包被删除
-- **WHEN** 一个已计入通知但尚未查看的日志包在磁盘上被删除
-- **THEN** 系统从通知列表中移除该项,并将新日志包计数相应减一
-
-#### Scenario: 同名日志包被覆盖
-- **WHEN** 一个已存在的日志包被同名新文件覆盖,且新文件通过到达完整性检测
-- **THEN** 系统将其视为新到达的日志包,更新该项并重新计入未查看计数
-

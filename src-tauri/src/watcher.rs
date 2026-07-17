@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 const EVENT_BATCH_WINDOW: Duration = Duration::from_millis(200);
 const RAW_EVENT_CAPACITY: usize = 1024;
 const STABLE_QUEUE_CAPACITY: usize = 256;
+const ARRIVAL_OVERFLOW_CAPACITY: usize = 4096;
+const STABLE_WORKER_COUNT: usize = 2;
 
 /// 检测到的新日志(通知前端)
 #[derive(Debug, Clone, Serialize)]
@@ -83,8 +85,10 @@ fn default_suffixes() -> Vec<String> {
 
 pub struct WatchState {
     config_path: PathBuf,
-    pub config: Mutex<WatchConfig>,
+    pub config: Arc<Mutex<WatchConfig>>,
     watchers: Mutex<HashMap<String, WatchRegistration>>,
+    arrival_watchers: Mutex<HashMap<String, WatchRegistration>>,
+    stable_scheduler: Mutex<Option<Arc<StableScheduler>>>,
 }
 
 struct WatchRegistration {
@@ -100,23 +104,39 @@ impl Drop for WatchRegistration {
 
 type DetectCallback = Arc<dyn Fn(DetectedItem) + Send + Sync>;
 
+#[derive(Clone)]
+struct PendingStable {
+    generation: u64,
+    source: String,
+}
+
 struct StableScheduler {
     tx: SyncSender<PathBuf>,
-    generations: Arc<Mutex<HashMap<PathBuf, u64>>>,
+    generations: Arc<Mutex<HashMap<PathBuf, PendingStable>>>,
     queued: Arc<Mutex<HashSet<PathBuf>>>,
     next_generation: AtomicU64,
 }
 
 impl StableScheduler {
-    fn new(source: String, on_detect: DetectCallback) -> Self {
+    fn new(on_detect: DetectCallback) -> Self {
         let (tx, rx) = sync_channel(STABLE_QUEUE_CAPACITY);
+        let rx = Arc::new(Mutex::new(rx));
         let generations = Arc::new(Mutex::new(HashMap::new()));
         let queued = Arc::new(Mutex::new(HashSet::new()));
-        let worker_generations = generations.clone();
-        let worker_queued = queued.clone();
-        std::thread::spawn(move || {
-            stable_worker(rx, source, on_detect, worker_generations, worker_queued);
-        });
+        for _ in 0..STABLE_WORKER_COUNT {
+            let worker_rx = rx.clone();
+            let worker_generations = generations.clone();
+            let worker_queued = queued.clone();
+            let worker_on_detect = on_detect.clone();
+            std::thread::spawn(move || {
+                stable_worker(
+                    worker_rx,
+                    worker_on_detect,
+                    worker_generations,
+                    worker_queued,
+                );
+            });
+        }
         Self {
             tx,
             generations,
@@ -125,12 +145,12 @@ impl StableScheduler {
         }
     }
 
-    fn schedule(&self, path: PathBuf) -> bool {
+    fn schedule(&self, path: PathBuf, source: String) -> bool {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         self.generations
             .lock()
             .unwrap()
-            .insert(path.clone(), generation);
+            .insert(path.clone(), PendingStable { generation, source });
         let should_send = self.queued.lock().unwrap().insert(path.clone());
         if !should_send {
             return true;
@@ -147,27 +167,356 @@ impl StableScheduler {
 
     fn cancel(&self, path: &Path) {
         self.generations.lock().unwrap().remove(path);
-        self.queued.lock().unwrap().remove(path);
+    }
+
+    fn cancel_uncovered(&self, roots: &[PathBuf]) {
+        self.generations
+            .lock()
+            .unwrap()
+            .retain(|path, _| roots.iter().any(|root| path_is_within(path, root)));
     }
 }
 
+#[cfg(windows)]
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    let path = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+        .collect::<Vec<_>>();
+    let root = root
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+        .collect::<Vec<_>>();
+    path.starts_with(&root)
+}
+
+#[cfg(not(windows))]
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    path.starts_with(root)
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn minimal_coverage_roots(dirs: &[String]) -> Vec<PathBuf> {
+    let mut candidates = dirs
+        .iter()
+        .map(|dir| {
+            let original = PathBuf::from(dir);
+            let comparable = canonical_or_original(&original);
+            (original, comparable)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(_, comparable)| comparable.components().count());
+
+    let mut selected = Vec::<(PathBuf, PathBuf)>::new();
+    for (original, comparable) in candidates {
+        if selected
+            .iter()
+            .any(|(_, root)| path_is_within(&comparable, root))
+        {
+            continue;
+        }
+        selected.push((original, comparable));
+    }
+    selected.into_iter().map(|(original, _)| original).collect()
+}
+
+fn source_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_else(|| path.to_str().unwrap_or("LogPeek"))
+        .to_string()
+}
+
+fn source_for_path(config: &WatchConfig, path: &Path, fallback: &Path) -> String {
+    config
+        .dirs
+        .iter()
+        .map(PathBuf::from)
+        .filter(|root| path_is_within(path, root))
+        .max_by_key(|root| root.components().count())
+        .as_deref()
+        .map(source_label)
+        .unwrap_or_else(|| source_label(fallback))
+}
+
+fn is_arrival_candidate(config: &WatchConfig, path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    if config.show_all {
+        return true;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let lower = name.to_lowercase();
+    lower.ends_with(".zip")
+        || config
+            .suffixes
+            .iter()
+            .any(|suffix| lower.ends_with(&suffix.to_lowercase()))
+}
+
+fn normalize_descendant_path(root: &Path, path: &Path) -> Option<PathBuf> {
+    if path_is_within(path, root) {
+        return Some(path.to_path_buf());
+    }
+
+    let canonical_root = std::fs::canonicalize(root).ok()?;
+    let canonical_path = if path.exists() {
+        std::fs::canonicalize(path).ok()?
+    } else {
+        let parent = std::fs::canonicalize(path.parent()?).ok()?;
+        parent.join(path.file_name()?)
+    };
+    let relative = canonical_path.strip_prefix(canonical_root).ok()?;
+    Some(root.join(relative))
+}
+
+struct ArrivalEvents {
+    schedule: Vec<PathBuf>,
+    cancel: Vec<PathBuf>,
+    degraded: bool,
+}
+
+fn add_arrival_schedule(
+    schedule: &mut BTreeMap<String, PathBuf>,
+    cancel: &mut BTreeMap<String, PathBuf>,
+    path: PathBuf,
+) {
+    let key = path.to_string_lossy().into_owned();
+    cancel.remove(&key);
+    schedule.insert(key, path);
+}
+
+fn add_arrival_cancel(
+    schedule: &mut BTreeMap<String, PathBuf>,
+    cancel: &mut BTreeMap<String, PathBuf>,
+    path: PathBuf,
+) {
+    let key = path.to_string_lossy().into_owned();
+    schedule.remove(&key);
+    cancel.insert(key, path);
+}
+
+fn normalize_arrival_events(root: &Path, events: Vec<Event>) -> ArrivalEvents {
+    let mut schedule = BTreeMap::<String, PathBuf>::new();
+    let mut cancel = BTreeMap::<String, PathBuf>::new();
+    let mut degraded = false;
+
+    for event in events {
+        degraded |= event.need_rescan();
+        match event.kind {
+            EventKind::Access(_) => {}
+            EventKind::Create(_) | EventKind::Modify(ModifyKind::Data(_)) => {
+                for path in event.paths {
+                    if let Some(path) = normalize_descendant_path(root, &path) {
+                        add_arrival_schedule(&mut schedule, &mut cancel, path);
+                    }
+                }
+            }
+            EventKind::Remove(_) => {
+                for path in event.paths {
+                    if let Some(path) = normalize_descendant_path(root, &path) {
+                        add_arrival_cancel(&mut schedule, &mut cancel, path);
+                    }
+                }
+            }
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
+                if event.paths.len() != 2 {
+                    degraded = true;
+                    continue;
+                }
+                if let Some(path) = normalize_descendant_path(root, &event.paths[0]) {
+                    add_arrival_cancel(&mut schedule, &mut cancel, path);
+                }
+                if let Some(path) = normalize_descendant_path(root, &event.paths[1]) {
+                    add_arrival_schedule(&mut schedule, &mut cancel, path);
+                }
+            }
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+                for path in event.paths {
+                    if let Some(path) = normalize_descendant_path(root, &path) {
+                        add_arrival_cancel(&mut schedule, &mut cancel, path);
+                    }
+                }
+            }
+            EventKind::Modify(ModifyKind::Name(_)) | EventKind::Modify(_) => {
+                for path in event.paths {
+                    if let Some(path) = normalize_descendant_path(root, &path) {
+                        if path.exists() {
+                            add_arrival_schedule(&mut schedule, &mut cancel, path);
+                        } else {
+                            add_arrival_cancel(&mut schedule, &mut cancel, path);
+                        }
+                    }
+                }
+            }
+            EventKind::Any | EventKind::Other => {
+                degraded = true;
+                for path in event.paths {
+                    if let Some(path) = normalize_descendant_path(root, &path) {
+                        if path.exists() {
+                            add_arrival_schedule(&mut schedule, &mut cancel, path);
+                        } else {
+                            add_arrival_cancel(&mut schedule, &mut cancel, path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    ArrivalEvents {
+        schedule: schedule.into_values().collect(),
+        cancel: cancel.into_values().collect(),
+        degraded,
+    }
+}
+
+fn build_arrival_watcher(
+    root: &Path,
+    config: Arc<Mutex<WatchConfig>>,
+    scheduler: Arc<StableScheduler>,
+) -> anyhow::Result<WatchRegistration> {
+    let (tx, rx) = sync_channel(RAW_EVENT_CAPACITY);
+    let overflow_paths = Arc::new(Mutex::new(HashSet::<PathBuf>::new()));
+    let callback_overflow_paths = overflow_paths.clone();
+    let degraded = Arc::new(AtomicBool::new(false));
+    let callback_degraded = degraded.clone();
+    let active = Arc::new(AtomicBool::new(true));
+    let callback_active = active.clone();
+
+    let mut watcher: RecommendedWatcher =
+        notify::recommended_watcher(move |result: notify::Result<Event>| {
+            if !callback_active.load(Ordering::Acquire) {
+                return;
+            }
+            match tx.try_send(result) {
+                Ok(()) => {}
+                Err(TrySendError::Full(result)) => match result {
+                    Ok(event) => {
+                        let mut paths = callback_overflow_paths.lock().unwrap();
+                        for path in event.paths {
+                            if paths.len() >= ARRIVAL_OVERFLOW_CAPACITY {
+                                callback_degraded.store(true, Ordering::Release);
+                                break;
+                            }
+                            paths.insert(path);
+                        }
+                    }
+                    Err(_) => callback_degraded.store(true, Ordering::Release),
+                },
+                Err(TrySendError::Disconnected(_)) => {}
+            }
+        })?;
+    watcher.watch(root, RecursiveMode::Recursive)?;
+
+    let watch_root = root.to_path_buf();
+    let worker_root = watch_root.clone();
+    let worker_active = active.clone();
+    std::thread::spawn(move || {
+        while let Ok(first) = rx.recv() {
+            if !worker_active.load(Ordering::Acquire) {
+                break;
+            }
+            let deadline = Instant::now() + EVENT_BATCH_WINDOW;
+            let mut events = Vec::new();
+            let mut batch_degraded = degraded.swap(false, Ordering::AcqRel);
+            match first {
+                Ok(event) => events.push(event),
+                Err(_) => batch_degraded = true,
+            }
+            loop {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                match rx.recv_timeout(deadline - now) {
+                    Ok(Ok(event)) => events.push(event),
+                    Ok(Err(_)) => batch_degraded = true,
+                    Err(_) => break,
+                }
+            }
+
+            let mut normalized = normalize_arrival_events(&worker_root, events);
+            batch_degraded |= normalized.degraded;
+            let overflow = {
+                let mut paths = overflow_paths.lock().unwrap();
+                std::mem::take(&mut *paths)
+            };
+            for raw_path in overflow {
+                let Some(path) = normalize_descendant_path(&worker_root, &raw_path) else {
+                    continue;
+                };
+                if path.exists() {
+                    normalized.schedule.push(path);
+                } else {
+                    normalized.cancel.push(path);
+                }
+            }
+
+            for path in normalized.cancel {
+                scheduler.cancel(&path);
+            }
+            let config_snapshot = config.lock().unwrap().clone();
+            let mut scheduled = HashSet::new();
+            for path in normalized.schedule {
+                if !scheduled.insert(path.clone()) || !is_arrival_candidate(&config_snapshot, &path)
+                {
+                    continue;
+                }
+                let source = source_for_path(&config_snapshot, &path, &worker_root);
+                if !scheduler.schedule(path, source) {
+                    batch_degraded = true;
+                }
+            }
+
+            if batch_degraded {
+                eprintln!(
+                    "recursive arrival watcher degraded for {}; bounded queues prevented a full-root rescan",
+                    worker_root.display()
+                );
+            }
+            if !worker_active.load(Ordering::Acquire) {
+                break;
+            }
+        }
+    });
+
+    Ok(WatchRegistration {
+        _watcher: watcher,
+        active,
+    })
+}
+
 fn stable_worker(
-    rx: Receiver<PathBuf>,
-    source: String,
+    rx: Arc<Mutex<Receiver<PathBuf>>>,
     on_detect: DetectCallback,
-    generations: Arc<Mutex<HashMap<PathBuf, u64>>>,
+    generations: Arc<Mutex<HashMap<PathBuf, PendingStable>>>,
     queued: Arc<Mutex<HashSet<PathBuf>>>,
 ) {
-    while let Ok(path) = rx.recv() {
+    loop {
+        let candidate = {
+            let receiver = rx.lock().unwrap();
+            receiver.recv()
+        };
+        let Ok(candidate) = candidate else {
+            break;
+        };
+        let path = candidate;
         loop {
-            let generation = generations.lock().unwrap().get(&path).copied();
-            let Some(generation) = generation else {
+            let pending = generations.lock().unwrap().get(&path).cloned();
+            let Some(pending) = pending else {
                 queued.lock().unwrap().remove(&path);
                 break;
             };
-            let item = stable_detect(&path, &source);
-            let latest = generations.lock().unwrap().get(&path).copied();
-            if latest != Some(generation) {
+            let item = stable_detect(&path, &pending.source);
+            let latest = generations.lock().unwrap().get(&path).cloned();
+            if latest.as_ref().map(|state| state.generation) != Some(pending.generation) {
                 if latest.is_none() {
                     queued.lock().unwrap().remove(&path);
                     break;
@@ -189,13 +538,59 @@ impl WatchState {
         let config = load_config(&config_path).unwrap_or_default();
         Arc::new(Self {
             config_path,
-            config: Mutex::new(config),
+            config: Arc::new(Mutex::new(config)),
             watchers: Mutex::new(HashMap::new()),
+            arrival_watchers: Mutex::new(HashMap::new()),
+            stable_scheduler: Mutex::new(None),
         })
     }
 
     pub fn list_dirs(&self) -> Vec<String> {
         self.config.lock().unwrap().dirs.clone()
+    }
+
+    pub fn is_watched_path(&self, path: &Path) -> bool {
+        self.config
+            .lock()
+            .unwrap()
+            .dirs
+            .iter()
+            .any(|root| path_is_within(path, Path::new(root)))
+    }
+
+    pub fn is_structure_watched(&self, dir: &Path) -> bool {
+        self.watchers.lock().unwrap().keys().any(|watched| {
+            let watched = Path::new(watched);
+            path_is_within(dir, watched) && path_is_within(watched, dir)
+        })
+    }
+
+    fn rebuild_arrival_watchers(&self) -> anyhow::Result<()> {
+        let Some(scheduler) = self.stable_scheduler.lock().unwrap().clone() else {
+            return Ok(());
+        };
+        let dirs = self.list_dirs();
+        let configured_roots = dirs.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let desired = minimal_coverage_roots(&dirs);
+        let desired_keys = desired
+            .iter()
+            .map(|root| root.to_string_lossy().into_owned())
+            .collect::<HashSet<_>>();
+
+        let mut watchers = self.arrival_watchers.lock().unwrap();
+        watchers.retain(|root, _| desired_keys.contains(root));
+        for root in desired {
+            let key = root.to_string_lossy().into_owned();
+            if watchers.contains_key(&key) || !root.is_dir() {
+                continue;
+            }
+            let registration =
+                build_arrival_watcher(&root, self.config.clone(), scheduler.clone())?;
+            watchers.insert(key, registration);
+        }
+        drop(watchers);
+        scheduler.cancel_uncovered(&configured_roots);
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -231,7 +626,8 @@ impl WatchState {
             let mut cfg = self.config.lock().unwrap();
             cfg.dirs.retain(|d| d != dir);
         }
-        self.stop_watch_tree(dir, false);
+        self.stop_watch_tree(dir);
+        let _ = self.rebuild_arrival_watchers();
         self.persist();
     }
 
@@ -266,7 +662,8 @@ impl WatchState {
                 }
             }
         }
-        self.stop_watch_tree(old, false);
+        self.stop_watch_tree(old);
+        let _ = self.rebuild_arrival_watchers();
         self.persist();
         Ok(dst_str)
     }
@@ -321,10 +718,10 @@ impl WatchState {
 
     /// 释放某个目录及后代的按需 watcher；监控根自身始终保留。
     pub fn stop_aux_watch_tree(&self, dir: &str) {
-        self.stop_watch_tree(dir, true);
+        self.stop_watch_tree(dir);
     }
 
-    fn stop_watch_tree(&self, dir: &str, preserve_roots: bool) {
+    fn stop_watch_tree(&self, dir: &str) {
         let target = Path::new(dir);
         let roots = self.list_dirs();
         self.watchers.lock().unwrap().retain(|watched, _| {
@@ -332,11 +729,13 @@ impl WatchState {
             if !path.starts_with(target) {
                 return true;
             }
-            preserve_roots && roots.iter().any(|root| Path::new(root) == path)
+            roots
+                .iter()
+                .any(|root| Path::new(root) == path && path.is_dir())
         });
     }
 
-    /// 注册一个目录的 notify 监听。结构变化按短窗口批处理，稳定检测在独立有界队列执行。
+    /// 注册一个目录的非递归结构监听；监控根另行建立递归到达监听。
     pub fn start_watch<F, G>(&self, dir: &str, on_detect: F, on_change: G) -> anyhow::Result<()>
     where
         F: Fn(DetectedItem) + Send + Sync + 'static,
@@ -346,6 +745,18 @@ impl WatchState {
         if !p.is_dir() {
             // 失效目录:跳过不阻断
             return Ok(());
+        }
+        let is_configured_root = self
+            .list_dirs()
+            .iter()
+            .any(|root| canonical_or_original(Path::new(root)) == canonical_or_original(p));
+        if is_configured_root {
+            let mut scheduler = self.stable_scheduler.lock().unwrap();
+            if scheduler.is_none() {
+                *scheduler = Some(Arc::new(StableScheduler::new(Arc::new(on_detect))));
+            }
+            drop(scheduler);
+            self.rebuild_arrival_watchers()?;
         }
         if self.watchers.lock().unwrap().contains_key(dir) {
             return Ok(());
@@ -378,15 +789,8 @@ impl WatchState {
             .unwrap_or(dir)
             .to_string();
         let watch_dir = p.to_path_buf();
-        let detect_active = active.clone();
-        let on_detect: DetectCallback = Arc::new(move |item| {
-            if detect_active.load(Ordering::Acquire) {
-                on_detect(item);
-            }
-        });
         let on_change: Arc<dyn Fn(DirectoryChangeBatch) + Send + Sync> = Arc::new(on_change);
         std::thread::spawn(move || {
-            let stable = StableScheduler::new(source.clone(), on_detect);
             while let Ok(first) = rx.recv() {
                 let deadline = Instant::now() + EVENT_BATCH_WINDOW;
                 let mut events = vec![];
@@ -411,20 +815,7 @@ impl WatchState {
                 force_rescan |= overflowed.swap(false, Ordering::AcqRel);
 
                 let normalized = normalize_events(&watch_dir, &source, events, force_rescan);
-                for path in &normalized.cancel_stable {
-                    stable.cancel(path);
-                }
-                let mut queue_overflowed = false;
-                for path in normalized.schedule_stable {
-                    if !stable.schedule(path) {
-                        queue_overflowed = true;
-                    }
-                }
-                let batch = if queue_overflowed {
-                    rescan_batch(&watch_dir, &source)
-                } else {
-                    normalized.batch
-                };
+                let batch = normalized.batch;
                 if active.load(Ordering::Acquire) && !batch.changes.is_empty() {
                     on_change(batch);
                 }
@@ -457,8 +848,6 @@ impl WatchState {
 
 struct NormalizedEvents {
     batch: DirectoryChangeBatch,
-    schedule_stable: Vec<PathBuf>,
-    cancel_stable: Vec<PathBuf>,
 }
 
 fn normalize_events(
@@ -468,8 +857,6 @@ fn normalize_events(
     mut force_rescan: bool,
 ) -> NormalizedEvents {
     let mut changes = BTreeMap::<String, DirectoryChange>::new();
-    let mut schedule = BTreeMap::<String, PathBuf>::new();
-    let mut cancel = BTreeMap::<String, PathBuf>::new();
 
     for event in events {
         if event.need_rescan() {
@@ -482,17 +869,9 @@ fn normalize_events(
                     let Some(path) = normalize_top_level_path(watch_dir, &path) else {
                         continue;
                     };
-                    let path_key = path.to_string_lossy().into_owned();
-                    if schedule.contains_key(&path_key) {
-                        continue;
-                    }
                     if let Some(node) = inventory_item(&path, source) {
                         let key = node.path.clone();
-                        let needs_stable = node.kind != "dir";
                         changes.insert(key.clone(), DirectoryChange::Upsert { node });
-                        if needs_stable {
-                            schedule.insert(key, path);
-                        }
                     }
                 }
             }
@@ -503,7 +882,6 @@ fn normalize_events(
                     };
                     let key = path.to_string_lossy().into_owned();
                     changes.insert(key.clone(), DirectoryChange::Remove { path: key.clone() });
-                    cancel.insert(key, path);
                 }
             }
             EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
@@ -518,10 +896,8 @@ fn normalize_events(
                     continue;
                 };
                 let old_key = old_path.to_string_lossy().into_owned();
-                cancel.insert(old_key.clone(), old_path.clone());
                 if let Some(node) = inventory_item(&new_path, source) {
                     let new_key = node.path.clone();
-                    let needs_stable = node.kind != "dir";
                     changes.remove(&old_key);
                     changes.remove(&new_key);
                     changes.insert(
@@ -531,26 +907,18 @@ fn normalize_events(
                             node,
                         },
                     );
-                    if needs_stable {
-                        schedule.insert(new_key, new_path);
-                    }
                 } else {
                     force_rescan = true;
                 }
             }
             EventKind::Modify(ModifyKind::Name(_)) => {
                 // Some backends emit From/To as separate events and cannot reliably pair them.
-                force_rescan = true;
-                for path in event.paths {
-                    let Some(path) = normalize_top_level_path(watch_dir, &path) else {
-                        continue;
-                    };
-                    let key = path.to_string_lossy().into_owned();
-                    if path.is_file() {
-                        schedule.insert(key, path);
-                    } else {
-                        cancel.insert(key, path);
-                    }
+                if event
+                    .paths
+                    .iter()
+                    .any(|path| normalize_top_level_path(watch_dir, path).is_some())
+                {
+                    force_rescan = true;
                 }
             }
             EventKind::Modify(_) => {
@@ -559,22 +927,23 @@ fn normalize_events(
                         continue;
                     };
                     let key = path.to_string_lossy().into_owned();
-                    if schedule.contains_key(&key) {
-                        continue;
-                    }
                     if let Some(node) = inventory_item(&path, source) {
-                        let needs_stable = node.kind != "dir";
                         changes.insert(key.clone(), DirectoryChange::Upsert { node });
-                        if needs_stable {
-                            schedule.insert(key, path);
-                        }
                     } else {
                         force_rescan = true;
-                        cancel.insert(key, path);
                     }
                 }
             }
-            EventKind::Any | EventKind::Other => force_rescan = true,
+            EventKind::Any | EventKind::Other => {
+                if event.paths.is_empty()
+                    || event
+                        .paths
+                        .iter()
+                        .any(|path| normalize_top_level_path(watch_dir, path).is_some())
+                {
+                    force_rescan = true;
+                }
+            }
         }
     }
 
@@ -586,11 +955,7 @@ fn normalize_events(
             changes: changes.into_values().collect(),
         }
     };
-    NormalizedEvents {
-        batch,
-        schedule_stable: schedule.into_values().collect(),
-        cancel_stable: cancel.into_values().collect(),
-    }
+    NormalizedEvents { batch }
 }
 
 fn rescan_batch(watch_dir: &Path, source: &str) -> DirectoryChangeBatch {
@@ -826,7 +1191,6 @@ mod tests {
             normalized.batch.changes.as_slice(),
             [DirectoryChange::Upsert { node }] if node.kind == "dir" && node.path == directory.to_string_lossy()
         ));
-        assert!(normalized.schedule_stable.is_empty());
     }
 
     #[cfg(unix)]
@@ -841,6 +1205,24 @@ mod tests {
 
         let normalized = normalize_top_level_path(&alias, &real_file).unwrap();
         assert_eq!(normalized, alias.join("created.log"));
+        let _ = std::fs::remove_file(alias);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_canonical_event_paths_preserve_the_registered_root() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = FixtureDir::new();
+        let nested = fixture.path.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let real_file = nested.join("created.log");
+        std::fs::write(&real_file, b"created").unwrap();
+        let alias = fixture.path.with_extension("recursive-alias");
+        symlink(&fixture.path, &alias).unwrap();
+
+        let normalized = normalize_descendant_path(&alias, &real_file).unwrap();
+        assert_eq!(normalized, alias.join("nested").join("created.log"));
         let _ = std::fs::remove_file(alias);
     }
 
@@ -871,6 +1253,7 @@ mod tests {
             .start_watch(child.to_str().unwrap(), |_| {}, |_| {})
             .unwrap();
         assert_eq!(state.watchers.lock().unwrap().len(), 3);
+        assert_eq!(state.arrival_watchers.lock().unwrap().len(), 1);
 
         state.stop_aux_watch_tree(nested.to_str().unwrap());
         let watchers = state.watchers.lock().unwrap();
@@ -878,6 +1261,206 @@ mod tests {
         assert!(watchers.contains_key(fixture.path.to_str().unwrap()));
         drop(watchers);
         let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn overlapping_roots_share_one_recursive_watcher_and_child_takes_over() {
+        let fixture = FixtureDir::new();
+        let nested = fixture.path.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let state = WatchState::new(fixture.path.join("config.json"));
+        state.add_dir(fixture.path.to_str().unwrap()).unwrap();
+        state.add_dir(nested.to_str().unwrap()).unwrap();
+
+        state
+            .start_watch(fixture.path.to_str().unwrap(), |_| {}, |_| {})
+            .unwrap();
+        state
+            .start_watch(nested.to_str().unwrap(), |_| {}, |_| {})
+            .unwrap();
+        let roots = minimal_coverage_roots(&state.list_dirs());
+        assert_eq!(roots, vec![fixture.path.clone()]);
+        assert_eq!(state.arrival_watchers.lock().unwrap().len(), 1);
+
+        state.remove_dir(fixture.path.to_str().unwrap());
+        let watchers = state.arrival_watchers.lock().unwrap();
+        assert_eq!(watchers.len(), 1);
+        assert!(watchers.contains_key(nested.to_str().unwrap()));
+    }
+
+    #[test]
+    fn reopening_directory_reestablishes_its_structure_watcher() {
+        let fixture = FixtureDir::new();
+        let nested = fixture.path.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let state = WatchState::new(fixture.path.join("config.json"));
+        state.add_dir(fixture.path.to_str().unwrap()).unwrap();
+        state
+            .start_watch(fixture.path.to_str().unwrap(), |_| {}, |_| {})
+            .unwrap();
+        state
+            .start_watch(nested.to_str().unwrap(), |_| {}, |_| {})
+            .unwrap();
+        state.stop_aux_watch_tree(nested.to_str().unwrap());
+
+        let (change_tx, change_rx) = sync_channel(2);
+        state
+            .start_watch(
+                nested.to_str().unwrap(),
+                |_| {},
+                move |batch| {
+                    let _ = change_tx.send(batch);
+                },
+            )
+            .unwrap();
+        #[cfg(target_os = "macos")]
+        std::thread::sleep(Duration::from_secs(1));
+        let created = nested.join("reopened.log");
+        std::fs::write(&created, b"reopened").unwrap();
+        let batch = change_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(batch.changes.iter().any(
+            |change| matches!(change, DirectoryChange::Upsert { node } if node.path == created.to_string_lossy())
+        ));
+    }
+
+    #[test]
+    fn arrival_prefilter_uses_archive_suffixes_and_current_log_filter() {
+        let fixture = FixtureDir::new();
+        let zip = fixture.write("bundle.ZIP", b"PK\x03\x04");
+        let log = fixture.write("server.LOG", b"log");
+        let binary = fixture.write("image.bin", &[0, 1, 2]);
+        let mut config = WatchConfig {
+            suffixes: vec![".log".into()],
+            ..WatchConfig::default()
+        };
+
+        assert!(is_arrival_candidate(&config, &zip));
+        assert!(is_arrival_candidate(&config, &log));
+        assert!(!is_arrival_candidate(&config, &binary));
+        config.show_all = true;
+        assert!(is_arrival_candidate(&config, &binary));
+    }
+
+    #[test]
+    fn recursive_event_storm_deduplicates_ten_thousand_updates() {
+        let fixture = FixtureDir::new();
+        let nested = fixture.path.join("a").join("b").join("c");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("storm.log");
+        std::fs::write(&file, b"storm").unwrap();
+        let events = (0..10_000)
+            .map(|_| {
+                Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
+                    .add_path(file.clone())
+            })
+            .collect();
+
+        let normalized = normalize_arrival_events(&fixture.path, events);
+        assert_eq!(normalized.schedule, vec![file.clone()]);
+        assert!(normalized.cancel.is_empty());
+
+        let scheduler = StableScheduler::new(Arc::new(|_| {}));
+        for _ in 0..10_000 {
+            assert!(scheduler.schedule(file.clone(), "test".into()));
+        }
+        assert_eq!(scheduler.queued.lock().unwrap().len(), 1);
+        assert_eq!(scheduler.generations.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stable_scheduler_rejects_excess_unique_candidates_at_its_capacity() {
+        let fixture = FixtureDir::new();
+        let scheduler = StableScheduler::new(Arc::new(|_| {}));
+        for worker in 0..STABLE_WORKER_COUNT {
+            let path = fixture.write(&format!("busy-{worker}.log"), b"busy");
+            assert!(scheduler.schedule(path, "test".into()));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+
+        let rejected = (0..10_000)
+            .filter(|index| {
+                !scheduler.schedule(
+                    fixture.path.join(format!("queued-{index}.log")),
+                    "test".into(),
+                )
+            })
+            .count();
+        assert!(rejected > 0);
+        assert!(
+            scheduler.queued.lock().unwrap().len() <= STABLE_QUEUE_CAPACITY + STABLE_WORKER_COUNT
+        );
+        assert!(
+            scheduler.generations.lock().unwrap().len()
+                <= STABLE_QUEUE_CAPACITY + STABLE_WORKER_COUNT
+        );
+    }
+
+    #[test]
+    fn recursive_watcher_detects_logs_in_unexpanded_deep_directory_once() {
+        let fixture = FixtureDir::new();
+        let nested = fixture.path.join("downloads").join("daily");
+        std::fs::create_dir_all(&nested).unwrap();
+        let state = WatchState::new(fixture.path.join("config.json"));
+        state.add_dir(fixture.path.to_str().unwrap()).unwrap();
+        let (detect_tx, detect_rx) = sync_channel(4);
+        let (change_tx, change_rx) = sync_channel(4);
+        state
+            .start_watch(
+                fixture.path.to_str().unwrap(),
+                move |item| {
+                    let _ = detect_tx.send(item);
+                },
+                move |batch| {
+                    let _ = change_tx.send(batch);
+                },
+            )
+            .unwrap();
+
+        #[cfg(target_os = "macos")]
+        std::thread::sleep(Duration::from_secs(1));
+
+        let temporary = nested.join("daily.download");
+        let finished = nested.join("daily.zip");
+        let log = nested.join("server.log");
+        std::fs::write(&temporary, b"PK\x03\x04payload").unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        std::fs::rename(&temporary, &finished).unwrap();
+        std::fs::write(&log, b"server started\n").unwrap();
+
+        let first = detect_rx.recv_timeout(Duration::from_secs(8)).unwrap();
+        let second = detect_rx.recv_timeout(Duration::from_secs(8)).unwrap();
+        let detected = [first, second]
+            .into_iter()
+            .map(|item| (item.path, item.kind))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            detected.get(finished.to_str().unwrap()).map(String::as_str),
+            Some("archive")
+        );
+        assert_eq!(
+            detected.get(log.to_str().unwrap()).map(String::as_str),
+            Some("file")
+        );
+        assert!(detect_rx.recv_timeout(Duration::from_secs(2)).is_err());
+        while let Ok(batch) = change_rx.try_recv() {
+            assert!(batch.changes.iter().all(|change| match change {
+                DirectoryChange::Upsert { node } | DirectoryChange::Rename { node, .. } => {
+                    node.path != finished.to_string_lossy() && node.path != log.to_string_lossy()
+                }
+                DirectoryChange::Remove { path } => {
+                    path != &finished.to_string_lossy() && path != &log.to_string_lossy()
+                }
+                DirectoryChange::Rescan { nodes } => nodes.iter().all(|node| {
+                    node.path != finished.to_string_lossy() && node.path != log.to_string_lossy()
+                }),
+            }));
+        }
+        assert!(state
+            .scan_dir(fixture.path.to_str().unwrap())
+            .iter()
+            .all(|item| {
+                item.path != finished.to_string_lossy() && item.path != log.to_string_lossy()
+            }));
     }
 
     #[test]
@@ -948,7 +1531,10 @@ mod tests {
 
         let normalized = normalize_events(&fixture.path, "test", events, false);
         assert_eq!(normalized.batch.changes.len(), 1);
-        assert_eq!(normalized.schedule_stable, vec![file]);
+        assert!(matches!(
+            normalized.batch.changes.as_slice(),
+            [DirectoryChange::Upsert { node }] if node.path == file.to_string_lossy()
+        ));
     }
 
     #[test]
@@ -956,15 +1542,29 @@ mod tests {
         let fixture = FixtureDir::new();
         let file = fixture.write("slow.log", b"complete");
         let (tx, rx) = sync_channel(1);
-        let scheduler = StableScheduler::new(
-            "test".into(),
-            Arc::new(move |item| {
-                let _ = tx.send(item);
-            }),
-        );
+        let scheduler = StableScheduler::new(Arc::new(move |item| {
+            let _ = tx.send(item);
+        }));
 
-        assert!(scheduler.schedule(file.clone()));
+        assert!(scheduler.schedule(file.clone(), "test".into()));
         scheduler.cancel(&file);
+        assert!(rx.recv_timeout(Duration::from_secs(2)).is_err());
+    }
+
+    #[test]
+    fn cancel_then_reschedule_same_path_emits_only_latest_result() {
+        let fixture = FixtureDir::new();
+        let file = fixture.write("replaced.log", b"latest");
+        let (tx, rx) = sync_channel(2);
+        let scheduler = StableScheduler::new(Arc::new(move |item| {
+            let _ = tx.send(item);
+        }));
+
+        assert!(scheduler.schedule(file.clone(), "old".into()));
+        scheduler.cancel(&file);
+        assert!(scheduler.schedule(file.clone(), "latest".into()));
+        let item = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(item.source, "latest");
         assert!(rx.recv_timeout(Duration::from_secs(2)).is_err());
     }
 
@@ -972,6 +1572,7 @@ mod tests {
     fn native_watcher_reports_structure_before_stable_detection() {
         let fixture = FixtureDir::new();
         let state = WatchState::new(fixture.path.join("config.json"));
+        state.add_dir(fixture.path.to_str().unwrap()).unwrap();
         let (detect_tx, detect_rx) = sync_channel(1);
         let (change_tx, change_rx) = sync_channel(4);
         state

@@ -24,7 +24,9 @@ import {
 } from './util/update';
 import {
   applyDirectoryChanges,
+  findTreeNode,
   passesDirectoryFilter,
+  revealDirectoryChain,
   removedDirectoryNodes,
 } from './util/directoryTree';
 
@@ -68,6 +70,10 @@ export function App() {
   // 当前选中的压缩包(用于左侧树高亮)与当前查看的条目 key
   const [selectedArchive, setSelectedArchive] = useState<string | null>(null);
   const selectedArchiveRef = useRef<string | null>(null);
+  const [revealedTarget, setRevealedTarget] = useState<{
+    path: string;
+    directories: string[];
+  } | null>(null);
   const [session, setSession] = useState<OpenSessionResult | null>(null);
   const [activeKey, setActiveKey] = useState<string | null>(null);
 
@@ -296,8 +302,7 @@ export function App() {
     if (ok) refreshTree();
   }, [refreshTree]);
 
-  const expandDirectory = useCallback(async (node: TreeNode) => {
-    const path = node.path ?? node.id;
+  const loadDirectory = useCallback(async (path: string) => {
     const children = await api.expandDirectory(path);
     const next = applyDirectoryChanges(treeRef.current, {
       watchDir: path,
@@ -306,6 +311,13 @@ export function App() {
     treeRef.current = next;
     setTree(next);
   }, []);
+
+  const expandDirectory = useCallback(
+    async (node: TreeNode) => {
+      await loadDirectory(node.path ?? node.id);
+    },
+    [loadDirectory],
+  );
 
   const collapseDirectory = useCallback((node: TreeNode) => {
     void api.collapseDirectory(node.path ?? node.id);
@@ -347,6 +359,45 @@ export function App() {
     },
     [markSeen],
   );
+
+  const revealNewItem = useCallback(
+    async (item: NewLogItem) => {
+      const directories = revealDirectoryChain(treeRef.current, item.id);
+      if (directories.length === 0) {
+        markSeen(item.id);
+        setRevealedTarget(null);
+        alert('无法定位：文件不在当前监控目录中或已经失效。');
+        return;
+      }
+
+      try {
+        for (const directory of directories) await loadDirectory(directory);
+      } catch {
+        markSeen(item.id);
+        setRevealedTarget(null);
+        alert('无法定位：文件所在目录已被移动、删除或无法读取。');
+        return;
+      }
+
+      if (!findTreeNode(treeRef.current, item.id)) {
+        markSeen(item.id);
+        setRevealedTarget(null);
+        alert('无法定位：文件已被移动或删除。');
+        return;
+      }
+
+      setRevealedTarget({ path: item.id, directories });
+      if (item.kind === 'file') {
+        await openEntry(item.id, item.id);
+      } else {
+        setSelectedArchive(item.id);
+        markSeen(item.id);
+      }
+    },
+    [loadDirectory, markSeen, openEntry],
+  );
+
+  const finishReveal = useCallback(() => setRevealedTarget(null), []);
 
   const markAllRead = useCallback(() => {
     // 记住已读,避免重复事件把它们重新加回列表
@@ -477,15 +528,7 @@ export function App() {
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
         count={count}
         newItems={newItems}
-        onOpenItem={(it) => {
-          const key = it.kind === 'file' ? it.name : `${it.name}::`;
-          if (it.kind === 'file') openEntry(it.name, it.id);
-          else {
-            setSelectedArchive(it.id);
-            markSeen(it.id);
-          }
-          void key;
-        }}
+        onOpenItem={(item) => void revealNewItem(item)}
         onMarkAll={markAllRead}
         appVersion={appVersion}
         autoCheckUpdates={autoCheckUpdates}
@@ -526,6 +569,9 @@ export function App() {
           nodes={tree}
           activeKey={activeKey}
           selectedArchive={selectedArchive}
+          revealPath={revealedTarget?.path ?? null}
+          revealDirectories={revealedTarget?.directories ?? []}
+          onRevealComplete={finishReveal}
           width={treeWidth}
           unreadIds={unreadIds}
           filter={filter}
