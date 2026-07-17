@@ -1,6 +1,8 @@
 # 开发协作流程
 
-本文档记录 LogPeek 在使用 AI 助手(Claude)+ OpenSpec + codex 审阅时的标准往返流程。
+本文档记录 LogPeek 在使用 AI 助手(Claude)+ OpenSpec + Codex 审阅时的标准往返流程。
+
+Codex 审阅通过 Claude Code 官方插件 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) 的 `/codex:review` 命令完成(底层走 Codex 原生 review target,上下文独立、省 token),不再使用 `codex mcp-server`。
 
 ## 核心原则
 
@@ -24,10 +26,9 @@
    - 自检失败先修复,不带病提交审阅。
 
 4. **codex 审阅未提交改动**
-   - 通过已注册的 `codex` MCP server(见 `.mcp.json`)审阅。
-   - 审阅范围为**未提交的改动**(staged + unstaged + untracked),等价 `codex review --uncommitted`。
+   - 运行 `/codex:review`(codex-plugin-cc 提供),默认审阅**未提交的改动**(staged + unstaged + untracked);多文件改动用 `/codex:review --background` + `/codex:status` + `/codex:result`。
    - 将发现按严重程度汇总;对合理问题先修复再汇报,或说明为何不修。
-   - 若 codex 不可用(未连接/超时),如实告知并继续,不静默跳过。
+   - 若审阅不可用(插件未装/未登录/超时),如实告知并继续,不静默跳过。
 
 5. **汇报**
    向用户说明:实现了什么、自检结果、codex 审阅结论与处理。
@@ -56,6 +57,6 @@
 
 ## 相关约定
 
-- codex 审阅约定见 `CLAUDE.md`「代码审阅约定」。
+- Codex 审阅约定与插件安装步骤见 `CLAUDE.md`「代码审阅约定」。
 - OpenSpec 规范见 `openspec/AGENTS.md`。
 - git 安全:默认不改 `main` 直推;提交只在用户明确要求时进行。
