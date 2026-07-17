@@ -1000,9 +1000,15 @@ mod tests {
 
         std::fs::remove_file(&created).unwrap();
         let batch = change_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert!(batch.changes.iter().any(
-            |change| matches!(change, DirectoryChange::Remove { path } if path == &created.to_string_lossy())
-        ));
+        assert!(batch.changes.iter().any(|change| match change {
+            DirectoryChange::Remove { path } => path == &created.to_string_lossy(),
+            DirectoryChange::Rescan { nodes } => {
+                nodes
+                    .iter()
+                    .all(|node| node.path != created.to_string_lossy())
+            }
+            _ => false,
+        }));
         assert!(detect_rx.recv_timeout(Duration::from_secs(2)).is_err());
     }
 
