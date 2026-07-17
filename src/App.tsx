@@ -15,6 +15,10 @@ export function App() {
   // 未读项 id 集合(id 即文件路径),用于左树高亮;不依赖后端 unread 标记
   const unreadIds = new Set(newItems.map((it) => it.id));
   const seen = useRef<Set<string>>(new Set());
+  // 打开请求序号:防止并发打开时旧请求覆盖新请求的视图状态
+  const openSeq = useRef(0);
+  // activeKey 的实时镜像:供 rename/delete 在 await 之后读取当前值(避免闭包捕获过时值)
+  const activeKeyRef = useRef<string | null>(null);
 
   // 当前选中的压缩包(用于左侧树高亮)与当前查看的条目 key
   const [selectedArchive, setSelectedArchive] = useState<string | null>(null);
@@ -58,6 +62,11 @@ export function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  // 保持 activeKey 镜像与状态同步,供异步回调读取最新值
+  useEffect(() => {
+    activeKeyRef.current = activeKey;
+  }, [activeKey]);
 
   // 禁用 WebView 默认右键菜单(刷新/打印/检查等,对本应用无意义)
   useEffect(() => {
@@ -113,19 +122,36 @@ export function App() {
 
   const openEntry = useCallback(
     async (entryKey: string, unreadId?: string) => {
+      // 请求令牌:仅最新一次打开可提交状态,避免旧请求的成功/失败覆盖新请求
+      const token = ++openSeq.current;
       setActiveKey(entryKey);
       setSession(null);
       try {
         const s = await api.openLogSession(entryKey);
-        setSession(s);
+        // 点击通知即视为已读,与是否被更晚请求取代无关
         if (unreadId) markSeen(unreadId);
+        if (token !== openSeq.current) return; // 已被更晚的打开取代,丢弃
+        setSession(s);
       } catch (e) {
+        // 失效的新到达项从通知列表移除,防止反复点开报错(与令牌无关,始终执行)
+        if (unreadId) markSeen(unreadId);
+        if (token !== openSeq.current) return; // 不覆盖更晚请求的状态
+        // 打开失败(如文件已被重命名/删除):清空视图状态,避免卡在"打开中…"
         setSession(null);
-        alert(String(e));
+        setActiveKey(null);
+        alert('无法打开:' + String(e));
       }
     },
     [markSeen],
   );
+
+  // 清空当前查看视图,并使任何进行中的打开请求失效(避免其稍后回填过时会话)
+  const resetView = useCallback(() => {
+    openSeq.current++;
+    setActiveKey(null);
+    setSession(null);
+    setSelectedArchive(null);
+  }, []);
 
   const markAllRead = useCallback(() => {
     // 记住已读,避免重复事件把它们重新加回列表
@@ -141,12 +167,24 @@ export function App() {
       try {
         if (node.kind === 'dir') await api.renameWatchDir(path, newName);
         else await api.renameFile(path, newName);
+        // 旧路径已失效:移除指向旧路径的通知项,避免点开报错
+        markSeen(node.id);
+        // 若正在查看被重命名的项,其会话已指向旧路径,重置视图。
+        // 读取镜像的当前值(await 期间用户可能已切换查看目标)。
+        // 裸文件 activeKey 为文件名;压缩包内条目 activeKey 为 `名称::条目`。
+        const cur = activeKeyRef.current;
+        if (
+          node.kind !== 'dir' &&
+          (cur === node.name || cur === node.id || cur?.startsWith(node.name + '::'))
+        ) {
+          resetView();
+        }
         refreshTree();
       } catch (e) {
         alert('重命名失败:' + String(e));
       }
     },
-    [refreshTree],
+    [refreshTree, markSeen, resetView],
   );
 
   const openPath = useCallback(async (node: TreeNode) => {
@@ -182,15 +220,22 @@ export function App() {
         return;
       try {
         await api.deleteWatchDir(path);
-        setActiveKey(null);
-        setSession(null);
-        setSelectedArchive(null);
+        resetView();
+        // 移除该目录下所有失效的通知项(id 为完整路径,以目录路径为前缀)
+        const prefixes = [path + '/', path + '\\'];
+        setNewItems((items) =>
+          items.filter((it) => {
+            const stale = it.id === path || prefixes.some((p) => it.id.startsWith(p));
+            if (stale) seen.current.add(it.id);
+            return !stale;
+          }),
+        );
         refreshTree();
       } catch (e) {
         alert('删除失败:' + String(e));
       }
     },
-    [refreshTree],
+    [refreshTree, resetView],
   );
 
   const deleteFile = useCallback(
@@ -199,11 +244,11 @@ export function App() {
       if (!window.confirm(`确定删除「${node.name}」吗?\n文件将被移到系统回收站。`)) return;
       try {
         await api.deleteFile(target);
-        // 若当前查看的正是被删文件(或被删压缩包内的条目),清空视图
-        if (activeKey === node.name || activeKey?.startsWith(node.name + '::')) {
-          setActiveKey(null);
-          setSession(null);
-          setSelectedArchive(null);
+        // 若当前查看的正是被删文件(或被删压缩包内的条目),清空视图。
+        // 读取镜像的当前值(await 期间用户可能已切换查看目标)。
+        const cur = activeKeyRef.current;
+        if (cur === node.name || cur?.startsWith(node.name + '::')) {
+          resetView();
         }
         markSeen(node.id);
         refreshTree();
@@ -211,7 +256,7 @@ export function App() {
         alert('删除失败:' + String(e));
       }
     },
-    [activeKey, markSeen, refreshTree],
+    [markSeen, refreshTree, resetView],
   );
 
   const hasDirs = tree.length > 0;
