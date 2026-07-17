@@ -9,6 +9,7 @@ import type {
 } from './api';
 import { TopBar } from './components/TopBar';
 import { UpdateDialog } from './components/UpdateDialog';
+import { ConfirmDialog } from './components/ConfirmDialog';
 import { DirTree } from './components/DirTree';
 import { LogContent } from './components/LogContent';
 import { EmptyState } from './components/EmptyState';
@@ -31,6 +32,13 @@ function flattenNodes(nodes: readonly TreeNode[]): TreeNode[] {
   return nodes.flatMap((node) => [node, ...flattenNodes(node.children ?? [])]);
 }
 
+interface ConfirmationRequest {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  action: () => Promise<void>;
+}
+
 export function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [appVersion, setAppVersion] = useState('…');
@@ -41,6 +49,7 @@ export function App() {
   const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updatePromptOpen, setUpdatePromptOpen] = useState(false);
+  const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
   const updateTaskRunning = useRef(false);
   const autoCheckStarted = useRef(false);
   const [tree, setTree] = useState<TreeNode[]>([]);
@@ -387,8 +396,6 @@ export function App() {
   const removeWatch = useCallback(
     async (node: TreeNode) => {
       const path = node.path ?? node.id;
-      if (!window.confirm(`不再监控「${node.name}」?\n仅从列表移除,磁盘上的文件不会被删除。`))
-        return;
       try {
         await api.removeWatchDir(path);
         refreshTree();
@@ -400,56 +407,63 @@ export function App() {
   );
 
   const deleteDir = useCallback(
-    async (node: TreeNode) => {
+    (node: TreeNode) => {
       const path = node.path ?? node.id;
-      if (
-        !window.confirm(
-          `确定删除整个目录「${node.name}」吗?\n目录及其全部内容将被移到系统回收站,并停止监控。`,
-        )
-      )
-        return;
-      try {
-        await api.deleteWatchDir(path);
-        resetView();
-        // 移除该目录下所有失效的通知项(id 为完整路径,以目录路径为前缀)
-        const prefixes = [path + '/', path + '\\'];
-        setNewItems((items) =>
-          items.filter((it) => {
-            const stale = it.id === path || prefixes.some((p) => it.id.startsWith(p));
-            if (stale) seen.current.add(it.id);
-            return !stale;
-          }),
-        );
-        refreshTree();
-      } catch (e) {
-        alert('删除失败:' + String(e));
-      }
+      setConfirmation({
+        title: `确定删除整个目录「${node.name}」吗？`,
+        message: '目录及其全部内容将被移到系统回收站，并停止监控。',
+        confirmLabel: '删除目录',
+        action: async () => {
+          try {
+            await api.deleteWatchDir(path);
+            resetView();
+            // 移除该目录下所有失效的通知项(id 为完整路径,以目录路径为前缀)
+            const prefixes = [path + '/', path + '\\'];
+            setNewItems((items) =>
+              items.filter((it) => {
+                const stale = it.id === path || prefixes.some((p) => it.id.startsWith(p));
+                if (stale) seen.current.add(it.id);
+                return !stale;
+              }),
+            );
+            refreshTree();
+          } catch (e) {
+            alert('删除失败:' + String(e));
+          }
+        },
+      });
     },
     [refreshTree, resetView],
   );
 
   const deleteFile = useCallback(
-    async (node: TreeNode) => {
+    (node: TreeNode) => {
       const target = node.path ?? node.id;
-      if (!window.confirm(`确定删除「${node.name}」吗?\n文件将被移到系统回收站。`)) return;
-      try {
-        await api.deleteFile(target);
-        // 若当前查看的正是被删文件(或被删压缩包内的条目),清空视图。
-        // 读取镜像的当前值(await 期间用户可能已切换查看目标)。
-        const cur = activeKeyRef.current;
-        if (
-          cur === node.name ||
-          cur === node.id ||
-          cur?.startsWith(node.name + '::') ||
-          cur?.startsWith(node.id + '::')
-        ) {
-          resetView();
-        }
-        markSeen(node.id);
-        refreshTree();
-      } catch (e) {
-        alert('删除失败:' + String(e));
-      }
+      setConfirmation({
+        title: `确定删除「${node.name}」吗？`,
+        message: '文件将被移到系统回收站。',
+        confirmLabel: '删除文件',
+        action: async () => {
+          try {
+            await api.deleteFile(target);
+            // 若当前查看的正是被删文件(或被删压缩包内的条目),清空视图。
+            // 读取镜像的当前值(await 期间用户可能已切换查看目标)。
+            const cur = activeKeyRef.current;
+            if (
+              cur === node.name ||
+              cur === node.id ||
+              cur?.startsWith(node.name + '::') ||
+              cur?.startsWith(node.id + '::')
+            ) {
+              resetView();
+            }
+            markSeen(node.id);
+            refreshTree();
+          } catch (e) {
+            alert('删除失败:' + String(e));
+          }
+        },
+      });
     },
     [markSeen, refreshTree, resetView],
   );
@@ -490,6 +504,20 @@ export function App() {
           update={updateInfo}
           onSkip={skipUpdate}
           onDownload={() => void downloadUpdate()}
+        />
+      )}
+
+      {confirmation && (
+        <ConfirmDialog
+          title={confirmation.title}
+          message={confirmation.message}
+          confirmLabel={confirmation.confirmLabel}
+          onCancel={() => setConfirmation(null)}
+          onConfirm={() => {
+            const action = confirmation.action;
+            setConfirmation(null);
+            void action();
+          }}
         />
       )}
 
