@@ -1,6 +1,6 @@
 //! 裸文本文件的 passthrough 读取器:把单个文件视为仅含一个条目的“归档”。
 
-use super::{is_text_sample, ArchiveEntry, ArchiveReader};
+use super::{is_text_sample, ArchiveEntry, ArchiveReader, EntryReader};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -47,12 +47,12 @@ impl ArchiveReader for PlainReader {
         }])
     }
 
-    fn open_entry(&mut self, path: &str) -> anyhow::Result<Box<dyn Read + Send + '_>> {
+    fn open_entry(&mut self, path: &str) -> anyhow::Result<EntryReader<'_>> {
         if path != self.name {
             anyhow::bail!("条目不存在: {path}");
         }
         let mut f = File::open(&self.path)?;
         f.seek(SeekFrom::Start(0))?;
-        Ok(Box::new(f))
+        Ok(EntryReader::Seekable(Box::new(f)))
     }
 }

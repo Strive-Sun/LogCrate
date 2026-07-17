@@ -6,7 +6,7 @@ mod plain;
 mod zip_reader;
 
 use serde::Serialize;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 pub use plain::PlainReader;
@@ -26,12 +26,46 @@ pub struct ArchiveEntry {
     pub encrypted: bool,
 }
 
+pub trait ReadSeek: Read + Seek {}
+impl<T: Read + Seek> ReadSeek for T {}
+
+/// An opened entry explicitly exposes whether byte seeking is available.
+pub enum EntryReader<'a> {
+    Sequential(Box<dyn Read + 'a>),
+    Seekable(Box<dyn ReadSeek + 'a>),
+}
+
+impl EntryReader<'_> {
+    pub fn is_seekable(&self) -> bool {
+        matches!(self, Self::Seekable(_))
+    }
+
+    pub fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        match self {
+            Self::Seekable(reader) => reader.seek(position),
+            Self::Sequential(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "archive entry is sequential",
+            )),
+        }
+    }
+}
+
+impl Read for EntryReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Sequential(reader) => reader.read(buffer),
+            Self::Seekable(reader) => reader.read(buffer),
+        }
+    }
+}
+
 /// 统一归档读取器
 pub trait ArchiveReader: Send {
     /// 列出条目(不解压内容)
     fn entries(&mut self) -> anyhow::Result<Vec<ArchiveEntry>>;
     /// 打开某个条目,返回可流式读取的内容流
-    fn open_entry(&mut self, path: &str) -> anyhow::Result<Box<dyn Read + Send + '_>>;
+    fn open_entry(&mut self, path: &str) -> anyhow::Result<EntryReader<'_>>;
 }
 
 /// 按路径构造合适的读取器:zip → ZipArchiveReader,其余文本 → PlainReader

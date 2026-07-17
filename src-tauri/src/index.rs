@@ -133,8 +133,28 @@ impl SessionManager {
     }
 
     /// Fill a prepared session. Flushed bytes and their offsets are published atomically.
-    pub fn index<R, F>(&self, session_id: &str, declared_size: u64, mut reader: R, mut progress: F)
+    pub fn index<R, F>(&self, session_id: &str, declared_size: u64, reader: R, progress: F)
     where
+        R: Read,
+        F: FnMut(IndexProgress),
+    {
+        self.index_with_limit(
+            session_id,
+            declared_size,
+            reader,
+            MAX_UNCOMPRESSED,
+            progress,
+        );
+    }
+
+    fn index_with_limit<R, F>(
+        &self,
+        session_id: &str,
+        declared_size: u64,
+        mut reader: R,
+        max_uncompressed: u64,
+        mut progress: F,
+    ) where
         R: Read,
         F: FnMut(IndexProgress),
     {
@@ -174,8 +194,8 @@ impl SessionManager {
                     }
                 }
                 written += n as u64;
-                if written > MAX_UNCOMPRESSED {
-                    anyhow::bail!("uncompressed content exceeds the 2GB limit");
+                if written > max_uncompressed {
+                    anyhow::bail!("uncompressed content exceeds the size limit");
                 }
 
                 // A reader must never observe an offset before the corresponding bytes.
@@ -382,5 +402,56 @@ mod tests {
             .read_lines(&open.session_id, 0, 200)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn closing_session_cancels_indexing_and_removes_the_cache() {
+        let manager = Arc::new(SessionManager::default());
+        let open = manager.prepare("cancel.log".into(), 128 * 1024).unwrap();
+        let cache_path = manager
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&open.session_id)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .cache_path
+            .clone();
+        let closer = manager.clone();
+        let closing_id = open.session_id.clone();
+        let mut events = Vec::new();
+        manager.index(
+            &open.session_id,
+            128 * 1024,
+            Cursor::new(vec![b'x'; 128 * 1024]),
+            |event| {
+                events.push(event);
+                closer.close(&closing_id);
+            },
+        );
+
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].done);
+        assert!(!cache_path.exists());
+    }
+
+    #[test]
+    fn actual_bytes_over_the_limit_emit_a_terminal_failure() {
+        let manager = SessionManager::default();
+        let open = manager.prepare("limit.log".into(), 3).unwrap();
+        let mut events = Vec::new();
+        manager.index_with_limit(
+            &open.session_id,
+            3,
+            Cursor::new(b"actual content"),
+            3,
+            |event| events.push(event),
+        );
+
+        assert_eq!(events.len(), 1);
+        assert!(events[0].done);
+        assert!(events[0].failed);
+        assert!(events[0].error.as_deref().unwrap().contains("size limit"));
     }
 }

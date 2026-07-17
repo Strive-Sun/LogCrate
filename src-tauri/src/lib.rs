@@ -5,6 +5,7 @@ mod watcher;
 use archive::{open_archive, ArchiveEntry};
 use index::{IndexProgress, LogLine, OpenResult, SessionManager};
 use serde::Serialize;
+use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
@@ -249,9 +250,28 @@ fn open_log_session(
     let session_id = result.session_id.clone();
     let sessions = state.sessions.clone();
     std::thread::spawn(move || match reader.open_entry(&entry_path) {
-        Ok(stream) => sessions.index(&session_id, declared, stream, |event| {
-            let _ = app.emit("index-progress", event);
-        }),
+        Ok(mut stream) => {
+            let reset = if stream.is_seekable() {
+                stream.seek(SeekFrom::Start(0)).map(|_| ())
+            } else {
+                Ok(())
+            };
+            if let Err(error) = reset {
+                let event = IndexProgress {
+                    session_id,
+                    percent: 100,
+                    indexed_lines: 0,
+                    done: true,
+                    failed: true,
+                    error: Some(error.to_string()),
+                };
+                let _ = app.emit("index-progress", event);
+                return;
+            }
+            sessions.index(&session_id, declared, stream, |event| {
+                let _ = app.emit("index-progress", event);
+            });
+        }
         Err(error) => {
             let event = IndexProgress {
                 session_id,
