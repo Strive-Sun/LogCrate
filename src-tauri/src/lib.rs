@@ -11,6 +11,48 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 use watcher::{DetectedItem, DirectoryChange, DirectoryChangeBatch, WatchState};
 
+#[cfg(desktop)]
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
+
+const MAIN_WINDOW_LABEL: &str = "main";
+const SHOW_MAIN_MENU_ID: &str = "show-main-window";
+const EXIT_APP_MENU_ID: &str = "exit-logpeek";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifecycleAction {
+    HideMainWindow,
+    ShowMainWindow,
+    ExitApplication,
+    Ignore,
+}
+
+fn close_action(window_label: &str) -> LifecycleAction {
+    if window_label == MAIN_WINDOW_LABEL {
+        LifecycleAction::HideMainWindow
+    } else {
+        LifecycleAction::Ignore
+    }
+}
+
+fn menu_action(menu_id: &str) -> LifecycleAction {
+    match menu_id {
+        SHOW_MAIN_MENU_ID => LifecycleAction::ShowMainWindow,
+        EXIT_APP_MENU_ID => LifecycleAction::ExitApplication,
+        _ => LifecycleAction::Ignore,
+    }
+}
+
+fn tray_click_action(is_left_button: bool, is_released: bool) -> LifecycleAction {
+    if is_left_button && is_released {
+        LifecycleAction::ShowMainWindow
+    } else {
+        LifecycleAction::Ignore
+    }
+}
+
 struct AppState {
     watch: Arc<WatchState>,
     sessions: Arc<SessionManager>,
@@ -391,15 +433,74 @@ fn spawn_watch(watch: &Arc<WatchState>, app: &tauri::AppHandle, dir: &str) -> Re
         .map_err(|error| error.to_string())
 }
 
+#[cfg(desktop)]
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+#[cfg(desktop)]
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let show_item = MenuItem::with_id(app, SHOW_MAIN_MENU_ID, "显示主窗口", true, None::<&str>)?;
+    let exit_item = MenuItem::with_id(app, EXIT_APP_MENU_ID, "退出 LogPeek", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_item, &exit_item])?;
+
+    let mut tray = TrayIconBuilder::new()
+        .tooltip("LogPeek")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match menu_action(event.id().as_ref()) {
+            LifecycleAction::ShowMainWindow => show_main_window(app),
+            LifecycleAction::ExitApplication => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button,
+                button_state,
+                ..
+            } = event
+            {
+                let action = tray_click_action(
+                    button == MouseButton::Left,
+                    button_state == MouseButtonState::Up,
+                );
+                if action == LifecycleAction::ShowMainWindow {
+                    show_main_window(tray.app_handle());
+                }
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray = tray.icon(icon);
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
+        .on_window_event(|window, event| {
+            if close_action(window.label()) == LifecycleAction::HideMainWindow {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             #[cfg(desktop)]
-            app.handle()
-                .plugin(tauri_plugin_updater::Builder::new().build())?;
+            {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+                setup_tray(app)?;
+            }
 
             let config_dir = app
                 .path()
@@ -446,4 +547,50 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn main_window_close_hides_only_the_main_window() {
+        assert_eq!(
+            close_action(MAIN_WINDOW_LABEL),
+            LifecycleAction::HideMainWindow
+        );
+        assert_eq!(close_action("settings"), LifecycleAction::Ignore);
+    }
+
+    #[test]
+    fn tray_menu_maps_show_exit_and_unknown_actions() {
+        assert_eq!(
+            menu_action(SHOW_MAIN_MENU_ID),
+            LifecycleAction::ShowMainWindow
+        );
+        assert_eq!(
+            menu_action(EXIT_APP_MENU_ID),
+            LifecycleAction::ExitApplication
+        );
+        assert_eq!(menu_action("unknown"), LifecycleAction::Ignore);
+    }
+
+    #[test]
+    fn only_left_button_release_restores_the_window() {
+        assert_eq!(
+            tray_click_action(true, true),
+            LifecycleAction::ShowMainWindow
+        );
+        assert_eq!(tray_click_action(true, false), LifecycleAction::Ignore);
+        assert_eq!(tray_click_action(false, true), LifecycleAction::Ignore);
+    }
+
+    #[test]
+    fn repeated_restore_requests_remain_idempotent_actions() {
+        assert_eq!(tray_click_action(true, true), tray_click_action(true, true));
+        assert_eq!(
+            menu_action(SHOW_MAIN_MENU_ID),
+            LifecycleAction::ShowMainWindow
+        );
+    }
 }
