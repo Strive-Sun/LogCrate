@@ -130,7 +130,13 @@ export function LogContent({ session, activeKey }: Props) {
       )}
 
       <div className="log-view" ref={scrollRef}>
-        <div style={{ height: rowVirtualizer.getTotalSize(), position: 'relative', minWidth: 'max-content' }}>
+        <div
+          style={{
+            height: rowVirtualizer.getTotalSize(),
+            position: 'relative',
+            minWidth: 'max-content',
+          }}
+        >
           {items.map((vi) => {
             const line = cache.get(vi.index);
             const ready = vi.index < indexedLines || !indexing;

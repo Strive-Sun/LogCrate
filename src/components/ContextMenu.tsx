@@ -35,7 +35,14 @@ export function ContextMenu(props: Props) {
 
   return (
     <>
-      <div className="ctx-backdrop" onClick={props.onClose} onContextMenu={(e) => { e.preventDefault(); props.onClose(); }} />
+      <div
+        className="ctx-backdrop"
+        onClick={props.onClose}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          props.onClose();
+        }}
+      />
       <div ref={ref} className="ctx-menu" style={{ left: pos.x, top: pos.y }}>
         {props.items.map((it, i) => (
           <div

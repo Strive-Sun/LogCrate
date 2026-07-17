@@ -66,7 +66,9 @@ export function SuffixFilter(props: Props) {
                 onChange={(e) => setCustom(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && addCustom()}
               />
-              <button className="icon-btn" onClick={addCustom}>+</button>
+              <button className="icon-btn" onClick={addCustom}>
+                +
+              </button>
             </div>
           </div>
         </>

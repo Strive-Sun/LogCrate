@@ -153,9 +153,21 @@ export const mockApi = {
 
   async newLogItems(): Promise<NewLogItem[]> {
     return [
-      { id: 'arc:crash-0715.zip', name: 'crash-0715.zip', kind: 'archive', source: '下载', age: '2m' },
+      {
+        id: 'arc:crash-0715.zip',
+        name: 'crash-0715.zip',
+        kind: 'archive',
+        source: '下载',
+        age: '2m',
+      },
       { id: 'file:server.log', name: 'server.log', kind: 'file', source: '下载', age: '5m' },
-      { id: 'arc:device3.zip', name: 'device3.zip', kind: 'archive', source: '日志备份', age: '10m' },
+      {
+        id: 'arc:device3.zip',
+        name: 'device3.zip',
+        kind: 'archive',
+        source: '日志备份',
+        age: '10m',
+      },
     ];
   },
 

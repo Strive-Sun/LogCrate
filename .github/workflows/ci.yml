@@ -33,6 +33,12 @@ jobs:
       - name: TypeScript 类型检查
         run: npx tsc --noEmit
 
+      - name: 前端格式检查
+        run: npm run format:check
+
+      - name: 前端静态检查
+        run: npm run lint
+
       - name: 前端构建
         run: npm run build
 

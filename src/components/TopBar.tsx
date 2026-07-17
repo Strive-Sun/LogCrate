@@ -29,7 +29,9 @@ export function TopBar(props: Props) {
   return (
     <div className="topbar">
       <span className="brand">LogPeek</span>
-      <span className="search" title="搜索将在 M4 提供">🔍 搜索</span>
+      <span className="search" title="搜索将在 M4 提供">
+        🔍 搜索
+      </span>
       <span className="spacer" />
 
       <button className="icon-btn" onClick={props.onToggleTheme} title="切换主题">
@@ -39,7 +41,9 @@ export function TopBar(props: Props) {
         <span className={'bell' + (ring ? ' ring' : '')}>🔔</span>
         {count > 0 && <span className="badge">{count > 99 ? '99+' : count}</span>}
       </button>
-      <button className="icon-btn" title="设置">⚙️</button>
+      <button className="icon-btn" title="设置">
+        ⚙️
+      </button>
 
       {bellOpen && (
         <>

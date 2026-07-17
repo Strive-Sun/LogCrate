@@ -37,23 +37,26 @@ export function App() {
     return saved >= 160 && saved <= 720 ? saved : 300;
   });
 
-  const startResize = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = treeWidth;
-    const onMove = (ev: MouseEvent) => {
-      const w = Math.min(720, Math.max(160, startW + ev.clientX - startX));
-      setTreeWidth(w);
-    };
-    const onUp = () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      document.body.classList.remove('resizing');
-    };
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-    document.body.classList.add('resizing');
-  }, [treeWidth]);
+  const startResize = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = treeWidth;
+      const onMove = (ev: MouseEvent) => {
+        const w = Math.min(720, Math.max(160, startW + ev.clientX - startX));
+        setTreeWidth(w);
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.body.classList.remove('resizing');
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+      document.body.classList.add('resizing');
+    },
+    [treeWidth],
+  );
 
   useEffect(() => {
     localStorage.setItem('logpeek.treeWidth', String(treeWidth));
@@ -198,7 +201,8 @@ export function App() {
   const removeWatch = useCallback(
     async (node: TreeNode) => {
       const path = node.path ?? node.id;
-      if (!window.confirm(`不再监控「${node.name}」?\n仅从列表移除,磁盘上的文件不会被删除。`)) return;
+      if (!window.confirm(`不再监控「${node.name}」?\n仅从列表移除,磁盘上的文件不会被删除。`))
+        return;
       try {
         await api.removeWatchDir(path);
         refreshTree();

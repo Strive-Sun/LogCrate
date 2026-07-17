@@ -13,10 +13,7 @@ interface Props {
 export const LogRow = memo(function LogRow({ top, lineNo, line, ready }: Props) {
   const lvl = line ? detectLevel(line.content) : null;
   return (
-    <div
-      className="log-line"
-      style={{ position: 'absolute', top, left: 0, right: 0, height: 18 }}
-    >
+    <div className="log-line" style={{ position: 'absolute', top, left: 0, right: 0, height: 18 }}>
       <span className="ln">{lineNo}</span>
       <span className="txt">
         {line ? (

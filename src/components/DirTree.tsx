@@ -48,9 +48,7 @@ function isUnread(node: TreeNode, unreadIds: Set<string>): boolean {
 
 /** 递归判断:目录(或其子孙)是否含未读的新到达项 */
 function hasUnreadDescendant(node: TreeNode, unreadIds: Set<string>): boolean {
-  return !!node.children?.some(
-    (c) => isUnread(c, unreadIds) || hasUnreadDescendant(c, unreadIds),
-  );
+  return !!node.children?.some((c) => isUnread(c, unreadIds) || hasUnreadDescendant(c, unreadIds));
 }
 
 export function DirTree(props: Props) {
@@ -201,7 +199,10 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
           {unread && !renaming && <span className="dot-unread" />}
         </div>
         {open && loading && (
-          <div className="tree-node" style={{ paddingLeft: 10 + (depth + 1) * 14, color: 'var(--fg-dim)' }}>
+          <div
+            className="tree-node"
+            style={{ paddingLeft: 10 + (depth + 1) * 14, color: 'var(--fg-dim)' }}
+          >
             读取清单…
           </div>
         )}
