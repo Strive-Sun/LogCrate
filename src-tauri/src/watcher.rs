@@ -962,14 +962,15 @@ mod tests {
             .unwrap();
 
         let created = fixture.write("arriving.log", b"part one");
-        let batch = change_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // FSEvents may coalesce delivery for longer than Windows under loaded CI runners.
+        let batch = change_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(batch.changes.iter().any(
             |change| matches!(change, DirectoryChange::Upsert { node } if node.path == created.to_string_lossy())
         ));
         assert!(detect_rx.try_recv().is_err());
 
         std::fs::remove_file(&created).unwrap();
-        let batch = change_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let batch = change_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(batch.changes.iter().any(
             |change| matches!(change, DirectoryChange::Remove { path } if path == &created.to_string_lossy())
         ));
