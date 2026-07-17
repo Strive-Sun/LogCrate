@@ -351,7 +351,12 @@ fn spawn_watch(watch: &Arc<WatchState>, app: &tauri::AppHandle, dir: &str) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+
             let config_dir = app
                 .path()
                 .app_config_dir()

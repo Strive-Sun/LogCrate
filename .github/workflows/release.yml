@@ -53,10 +53,22 @@ jobs:
         id: release_notes
         run: node scripts/release-notes.mjs --github-output
 
+      - name: 校验更新签名配置
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::缺少 TAURI_SIGNING_PRIVATE_KEY，无法生成安全的自动更新包"
+            exit 1
+          fi
+
       - name: 构建并发布安装包
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'LogPeek ${{ github.ref_name }}'
@@ -64,6 +76,7 @@ jobs:
           # 自动发布(非草稿):Release 跑完即公开,点进 tag/Releases 页面可直接下载安装包
           releaseDraft: false
           prerelease: false
+          updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
 
       # 兜底:无论上一步创建 Release 是否成功,都把安装包作为构建产物上传,
@@ -78,5 +91,8 @@ jobs:
           path: |
             src-tauri/target/release/bundle/nsis/*-setup.exe
             src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/msi/*.sig
+            src-tauri/target/release/bundle/nsis/*.sig
             src-tauri/target/**/bundle/dmg/*.dmg
             src-tauri/target/**/bundle/macos/*.app.tar.gz
+            src-tauri/target/**/bundle/macos/*.sig

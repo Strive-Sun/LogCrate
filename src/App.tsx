@@ -1,13 +1,39 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
-import type { NewLogItem, OpenSessionResult, TreeNode } from './api';
+import type {
+  AppUpdateInfo,
+  AppUpdateProgress,
+  NewLogItem,
+  OpenSessionResult,
+  TreeNode,
+} from './api';
 import { TopBar } from './components/TopBar';
+import { UpdateDialog } from './components/UpdateDialog';
 import { DirTree } from './components/DirTree';
 import { LogContent } from './components/LogContent';
 import { EmptyState } from './components/EmptyState';
+import {
+  classifyUpdateCheck,
+  errorMessage,
+  loadAutoCheck,
+  loadSkippedVersion,
+  saveAutoCheck,
+  saveSkippedVersion,
+  type UpdateStatus,
+} from './util/update';
 
 export function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
+  const [appVersion, setAppVersion] = useState('…');
+  const [autoCheckUpdates, setAutoCheckUpdates] = useState(() => loadAutoCheck(localStorage));
+  const [skippedVersion, setSkippedVersion] = useState(() => loadSkippedVersion(localStorage));
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>('idle');
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updatePromptOpen, setUpdatePromptOpen] = useState(false);
+  const updateTaskRunning = useRef(false);
+  const autoCheckStarted = useRef(false);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [newItems, setNewItems] = useState<NewLogItem[]>([]);
   // 徽章数字直接由未读列表长度派生,保证徽章与列表始终一致
@@ -57,6 +83,97 @@ export function App() {
     },
     [treeWidth],
   );
+
+  const checkForUpdates = useCallback(
+    async (automatic: boolean) => {
+      if (updateTaskRunning.current) return;
+      updateTaskRunning.current = true;
+      setUpdateStatus('checking');
+      setUpdateError(null);
+      setUpdateProgress(null);
+      try {
+        const update = await api.checkForUpdate();
+        const outcome = classifyUpdateCheck(update, automatic, skippedVersion);
+        if (outcome === 'up-to-date') {
+          setUpdateInfo(null);
+          setUpdateStatus(automatic ? 'idle' : 'up-to-date');
+          return;
+        }
+        if (outcome === 'skipped') {
+          await api.discardPendingUpdate();
+          setUpdateInfo(null);
+          setUpdateStatus('idle');
+          return;
+        }
+        if (!update) return;
+        setUpdateInfo(update);
+        setUpdateStatus('available');
+        if (automatic) setUpdatePromptOpen(true);
+      } catch (error) {
+        setUpdateInfo(null);
+        if (automatic) {
+          setUpdateStatus('idle');
+        } else {
+          setUpdateError(errorMessage(error));
+          setUpdateStatus('error');
+        }
+      } finally {
+        updateTaskRunning.current = false;
+      }
+    },
+    [skippedVersion],
+  );
+
+  const changeAutoCheckUpdates = useCallback((enabled: boolean) => {
+    setAutoCheckUpdates(enabled);
+    saveAutoCheck(localStorage, enabled);
+  }, []);
+
+  const skipUpdate = useCallback(() => {
+    if (updateInfo) {
+      saveSkippedVersion(localStorage, updateInfo.version);
+      setSkippedVersion(updateInfo.version);
+    }
+    setUpdatePromptOpen(false);
+    setUpdateInfo(null);
+    setUpdateStatus('idle');
+    setUpdateProgress(null);
+    void api.discardPendingUpdate().catch(() => undefined);
+  }, [updateInfo]);
+
+  const downloadUpdate = useCallback(async () => {
+    if (updateTaskRunning.current || !updateInfo) return;
+    updateTaskRunning.current = true;
+    setUpdatePromptOpen(false);
+    setUpdateError(null);
+    setUpdateStatus('downloading');
+    setUpdateProgress({ phase: 'downloading', downloadedBytes: 0 });
+    try {
+      await api.downloadAndInstallUpdate((progress) => {
+        setUpdateProgress(progress);
+        setUpdateStatus(progress.phase);
+      });
+      setUpdateStatus('installed');
+    } catch (error) {
+      setUpdateError(errorMessage(error));
+      setUpdateStatus('error');
+    } finally {
+      updateTaskRunning.current = false;
+    }
+  }, [updateInfo]);
+
+  useEffect(() => {
+    api
+      .getAppVersion()
+      .then(setAppVersion)
+      .catch(() => setAppVersion('未知'));
+  }, []);
+
+  useEffect(() => {
+    if (autoCheckStarted.current) return;
+    autoCheckStarted.current = true;
+    if (autoCheckUpdates) void checkForUpdates(true);
+  }, [autoCheckUpdates, checkForUpdates]);
 
   useEffect(() => {
     localStorage.setItem('logpeek.treeWidth', String(treeWidth));
@@ -282,7 +399,25 @@ export function App() {
           void key;
         }}
         onMarkAll={markAllRead}
+        appVersion={appVersion}
+        autoCheckUpdates={autoCheckUpdates}
+        updateStatus={updateStatus}
+        updateInfo={updateInfo}
+        updateProgress={updateProgress}
+        updateError={updateError}
+        onAutoCheckUpdatesChange={changeAutoCheckUpdates}
+        onCheckForUpdates={() => void checkForUpdates(false)}
+        onSkipUpdate={skipUpdate}
+        onDownloadUpdate={() => void downloadUpdate()}
       />
+
+      {updatePromptOpen && updateInfo && (
+        <UpdateDialog
+          update={updateInfo}
+          onSkip={skipUpdate}
+          onDownload={() => void downloadUpdate()}
+        />
+      )}
 
       <div className="cols">
         <DirTree

@@ -80,3 +80,18 @@ Codex 审阅通过 Claude Code 官方插件 [openai/codex-plugin-cc](https://git
 8. 提交版本变更后创建 `v版本号` tag 并推送。
 
 Release 工作流会再次校验 tag、Cargo 版本与 CHANGELOG 章节一致,并自动把该版本的逐条更新内容写入 GitHub Release Notes；任一项缺失或不一致都会停止发布。
+
+### 自动更新签名
+
+Tauri updater 会拒绝任何未通过签名验证的更新包。签名公钥保存在 `src-tauri/tauri.conf.json`,私钥不得进入仓库、应用包或构建日志。
+
+首次配置或需要重建发布环境时:
+
+1. 运行 `npm run tauri signer generate -- --ci -w ~/.tauri/logpeek-updater.key` 生成密钥对；生产密钥建议通过 `--password` 设置密码。
+2. 将 `.pub` 文件的完整内容填写到 `tauri.conf.json` 的 `plugins.updater.pubkey`。
+3. 在 GitHub 仓库的 Actions secrets 中配置:
+   - `TAURI_SIGNING_PRIVATE_KEY`:私钥文件的完整内容。
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`:生成私钥时设置的密码；无密码密钥可留空。
+4. 将私钥和密码备份到受控的密码库。丢失私钥后,已安装版本将无法验证任何新密钥签发的更新。
+
+发布工作流会在构建前检查私钥 secret,随后生成并上传 `latest.json`、更新包和 `.sig` 签名。Windows 更新优先使用 NSIS,macOS 使用签名的 `.app.tar.gz`。

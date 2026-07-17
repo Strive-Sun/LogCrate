@@ -26,7 +26,16 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico", "icons/icon.png"]
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERENDUwNDlCNzE0OEI3RjYKUldUMnQwaHhtd1JGM2NObzJSVE9nRFA0d0JMdk9nSVIrOGR2TVpGeHY5ZW5ZeUwzQmpIS1dWQ3UK",
+      "endpoints": ["https://github.com/Strive-Sun/LogPeek/releases/latest/download/latest.json"],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
 }

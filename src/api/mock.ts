@@ -2,6 +2,8 @@
 // 与 Tauri 后端实现同一套 API 契约(见 api/index.ts)。
 
 import type {
+  AppUpdateInfo,
+  AppUpdateProgress,
   ArchiveEntry,
   EncodingProgress,
   IndexProgress,
@@ -101,6 +103,35 @@ let encodingGeneration = 0;
 const encodingByKey = new Map<string, string>();
 
 export const mockApi = {
+  async getAppVersion(): Promise<string> {
+    return '1.0.1';
+  },
+
+  async checkForUpdate(): Promise<AppUpdateInfo | null> {
+    await delay(350);
+    return {
+      currentVersion: '1.0.1',
+      version: '1.1.0',
+      date: '2026-07-18T00:00:00Z',
+      body: '浏览器 mock：演示新版本下载与安装流程。',
+    };
+  },
+
+  async downloadAndInstallUpdate(onProgress: (progress: AppUpdateProgress) => void): Promise<void> {
+    const totalBytes = 10 * 1024 * 1024;
+    for (let percent = 0; percent <= 100; percent += 10) {
+      await delay(80);
+      onProgress({
+        phase: percent === 100 ? 'installing' : 'downloading',
+        downloadedBytes: Math.round((totalBytes * percent) / 100),
+        totalBytes,
+        percent,
+      });
+    }
+  },
+
+  async discardPendingUpdate(): Promise<void> {},
+
   async listWatchDirs(): Promise<TreeNode[]> {
     return [
       {

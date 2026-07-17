@@ -108,3 +108,20 @@ export interface FilterRule {
   /** 是否显示全部(含非日志) */
   showAll: boolean;
 }
+
+/** updater 返回的新版本元数据 */
+export interface AppUpdateInfo {
+  currentVersion: string;
+  version: string;
+  date?: string;
+  body?: string;
+}
+
+/** 更新包下载与安装阶段进度 */
+export interface AppUpdateProgress {
+  phase: 'downloading' | 'installing';
+  downloadedBytes: number;
+  totalBytes?: number;
+  /** 总大小未知时不提供百分比；安装阶段固定为 100 */
+  percent?: number;
+}

@@ -2,9 +2,15 @@
 // 内部调用 invoke 并把绝对路径等细节隐藏起来,组件层无需改动。
 
 import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { relaunch } from '@tauri-apps/plugin-process';
+import { check, type Update } from '@tauri-apps/plugin-updater';
+import { downloadPercent, updateFailureMessage } from '../util/update';
 import type {
+  AppUpdateInfo,
+  AppUpdateProgress,
   ArchiveEntry,
   DetectedItem,
   EncodingProgress,
@@ -24,6 +30,7 @@ const latestProgress = new Map<string, IndexProgress>();
 const progressSubscribers = new Map<string, Set<(progress: IndexProgress) => void>>();
 const latestEncodingProgress = new Map<string, EncodingProgress>();
 const encodingSubscribers = new Map<string, Set<(progress: EncodingProgress) => void>>();
+let pendingUpdate: Update | null = null;
 
 // Start listening before any session opens so fast jobs can be replayed to late subscribers.
 const progressListenerReady = listen<IndexProgress>('index-progress', (event) => {
@@ -56,6 +63,75 @@ interface RawDir {
 }
 
 export const tauriApi = {
+  getAppVersion(): Promise<string> {
+    return getVersion();
+  },
+
+  async checkForUpdate(): Promise<AppUpdateInfo | null> {
+    if (pendingUpdate) {
+      const previousUpdate = pendingUpdate;
+      pendingUpdate = null;
+      await previousUpdate.close();
+    }
+    const update = await check({ timeout: 15_000 });
+    if (!update) return null;
+    pendingUpdate = update;
+    return {
+      currentVersion: update.currentVersion,
+      version: update.version,
+      date: update.date,
+      body: update.body,
+    };
+  },
+
+  async downloadAndInstallUpdate(onProgress: (progress: AppUpdateProgress) => void): Promise<void> {
+    const update = pendingUpdate;
+    if (!update) throw new Error('没有可安装的更新，请重新检查');
+
+    let downloadedBytes = 0;
+    let totalBytes: number | undefined;
+    const progressState: { phase: AppUpdateProgress['phase'] } = { phase: 'downloading' };
+    try {
+      await update.downloadAndInstall(
+        (event) => {
+          if (event.event === 'Started') {
+            totalBytes = event.data.contentLength;
+            onProgress({
+              phase: progressState.phase,
+              downloadedBytes,
+              totalBytes,
+              percent: totalBytes ? 0 : undefined,
+            });
+          } else if (event.event === 'Progress') {
+            downloadedBytes += event.data.chunkLength;
+            onProgress({
+              phase: progressState.phase,
+              downloadedBytes,
+              totalBytes,
+              percent: downloadPercent(downloadedBytes, totalBytes),
+            });
+          } else {
+            progressState.phase = 'installing';
+            onProgress({ phase: progressState.phase, downloadedBytes, totalBytes, percent: 100 });
+          }
+        },
+        { timeout: 5 * 60_000 },
+      );
+      pendingUpdate = null;
+      await relaunch();
+    } catch (error) {
+      pendingUpdate = null;
+      await update.close().catch(() => undefined);
+      throw new Error(updateFailureMessage(progressState.phase, error));
+    }
+  },
+
+  async discardPendingUpdate(): Promise<void> {
+    const update = pendingUpdate;
+    pendingUpdate = null;
+    if (update) await update.close();
+  },
+
   async listWatchDirs(): Promise<TreeNode[]> {
     const dirs = await invoke<RawDir[]>('list_watch_dirs');
     return dirs.map((d) => ({

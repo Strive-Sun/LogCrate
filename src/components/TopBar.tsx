@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import type { NewLogItem } from '../api';
+import type { AppUpdateInfo, AppUpdateProgress, NewLogItem } from '../api';
+import type { UpdateStatus } from '../util/update';
+import { SettingsPanel } from './SettingsPanel';
 
 interface Props {
   theme: 'dark' | 'light';
@@ -8,11 +10,22 @@ interface Props {
   newItems: NewLogItem[];
   onOpenItem: (item: NewLogItem) => void;
   onMarkAll: () => void;
+  appVersion: string;
+  autoCheckUpdates: boolean;
+  updateStatus: UpdateStatus;
+  updateInfo: AppUpdateInfo | null;
+  updateProgress: AppUpdateProgress | null;
+  updateError: string | null;
+  onAutoCheckUpdatesChange: (enabled: boolean) => void;
+  onCheckForUpdates: () => void;
+  onSkipUpdate: () => void;
+  onDownloadUpdate: () => void;
 }
 
 export function TopBar(props: Props) {
   const { count, newItems } = props;
   const [bellOpen, setBellOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [ring, setRing] = useState(false);
   const prevCount = useRef(count);
 
@@ -26,6 +39,17 @@ export function TopBar(props: Props) {
     prevCount.current = count;
   }, [count]);
 
+  useEffect(() => {
+    if (!bellOpen && !settingsOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setBellOpen(false);
+      setSettingsOpen(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [bellOpen, settingsOpen]);
+
   return (
     <div className="topbar">
       <span className="brand">LogPeek</span>
@@ -37,11 +61,26 @@ export function TopBar(props: Props) {
       <button className="icon-btn" onClick={props.onToggleTheme} title="切换主题">
         {props.theme === 'dark' ? '🌙' : '☀️'}
       </button>
-      <button className="icon-btn" onClick={() => setBellOpen((v) => !v)} title="新日志提示">
+      <button
+        className="icon-btn"
+        onClick={() => {
+          setSettingsOpen(false);
+          setBellOpen((v) => !v);
+        }}
+        title="新日志提示"
+      >
         <span className={'bell' + (ring ? ' ring' : '')}>🔔</span>
         {count > 0 && <span className="badge">{count > 99 ? '99+' : count}</span>}
       </button>
-      <button className="icon-btn" title="设置">
+      <button
+        className={'icon-btn' + (settingsOpen ? ' active' : '')}
+        title="设置"
+        aria-expanded={settingsOpen}
+        onClick={() => {
+          setBellOpen(false);
+          setSettingsOpen((value) => !value);
+        }}
+      >
         ⚙️
       </button>
 
@@ -83,6 +122,25 @@ export function TopBar(props: Props) {
               </div>
             ))}
           </div>
+        </>
+      )}
+
+      {settingsOpen && (
+        <>
+          <div className="backdrop" onClick={() => setSettingsOpen(false)} />
+          <SettingsPanel
+            currentVersion={props.appVersion}
+            autoCheck={props.autoCheckUpdates}
+            status={props.updateStatus}
+            update={props.updateInfo}
+            progress={props.updateProgress}
+            error={props.updateError}
+            onAutoCheckChange={props.onAutoCheckUpdatesChange}
+            onCheck={props.onCheckForUpdates}
+            onSkip={props.onSkipUpdate}
+            onDownload={props.onDownloadUpdate}
+            onClose={() => setSettingsOpen(false)}
+          />
         </>
       )}
     </div>

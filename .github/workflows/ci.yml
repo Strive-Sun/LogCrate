@@ -39,6 +39,9 @@ jobs:
       - name: 前端静态检查
         run: npm run lint
 
+      - name: 前端单元测试
+        run: npm test
+
       - name: 发布日志检查
         run: npm run release:check
 
