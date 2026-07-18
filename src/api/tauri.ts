@@ -14,6 +14,7 @@ import type {
   ArchiveEntry,
   DetectedItem,
   DirectoryChangeBatch,
+  DroppedFileInfo,
   EncodingProgress,
   IndexProgress,
   LogLine,
@@ -295,6 +296,14 @@ export const tauriApi = {
     if (!dir || typeof dir !== 'string') return false;
     await invoke('add_watch_dir', { path: dir });
     return true;
+  },
+
+  async inspectDroppedFile(path: string): Promise<DroppedFileInfo> {
+    return invoke<DroppedFileInfo>('inspect_dropped_file', { path });
+  },
+
+  async addWatchPath(path: string): Promise<void> {
+    await invoke('add_watch_dir', { path });
   },
 
   async removeWatchDir(dirPath: string): Promise<void> {

@@ -29,6 +29,17 @@ pub struct DetectedItem {
     pub is_log: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DroppedFileInfo {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub watch_path: String,
+    pub is_log: bool,
+    pub already_monitored: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DirectoryChange {
@@ -197,6 +208,23 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
 
 fn canonical_or_original(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(windows)]
+fn user_facing_path(path: &Path) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = value.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
+}
+
+#[cfg(not(windows))]
+fn user_facing_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 fn minimal_coverage_roots(dirs: &[String]) -> Vec<PathBuf> {
@@ -535,14 +563,23 @@ fn stable_worker(
 
 impl WatchState {
     pub fn new(config_path: PathBuf) -> Arc<Self> {
-        let config = load_config(&config_path).unwrap_or_default();
-        Arc::new(Self {
+        let mut config = load_config(&config_path).unwrap_or_default();
+        let original_dirs = config.dirs.clone();
+        config.dirs = minimal_coverage_roots(&config.dirs)
+            .into_iter()
+            .map(|root| root.to_string_lossy().into_owned())
+            .collect();
+        let state = Arc::new(Self {
             config_path,
             config: Arc::new(Mutex::new(config)),
             watchers: Mutex::new(HashMap::new()),
             arrival_watchers: Mutex::new(HashMap::new()),
             stable_scheduler: Mutex::new(None),
-        })
+        });
+        if state.list_dirs() != original_dirs {
+            state.persist();
+        }
+        state
     }
 
     pub fn list_dirs(&self) -> Vec<String> {
@@ -550,12 +587,64 @@ impl WatchState {
     }
 
     pub fn is_watched_path(&self, path: &Path) -> bool {
+        let path = canonical_or_original(path);
         self.config
             .lock()
             .unwrap()
             .dirs
             .iter()
-            .any(|root| path_is_within(path, Path::new(root)))
+            .map(|root| canonical_or_original(Path::new(root)))
+            .any(|root| path_is_within(&path, &root))
+    }
+
+    pub fn inspect_dropped_file(&self, path: &str) -> anyhow::Result<DroppedFileInfo> {
+        let canonical = std::fs::canonicalize(path)
+            .map_err(|_| anyhow::anyhow!("文件不存在或无法访问: {path}"))?;
+        let metadata = std::fs::metadata(&canonical)
+            .map_err(|_| anyhow::anyhow!("无法读取文件信息: {path}"))?;
+        let normalized = user_facing_path(&canonical);
+        let name = normalized
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| normalized.to_string_lossy().into_owned());
+
+        if metadata.is_dir() {
+            std::fs::read_dir(&canonical).map_err(|_| anyhow::anyhow!("目录不可读: {path}"))?;
+            return Ok(DroppedFileInfo {
+                path: normalized.to_string_lossy().into_owned(),
+                name,
+                kind: "directory".into(),
+                watch_path: normalized.to_string_lossy().into_owned(),
+                is_log: false,
+                already_monitored: self.is_watched_path(&canonical),
+            });
+        }
+        if !metadata.is_file() {
+            anyhow::bail!("仅支持拖入单个普通文件或文件夹");
+        }
+        std::fs::File::open(&canonical).map_err(|_| anyhow::anyhow!("文件不可读: {path}"))?;
+
+        let detected = classify(&canonical, "drop");
+        let kind = detected
+            .as_ref()
+            .map(|item| item.kind.clone())
+            .unwrap_or_else(|| "file".into());
+        let is_log = detected
+            .as_ref()
+            .is_some_and(|item| item.kind == "file" && item.is_log);
+        let watch_path = normalized
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("无法确定文件所在目录"))?;
+
+        Ok(DroppedFileInfo {
+            path: normalized.to_string_lossy().into_owned(),
+            name,
+            kind,
+            watch_path: watch_path.to_string_lossy().into_owned(),
+            is_log,
+            already_monitored: self.is_watched_path(&canonical),
+        })
     }
 
     pub fn is_structure_watched(&self, dir: &Path) -> bool {
@@ -606,19 +695,38 @@ impl WatchState {
     }
 
     /// 添加监控目录:校验存在性 → 持久化 →(调用方负责 emit 初次扫描)
-    pub fn add_dir(&self, dir: &str) -> anyhow::Result<()> {
-        let p = Path::new(dir);
-        if !p.is_dir() {
+    pub fn add_dir(&self, dir: &str) -> anyhow::Result<bool> {
+        let canonical =
+            std::fs::canonicalize(dir).map_err(|_| anyhow::anyhow!("目录不存在或不可读: {dir}"))?;
+        if !canonical.is_dir() {
             anyhow::bail!("目录不存在或不可读: {dir}");
         }
+        let normalized = user_facing_path(&canonical).to_string_lossy().into_owned();
+        let mut removed = Vec::new();
         {
             let mut cfg = self.config.lock().unwrap();
-            if !cfg.dirs.iter().any(|d| d == dir) {
-                cfg.dirs.push(dir.to_string());
+            if cfg
+                .dirs
+                .iter()
+                .map(|root| canonical_or_original(Path::new(root)))
+                .any(|root| path_is_within(&canonical, &root))
+            {
+                return Ok(false);
             }
+            cfg.dirs.retain(|root| {
+                let redundant = path_is_within(&canonical_or_original(Path::new(root)), &canonical);
+                if redundant {
+                    removed.push(root.clone());
+                }
+                !redundant
+            });
+            cfg.dirs.push(normalized);
+        }
+        for root in removed {
+            self.stop_watch_tree(&root);
         }
         self.persist();
-        Ok(())
+        Ok(true)
     }
 
     pub fn remove_dir(&self, dir: &str) {
@@ -722,16 +830,21 @@ impl WatchState {
     }
 
     fn stop_watch_tree(&self, dir: &str) {
-        let target = Path::new(dir);
-        let roots = self.list_dirs();
+        let target = canonical_or_original(Path::new(dir));
+        let roots = self
+            .list_dirs()
+            .iter()
+            .map(|root| canonical_or_original(Path::new(root)))
+            .collect::<Vec<_>>();
         self.watchers.lock().unwrap().retain(|watched, _| {
-            let path = Path::new(watched);
-            if !path.starts_with(target) {
+            let path = canonical_or_original(Path::new(watched));
+            if !path_is_within(&path, &target) {
                 return true;
             }
             roots
                 .iter()
-                .any(|root| Path::new(root) == path && path.is_dir())
+                .any(|root| path_is_within(&path, root) && path_is_within(root, &path))
+                && path.is_dir()
         });
     }
 
@@ -1157,6 +1270,88 @@ mod tests {
     }
 
     #[test]
+    fn dropped_path_inspection_accepts_archives_logs_arbitrary_files_and_directories() {
+        let fixture = FixtureDir::new();
+        let state = WatchState::new(fixture.path.join("config.json"));
+        let zip = fixture.write("download.zip", b"PK\x03\x04");
+        let log = fixture.write("server.log", b"one\n");
+        let txt = fixture.write("notes.txt", b"two\n");
+        let json = fixture.write("event.json", br#"{"ok":true}"#);
+        let sampled = fixture.write("trace.data", b"plain sampled text\n");
+        let binary = fixture.write("image.bin", &[0, 1, 2, 3]);
+        let directory = fixture.path.join("nested");
+        std::fs::create_dir(&directory).unwrap();
+
+        let zip_info = state.inspect_dropped_file(zip.to_str().unwrap()).unwrap();
+        assert_eq!(zip_info.kind, "archive");
+        assert_eq!(zip_info.name, "download.zip");
+        assert!(!zip_info.is_log);
+        assert!(!zip_info.already_monitored);
+
+        for path in [log, txt, json, sampled] {
+            let info = state.inspect_dropped_file(path.to_str().unwrap()).unwrap();
+            assert_eq!(info.kind, "file");
+            assert!(info.is_log);
+            assert_eq!(
+                Path::new(&info.watch_path),
+                user_facing_path(&std::fs::canonicalize(&fixture.path).unwrap())
+            );
+        }
+
+        let binary_info = state
+            .inspect_dropped_file(binary.to_str().unwrap())
+            .unwrap();
+        assert_eq!(binary_info.kind, "file");
+        assert!(!binary_info.is_log);
+
+        let directory_info = state
+            .inspect_dropped_file(directory.to_str().unwrap())
+            .unwrap();
+        assert_eq!(directory_info.kind, "directory");
+        assert_eq!(directory_info.path, directory_info.watch_path);
+        assert!(!directory_info.is_log);
+    }
+
+    #[test]
+    fn dropped_path_inspection_rejects_missing_paths() {
+        let fixture = FixtureDir::new();
+        let state = WatchState::new(fixture.path.join("config.json"));
+        let missing = fixture.path.join("missing.log");
+
+        assert!(state
+            .inspect_dropped_file(missing.to_str().unwrap())
+            .is_err());
+    }
+
+    #[test]
+    fn dropped_file_inspection_detects_coverage_from_a_parent_watch_root() {
+        let fixture = FixtureDir::new();
+        let nested = fixture.path.join("nested").join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        let log = nested.join("server.log");
+        std::fs::write(&log, b"log\n").unwrap();
+        let state = WatchState::new(fixture.path.join("config.json"));
+        state.add_dir(fixture.path.to_str().unwrap()).unwrap();
+
+        let info = state.inspect_dropped_file(log.to_str().unwrap()).unwrap();
+        assert!(info.already_monitored);
+        assert!(state.is_watched_path(&log));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn user_facing_windows_paths_remove_verbatim_prefixes() {
+        assert_eq!(
+            user_facing_path(Path::new(r"\\?\D:\logs\server.log")),
+            PathBuf::from(r"D:\logs\server.log")
+        );
+        assert_eq!(
+            user_facing_path(Path::new(r"\\?\UNC\server\share\server.log")),
+            PathBuf::from(r"\\server\share\server.log")
+        );
+    }
+
+    #[test]
     fn inventory_includes_directories_and_binary_files_without_recursive_scanning() {
         let fixture = FixtureDir::new();
         fixture.write("server.log", b"log");
@@ -1264,28 +1459,65 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_roots_share_one_recursive_watcher_and_child_takes_over() {
+    fn overlapping_roots_are_not_stored_or_watched_twice() {
         let fixture = FixtureDir::new();
         let nested = fixture.path.join("nested");
         std::fs::create_dir(&nested).unwrap();
         let state = WatchState::new(fixture.path.join("config.json"));
-        state.add_dir(fixture.path.to_str().unwrap()).unwrap();
-        state.add_dir(nested.to_str().unwrap()).unwrap();
+        assert!(state.add_dir(fixture.path.to_str().unwrap()).unwrap());
+        assert!(!state.add_dir(nested.to_str().unwrap()).unwrap());
+        assert_eq!(state.list_dirs().len(), 1);
 
         state
             .start_watch(fixture.path.to_str().unwrap(), |_| {}, |_| {})
             .unwrap();
+        let roots = minimal_coverage_roots(&state.list_dirs());
+        assert_eq!(roots.len(), 1);
+        assert_eq!(state.arrival_watchers.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn adding_a_parent_root_replaces_existing_descendant_roots() {
+        let fixture = FixtureDir::new();
+        let nested = fixture.path.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let state = WatchState::new(fixture.path.join("config.json"));
+
+        assert!(state.add_dir(nested.to_str().unwrap()).unwrap());
         state
             .start_watch(nested.to_str().unwrap(), |_| {}, |_| {})
             .unwrap();
-        let roots = minimal_coverage_roots(&state.list_dirs());
-        assert_eq!(roots, vec![fixture.path.clone()]);
-        assert_eq!(state.arrival_watchers.lock().unwrap().len(), 1);
+        assert_eq!(state.watchers.lock().unwrap().len(), 1);
+        assert!(state.add_dir(fixture.path.to_str().unwrap()).unwrap());
+        let dirs = state.list_dirs();
+        assert_eq!(dirs.len(), 1);
+        assert!(state.watchers.lock().unwrap().is_empty());
+        assert!(path_is_within(
+            &std::fs::canonicalize(&nested).unwrap(),
+            &std::fs::canonicalize(&dirs[0]).unwrap()
+        ));
+    }
 
-        state.remove_dir(fixture.path.to_str().unwrap());
-        let watchers = state.arrival_watchers.lock().unwrap();
-        assert_eq!(watchers.len(), 1);
-        assert!(watchers.contains_key(nested.to_str().unwrap()));
+    #[test]
+    fn startup_normalizes_persisted_overlapping_roots() {
+        let fixture = FixtureDir::new();
+        let nested = fixture.path.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let config_path = fixture.path.join("config.json");
+        let config = WatchConfig {
+            dirs: vec![
+                nested.to_string_lossy().into_owned(),
+                fixture.path.to_string_lossy().into_owned(),
+            ],
+            ..WatchConfig::default()
+        };
+        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+
+        let state = WatchState::new(config_path.clone());
+        assert_eq!(state.list_dirs().len(), 1);
+        let persisted: WatchConfig =
+            serde_json::from_slice(&std::fs::read(config_path).unwrap()).unwrap();
+        assert_eq!(persisted.dirs, state.list_dirs());
     }
 
     #[test]
@@ -1433,34 +1665,30 @@ mod tests {
             .into_iter()
             .map(|item| (item.path, item.kind))
             .collect::<BTreeMap<_, _>>();
-        assert_eq!(
-            detected.get(finished.to_str().unwrap()).map(String::as_str),
-            Some("archive")
-        );
-        assert_eq!(
-            detected.get(log.to_str().unwrap()).map(String::as_str),
-            Some("file")
-        );
+        let finished = user_facing_path(&std::fs::canonicalize(&finished).unwrap())
+            .to_string_lossy()
+            .into_owned();
+        let log = user_facing_path(&std::fs::canonicalize(&log).unwrap())
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(detected.get(&finished).map(String::as_str), Some("archive"));
+        assert_eq!(detected.get(&log).map(String::as_str), Some("file"));
         assert!(detect_rx.recv_timeout(Duration::from_secs(2)).is_err());
         while let Ok(batch) = change_rx.try_recv() {
             assert!(batch.changes.iter().all(|change| match change {
                 DirectoryChange::Upsert { node } | DirectoryChange::Rename { node, .. } => {
-                    node.path != finished.to_string_lossy() && node.path != log.to_string_lossy()
+                    node.path != finished && node.path != log
                 }
-                DirectoryChange::Remove { path } => {
-                    path != &finished.to_string_lossy() && path != &log.to_string_lossy()
-                }
-                DirectoryChange::Rescan { nodes } => nodes.iter().all(|node| {
-                    node.path != finished.to_string_lossy() && node.path != log.to_string_lossy()
-                }),
+                DirectoryChange::Remove { path } => path != &finished && path != &log,
+                DirectoryChange::Rescan { nodes } => nodes
+                    .iter()
+                    .all(|node| { node.path != finished && node.path != log }),
             }));
         }
         assert!(state
             .scan_dir(fixture.path.to_str().unwrap())
             .iter()
-            .all(|item| {
-                item.path != finished.to_string_lossy() && item.path != log.to_string_lossy()
-            }));
+            .all(|item| item.path != finished && item.path != log));
     }
 
     #[test]
@@ -1676,7 +1904,9 @@ mod tests {
         let restored = WatchState::new(config_path);
         assert_eq!(
             restored.list_dirs(),
-            vec![watched.to_string_lossy().into_owned()]
+            vec![user_facing_path(&std::fs::canonicalize(watched).unwrap())
+                .to_string_lossy()
+                .into_owned()]
         );
         assert_eq!(restored.get_filter(), (vec![".trace".into()], true));
     }

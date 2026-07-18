@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import type { ArchiveEntry, TreeNode } from '../api';
 import { fmtSize } from '../util/format';
-import { isPathInsideDirectory, sameFilePath } from '../util/directoryTree';
+import { isActiveTreeNode, isPathInsideDirectory, sameFilePath } from '../util/directoryTree';
 import { SuffixFilter } from './SuffixFilter';
 import { ContextMenu } from './ContextMenu';
 
@@ -232,7 +232,11 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
         </div>
         {open &&
           node.children
-            ?.filter(props.passesFilter)
+            ?.filter(
+              (child) =>
+                props.passesFilter(child) ||
+                isActiveTreeNode(child, props.activeKey, props.selectedArchive),
+            )
             .map((c) => <TreeItem key={c.id} {...props} node={c} depth={depth + 1} />)}
         {open && loading && (
           <div
@@ -283,7 +287,13 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
         )}
         {open &&
           entries
-            ?.filter((e) => props.passesFilter({ name: e.path, kind: 'file', isLog: e.isLog }))
+            ?.filter((e) => {
+              const key = `${node.path ?? node.name}::${e.path}`;
+              return (
+                props.activeKey === key ||
+                props.passesFilter({ name: e.path, kind: 'file', isLog: e.isLog })
+              );
+            })
             .map((e) => {
               const key = `${node.path ?? node.name}::${e.path}`;
               return (

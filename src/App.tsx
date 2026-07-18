@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from './api';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
+import { api, isTauri } from './api';
 import type {
   AppUpdateInfo,
   AppUpdateProgress,
+  DroppedFileInfo,
   NewLogItem,
   OpenSessionResult,
   TreeNode,
@@ -29,6 +31,7 @@ import {
   revealDirectoryChain,
   removedDirectoryNodes,
 } from './util/directoryTree';
+import { planFileDrop, singleDroppedPath } from './util/fileDrop';
 
 function flattenNodes(nodes: readonly TreeNode[]): TreeNode[] {
   return nodes.flatMap((node) => [node, ...flattenNodes(node.children ?? [])]);
@@ -52,6 +55,9 @@ export function App() {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updatePromptOpen, setUpdatePromptOpen] = useState(false);
   const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
+  const confirmationRef = useRef<ConfirmationRequest | null>(null);
+  const updatePromptOpenRef = useRef(false);
+  const dropBusy = useRef(false);
   const updateTaskRunning = useRef(false);
   const autoCheckStarted = useRef(false);
   const [tree, setTree] = useState<TreeNode[]>([]);
@@ -218,6 +224,14 @@ export function App() {
     selectedArchiveRef.current = selectedArchive;
   }, [selectedArchive]);
 
+  useEffect(() => {
+    confirmationRef.current = confirmation;
+  }, [confirmation]);
+
+  useEffect(() => {
+    updatePromptOpenRef.current = updatePromptOpen;
+  }, [updatePromptOpen]);
+
   // 禁用 WebView 默认右键菜单(刷新/打印/检查等,对本应用无意义)
   useEffect(() => {
     const onCtx = (e: MouseEvent) => e.preventDefault();
@@ -233,11 +247,11 @@ export function App() {
     setSelectedArchive(null);
   }, []);
 
-  const refreshTree = useCallback(() => {
-    api.listWatchDirs().then((nodes) => {
-      treeRef.current = nodes;
-      setTree(nodes);
-    });
+  const refreshTree = useCallback(async () => {
+    const nodes = await api.listWatchDirs();
+    treeRef.current = nodes;
+    setTree(nodes);
+    return nodes;
   }, []);
 
   useEffect(() => {
@@ -361,7 +375,7 @@ export function App() {
   );
 
   const revealNewItem = useCallback(
-    async (item: NewLogItem) => {
+    async (item: NewLogItem, options?: { openFile?: boolean }) => {
       const directories = revealDirectoryChain(treeRef.current, item.id);
       if (directories.length === 0) {
         markSeen(item.id);
@@ -388,7 +402,8 @@ export function App() {
 
       setRevealedTarget({ path: item.id, directories });
       if (item.kind === 'file') {
-        await openEntry(item.id, item.id);
+        if (options?.openFile === false) markSeen(item.id);
+        else await openEntry(item.id, item.id);
       } else {
         setSelectedArchive(item.id);
         markSeen(item.id);
@@ -396,6 +411,71 @@ export function App() {
     },
     [loadDirectory, markSeen, openEntry],
   );
+
+  const handleDroppedPaths = useCallback(
+    async (paths: readonly string[]) => {
+      if (dropBusy.current) {
+        alert('正在处理另一个拖入文件，请稍候。');
+        return;
+      }
+      if (confirmationRef.current || updatePromptOpenRef.current) {
+        alert('请先完成当前弹窗操作，再拖入文件。');
+        return;
+      }
+
+      dropBusy.current = true;
+      try {
+        const path = singleDroppedPath(paths);
+        const info: DroppedFileInfo = await api.inspectDroppedFile(path);
+        const plan = planFileDrop(info);
+
+        // 日志查看与监控添加互不依赖，检查通过后立即启动现有打开流程。
+        if (plan.openPath) void openEntry(plan.openPath);
+
+        if (plan.watchPathToAdd) {
+          await api.addWatchPath(plan.watchPathToAdd);
+          await refreshTree();
+        }
+
+        if (plan.locateInTree && info.kind !== 'directory') {
+          await revealNewItem(
+            {
+              id: info.path,
+              name: info.name,
+              kind: info.kind,
+              source: info.watchPath,
+              age: 'now',
+            },
+            { openFile: false },
+          );
+        }
+      } catch (error) {
+        alert('拖入处理失败：' + String(error));
+      } finally {
+        dropBusy.current = false;
+      }
+    },
+    [openEntry, refreshTree, revealNewItem],
+  );
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (event.payload.type === 'drop') void handleDroppedPaths(event.payload.paths);
+      })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch((error) => alert('无法启用文件拖放：' + String(error)));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [handleDroppedPaths]);
 
   const finishReveal = useCallback(() => setRevealedTarget(null), []);
 
@@ -603,7 +683,7 @@ export function App() {
         />
         <div className="col-resizer" onMouseDown={startResize} />
 
-        {hasDirs ? (
+        {hasDirs || session || activeKey ? (
           <LogContent session={session} activeKey={activeKey} />
         ) : (
           <EmptyState onAddDir={addDir} />

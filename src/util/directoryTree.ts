@@ -166,3 +166,19 @@ export function passesDirectoryFilter(
   const lower = node.name.toLocaleLowerCase();
   return suffixes.some((suffix) => lower.endsWith(suffix.toLocaleLowerCase()));
 }
+
+/** 当前正在查看或选中的节点必须保持可见，避免筛选阻断目录定位完成。 */
+export function isActiveTreeNode(
+  node: Pick<TreeNode, 'id' | 'path' | 'kind'>,
+  activeKey: string | null,
+  selectedArchive: string | null,
+): boolean {
+  const path = node.path ?? node.id;
+  if (node.kind === 'archive') {
+    return selectedArchive !== null && sameFilePath(path, selectedArchive);
+  }
+  if (node.kind === 'file') {
+    return activeKey !== null && sameFilePath(path, activeKey);
+  }
+  return false;
+}

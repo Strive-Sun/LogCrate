@@ -103,6 +103,16 @@ export interface DetectedItem {
   source: string;
 }
 
+/** 后端校验并规范化后的拖入文件信息。 */
+export interface DroppedFileInfo {
+  path: string;
+  name: string;
+  kind: 'directory' | 'archive' | 'file';
+  watchPath: string;
+  isLog: boolean;
+  alreadyMonitored: boolean;
+}
+
 /** 后端归一化后的单个目录结构变化。 */
 export type DirectoryChange =
   | { type: 'upsert'; node: TreeNode }

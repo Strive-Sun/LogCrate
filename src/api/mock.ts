@@ -6,6 +6,7 @@ import type {
   AppUpdateProgress,
   ArchiveEntry,
   DirectoryChangeBatch,
+  DroppedFileInfo,
   EncodingProgress,
   IndexProgress,
   LogLine,
@@ -317,6 +318,12 @@ export const mockApi = {
     alert('浏览器 mock 模式下无法真正选择目录;在 Tauri 桌面应用中可用。');
     return false;
   },
+
+  async inspectDroppedFile(_path: string): Promise<DroppedFileInfo> {
+    throw new Error('浏览器 mock 模式不支持本地文件拖放');
+  },
+
+  async addWatchPath(_path: string): Promise<void> {},
 
   async removeWatchDir(_dirPath: string): Promise<void> {},
 

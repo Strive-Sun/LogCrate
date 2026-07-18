@@ -9,7 +9,7 @@ use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
-use watcher::{DetectedItem, DirectoryChange, DirectoryChangeBatch, WatchState};
+use watcher::{DetectedItem, DirectoryChange, DirectoryChangeBatch, DroppedFileInfo, WatchState};
 
 #[cfg(desktop)]
 use tauri::{
@@ -129,8 +129,20 @@ fn add_watch_dir(
     app: tauri::AppHandle,
     path: String,
 ) -> Result<(), String> {
-    state.watch.add_dir(&path).map_err(|e| e.to_string())?;
-    spawn_watch(&state.watch, &app, &path)
+    let added = state.watch.add_dir(&path).map_err(|e| e.to_string())?;
+    if added {
+        spawn_watch(&state.watch, &app, &path)
+    } else {
+        Ok(())
+    }
+}
+
+#[tauri::command]
+fn inspect_dropped_file(state: State<AppState>, path: String) -> Result<DroppedFileInfo, String> {
+    state
+        .watch
+        .inspect_dropped_file(&path)
+        .map_err(|error| error.to_string())
 }
 
 /// 展开文件夹时按需读取直接子项并建立非递归 watcher。
@@ -534,6 +546,7 @@ pub fn run() {
             expand_directory,
             collapse_directory,
             add_watch_dir,
+            inspect_dropped_file,
             remove_watch_dir,
             set_filter,
             get_filter,

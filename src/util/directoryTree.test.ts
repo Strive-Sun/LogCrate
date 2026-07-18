@@ -4,6 +4,7 @@ import type { DirectoryChangeBatch, TreeNode } from '../api/types';
 import {
   applyDirectoryChanges,
   findTreeNode,
+  isActiveTreeNode,
   isPathInsideDirectory,
   passesDirectoryFilter,
   revealDirectoryChain,
@@ -177,5 +178,19 @@ describe('目录树增量同步', () => {
     assert.equal(isPathInsideDirectory('D:\\logs', 'D:\\logs'), false);
     assert.equal(isPathInsideDirectory('/Users/test/logs/day/new.log', '/Users/test/logs'), true);
     assert.equal(isPathInsideDirectory('/Users/test/Logs/day/new.log', '/Users/test/logs'), false);
+  });
+
+  it('当前查看文件即使不匹配后缀筛选也保持可见', () => {
+    const source = file('D:\\logs\\src\\napi_class.cc', 'napi_class.cc');
+    const archive: TreeNode = {
+      id: 'D:\\logs\\bundle.zip',
+      path: 'D:\\logs\\bundle.zip',
+      name: 'bundle.zip',
+      kind: 'archive',
+    };
+    assert.equal(passesDirectoryFilter(source, ['.log'], false), false);
+    assert.equal(isActiveTreeNode(source, source.id, null), true);
+    assert.equal(isActiveTreeNode(source, null, null), false);
+    assert.equal(isActiveTreeNode(archive, null, archive.id), true);
   });
 });
