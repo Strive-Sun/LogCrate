@@ -771,6 +771,15 @@ body.resizing {
   color: var(--accent);
   font-size: 12px;
 }
+.language-select {
+  max-width: 150px;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
 .settings-button {
   flex-shrink: 0;
   padding: 6px 11px;

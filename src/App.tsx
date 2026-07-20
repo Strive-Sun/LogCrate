@@ -36,6 +36,8 @@ import {
 } from './util/directoryTree';
 import { planFileDrop, singleDroppedPath } from './util/fileDrop';
 import { installAutoHideScrollbars } from './util/autoHideScrollbars';
+import { useI18n } from './i18n/I18nProvider';
+import { localizeKnownError } from './i18n/errors';
 import {
   activateTab,
   closeTab,
@@ -76,6 +78,23 @@ function archiveForEntryKey(entryKey: string | null): string | null {
 }
 
 export function App() {
+  const { locale, t } = useI18n();
+  const localizedError = useCallback(
+    (error: unknown) => {
+      const message = errorMessage(error);
+      const known = {
+        'fileDrop.single': 'error.singleDrop',
+        'update.none': 'error.noUpdate',
+        'mock.selectDirectory': 'mock.selectDirectory',
+        'mock.dropUnsupported': 'mock.dropUnsupported',
+        'mock.fileManager': 'mock.fileManager',
+      } as const;
+      return message in known
+        ? t(known[message as keyof typeof known])
+        : localizeKnownError(message, t);
+    },
+    [t],
+  );
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [appVersion, setAppVersion] = useState('…');
   const [autoCheckUpdates, setAutoCheckUpdates] = useState(() => loadAutoCheck(localStorage));
@@ -239,8 +258,8 @@ export function App() {
     api
       .getAppVersion()
       .then(setAppVersion)
-      .catch(() => setAppVersion('未知'));
-  }, []);
+      .catch(() => setAppVersion(t('common.unknown')));
+  }, [t]);
 
   useEffect(() => {
     if (autoCheckStarted.current) return;
@@ -257,6 +276,10 @@ export function App() {
   }, [theme]);
 
   useEffect(() => installAutoHideScrollbars(document), []);
+
+  useEffect(() => {
+    void api.setAppLocale(locale).catch(() => undefined);
+  }, [locale]);
 
   useEffect(() => {
     tabsRef.current = tabs;
@@ -348,9 +371,13 @@ export function App() {
   }, [refreshTree]);
 
   const addDir = useCallback(async () => {
-    const ok = await api.addWatchDir();
-    if (ok) refreshTree();
-  }, [refreshTree]);
+    try {
+      const ok = await api.addWatchDir(t('dialog.selectWatch'));
+      if (ok) refreshTree();
+    } catch (error) {
+      alert(t('common.openFailed', { error: localizedError(error) }));
+    }
+  }, [localizedError, refreshTree, t]);
 
   const loadDirectory = useCallback(async (path: string) => {
     const children = await api.expandDirectory(path);
@@ -450,10 +477,10 @@ export function App() {
             [entryKey]: { ...tab, session: null, status: 'error', error: String(error) },
           };
         });
-        alert('无法打开:' + String(error));
+        alert(t('error.cannotOpen', { error: localizedError(error) }));
       }
     },
-    [markSeen, updateTabLayout, updateTabs],
+    [localizedError, markSeen, t, updateTabLayout, updateTabs],
   );
 
   const activateLogTab = useCallback(
@@ -500,7 +527,7 @@ export function App() {
       if (directories.length === 0) {
         markSeen(item.id);
         setRevealedTarget(null);
-        alert('无法定位：文件不在当前监控目录中或已经失效。');
+        alert(t('error.cannotLocateOutside'));
         return;
       }
 
@@ -509,14 +536,14 @@ export function App() {
       } catch {
         markSeen(item.id);
         setRevealedTarget(null);
-        alert('无法定位：文件所在目录已被移动、删除或无法读取。');
+        alert(t('error.cannotLocateMoved'));
         return;
       }
 
       if (!findTreeNode(treeRef.current, item.id)) {
         markSeen(item.id);
         setRevealedTarget(null);
-        alert('无法定位：文件已被移动或删除。');
+        alert(t('error.cannotLocateDeleted'));
         return;
       }
 
@@ -529,17 +556,17 @@ export function App() {
         markSeen(item.id);
       }
     },
-    [loadDirectory, markSeen, openEntry],
+    [loadDirectory, markSeen, openEntry, t],
   );
 
   const handleDroppedPaths = useCallback(
     async (paths: readonly string[]) => {
       if (dropBusy.current) {
-        alert('正在处理另一个拖入文件，请稍候。');
+        alert(t('error.dropBusy'));
         return;
       }
       if (confirmationRef.current || updatePromptOpenRef.current) {
-        alert('请先完成当前弹窗操作，再拖入文件。');
+        alert(t('error.finishDialog'));
         return;
       }
 
@@ -570,12 +597,12 @@ export function App() {
           );
         }
       } catch (error) {
-        alert('拖入处理失败：' + String(error));
+        alert(t('error.dropFailed', { error: localizedError(error) }));
       } finally {
         dropBusy.current = false;
       }
     },
-    [openEntry, refreshTree, revealNewItem],
+    [localizedError, openEntry, refreshTree, revealNewItem, t],
   );
 
   useEffect(() => {
@@ -590,12 +617,12 @@ export function App() {
         if (disposed) stop();
         else unlisten = stop;
       })
-      .catch((error) => alert('无法启用文件拖放：' + String(error)));
+      .catch((error) => alert(t('error.dropUnavailable', { error: localizedError(error) })));
     return () => {
       disposed = true;
       unlisten?.();
     };
-  }, [handleDroppedPaths]);
+  }, [handleDroppedPaths, localizedError, t]);
 
   const finishReveal = useCallback(() => setRevealedTarget(null), []);
 
@@ -623,19 +650,22 @@ export function App() {
         });
         refreshTree();
       } catch (e) {
-        alert('重命名失败:' + String(e));
+        alert(t('error.renameFailed', { error: localizedError(e) }));
       }
     },
-    [closeTabsMatching, refreshTree, markSeen],
+    [closeTabsMatching, localizedError, refreshTree, markSeen, t],
   );
 
-  const openPath = useCallback(async (node: TreeNode) => {
-    try {
-      await api.openPath(node.path ?? node.id);
-    } catch (e) {
-      alert('打开失败:' + String(e));
-    }
-  }, []);
+  const openPath = useCallback(
+    async (node: TreeNode) => {
+      try {
+        await api.openPath(node.path ?? node.id);
+      } catch (e) {
+        alert(t('common.openFailed', { error: localizedError(e) }));
+      }
+    },
+    [localizedError, t],
+  );
 
   const removeWatch = useCallback(
     async (node: TreeNode) => {
@@ -644,19 +674,19 @@ export function App() {
         await api.removeWatchDir(path);
         refreshTree();
       } catch (e) {
-        alert('移除失败:' + String(e));
+        alert(t('error.removeFailed', { error: localizedError(e) }));
       }
     },
-    [refreshTree],
+    [localizedError, refreshTree, t],
   );
 
   const deleteDir = useCallback(
     (node: TreeNode) => {
       const path = node.path ?? node.id;
       setConfirmation({
-        title: `确定删除整个目录「${node.name}」吗？`,
-        message: '目录及其全部内容将被移到系统回收站，并停止监控。',
-        confirmLabel: '删除目录',
+        title: t('confirm.deleteDirectoryTitle', { name: node.name }),
+        message: t('confirm.deleteDirectoryMessage'),
+        confirmLabel: t('confirm.deleteDirectory'),
         action: async () => {
           try {
             await api.deleteWatchDir(path);
@@ -675,21 +705,21 @@ export function App() {
             );
             refreshTree();
           } catch (e) {
-            alert('删除失败:' + String(e));
+            alert(t('error.deleteFailed', { error: localizedError(e) }));
           }
         },
       });
     },
-    [closeTabsMatching, refreshTree],
+    [closeTabsMatching, localizedError, refreshTree, t],
   );
 
   const deleteFile = useCallback(
     (node: TreeNode) => {
       const target = node.path ?? node.id;
       setConfirmation({
-        title: `确定删除「${node.name}」吗？`,
-        message: '文件将被移到系统回收站。',
-        confirmLabel: '删除文件',
+        title: t('confirm.deleteFileTitle', { name: node.name }),
+        message: t('confirm.deleteFileMessage'),
+        confirmLabel: t('confirm.deleteFile'),
         action: async () => {
           try {
             await api.deleteFile(target);
@@ -697,12 +727,12 @@ export function App() {
             markSeen(node.id);
             refreshTree();
           } catch (e) {
-            alert('删除失败:' + String(e));
+            alert(t('error.deleteFailed', { error: localizedError(e) }));
           }
         },
       });
     },
-    [closeTabsMatching, markSeen, refreshTree],
+    [closeTabsMatching, localizedError, markSeen, refreshTree, t],
   );
 
   const hasDirs = tree.length > 0;

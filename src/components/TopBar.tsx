@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { AppUpdateInfo, AppUpdateProgress, NewLogItem } from '../api';
 import type { UpdateStatus } from '../util/update';
 import { SettingsPanel } from './SettingsPanel';
+import { useI18n } from '../i18n/I18nProvider';
 
 interface Props {
   theme: 'dark' | 'light';
@@ -23,6 +24,7 @@ interface Props {
 }
 
 export function TopBar(props: Props) {
+  const { t } = useI18n();
   const { count, newItems } = props;
   const [bellOpen, setBellOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -53,12 +55,12 @@ export function TopBar(props: Props) {
   return (
     <div className="topbar">
       <span className="brand">LogPeek</span>
-      <span className="search" title="搜索将在 M4 提供">
-        🔍 搜索
+      <span className="search" title={t('top.searchLater')}>
+        🔍 {t('top.search')}
       </span>
       <span className="spacer" />
 
-      <button className="icon-btn" onClick={props.onToggleTheme} title="切换主题">
+      <button className="icon-btn" onClick={props.onToggleTheme} title={t('top.toggleTheme')}>
         {props.theme === 'dark' ? '🌙' : '☀️'}
       </button>
       <button
@@ -67,14 +69,14 @@ export function TopBar(props: Props) {
           setSettingsOpen(false);
           setBellOpen((v) => !v);
         }}
-        title="新日志提示"
+        title={t('top.newLogs')}
       >
         <span className={'bell' + (ring ? ' ring' : '')}>🔔</span>
         {count > 0 && <span className="badge">{count > 99 ? '99+' : count}</span>}
       </button>
       <button
         className={'icon-btn' + (settingsOpen ? ' active' : '')}
-        title="设置"
+        title={t('top.settings')}
         aria-expanded={settingsOpen}
         onClick={() => {
           setBellOpen(false);
@@ -89,7 +91,7 @@ export function TopBar(props: Props) {
           <div className="backdrop" onClick={() => setBellOpen(false)} />
           <div className="pop bell-pop">
             <div className="pop-head">
-              <span>新日志 ({newItems.length})</span>
+              <span>{t('top.newLogsCount', { count: newItems.length })}</span>
               <button
                 className="mark-all"
                 onClick={() => {
@@ -97,12 +99,12 @@ export function TopBar(props: Props) {
                   setBellOpen(false);
                 }}
               >
-                全部标记已读
+                {t('top.markAllRead')}
               </button>
             </div>
             {newItems.length === 0 && (
               <div className="pop-item" style={{ color: 'var(--fg-dim)' }}>
-                没有未读的新日志
+                {t('top.noUnread')}
               </div>
             )}
             {newItems.map((it) => (

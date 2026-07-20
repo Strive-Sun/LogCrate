@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { useI18n } from '../i18n/I18nProvider';
 
 interface Props {
   title: string;
@@ -9,6 +10,7 @@ interface Props {
 }
 
 export function ConfirmDialog({ title, message, confirmLabel, onCancel, onConfirm }: Props) {
+  const { t } = useI18n();
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onCancel();
@@ -31,7 +33,7 @@ export function ConfirmDialog({ title, message, confirmLabel, onCancel, onConfir
         <p className="confirm-modal-message">{message}</p>
         <div className="update-modal-actions">
           <button className="settings-button secondary" onClick={onCancel} autoFocus>
-            取消
+            {t('common.cancel')}
           </button>
           <button className="settings-button danger" onClick={onConfirm}>
             {confirmLabel}

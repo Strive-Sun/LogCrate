@@ -5,6 +5,7 @@ import { fmtSize } from '../util/format';
 import { isActiveTreeNode, isPathInsideDirectory, sameFilePath } from '../util/directoryTree';
 import { SuffixFilter } from './SuffixFilter';
 import { ContextMenu } from './ContextMenu';
+import { useI18n } from '../i18n/I18nProvider';
 
 interface Props {
   nodes: TreeNode[];
@@ -66,6 +67,7 @@ function hasUnreadDescendant(node: TreeNode, unreadIds: Set<string>): boolean {
 }
 
 export function DirTree(props: Props) {
+  const { t } = useI18n();
   const [menu, setMenu] = useState<{ x: number; y: number; node: TreeNode } | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
 
@@ -88,7 +90,7 @@ export function DirTree(props: Props) {
   return (
     <div className="col col-tree" style={props.width ? { width: props.width } : undefined}>
       <div className="col-head">
-        <span>监控目录</span>
+        <span>{t('tree.title')}</span>
         <SuffixFilter
           filter={props.filter}
           showAll={props.showAll}
@@ -104,7 +106,7 @@ export function DirTree(props: Props) {
         </div>
       </TreeContext.Provider>
       <button className="add-dir-btn" onClick={props.onAddDir}>
-        + 添加监控目录
+        {t('tree.add')}
       </button>
       {menu && (
         <ContextMenu
@@ -114,17 +116,25 @@ export function DirTree(props: Props) {
           items={
             menu.node.kind === 'dir' && menu.node.watchRoot
               ? [
-                  { label: '在资源管理器中打开', onClick: () => props.onOpenPath(menu.node) },
-                  { label: '重命名', onClick: () => ctx.startRename(menu.node) },
-                  { label: '移除监控(不删除文件)', onClick: () => props.onRemoveWatch(menu.node) },
-                  { label: '删除目录', danger: true, onClick: () => props.onDeleteDir(menu.node) },
+                  { label: t('tree.openInManager'), onClick: () => props.onOpenPath(menu.node) },
+                  { label: t('tree.rename'), onClick: () => ctx.startRename(menu.node) },
+                  { label: t('tree.removeWatch'), onClick: () => props.onRemoveWatch(menu.node) },
+                  {
+                    label: t('tree.deleteDirectory'),
+                    danger: true,
+                    onClick: () => props.onDeleteDir(menu.node),
+                  },
                 ]
               : menu.node.kind === 'dir'
-                ? [{ label: '在资源管理器中打开', onClick: () => props.onOpenPath(menu.node) }]
+                ? [{ label: t('tree.openInManager'), onClick: () => props.onOpenPath(menu.node) }]
                 : [
-                    { label: '在资源管理器中打开', onClick: () => props.onOpenPath(menu.node) },
-                    { label: '重命名', onClick: () => ctx.startRename(menu.node) },
-                    { label: '删除', danger: true, onClick: () => props.onDelete(menu.node) },
+                    { label: t('tree.openInManager'), onClick: () => props.onOpenPath(menu.node) },
+                    { label: t('tree.rename'), onClick: () => ctx.startRename(menu.node) },
+                    {
+                      label: t('tree.delete'),
+                      danger: true,
+                      onClick: () => props.onDelete(menu.node),
+                    },
                   ]
           }
         />
@@ -134,6 +144,7 @@ export function DirTree(props: Props) {
 }
 
 function TreeItem(props: Props & { node: TreeNode; depth: number }) {
+  const { t } = useI18n();
   const { node, depth } = props;
   const { onRevealComplete, revealDirectories, revealPath } = props;
   const tree = useContext(TreeContext);
@@ -243,7 +254,7 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
             className="tree-node"
             style={{ paddingLeft: 10 + (depth + 1) * 14, color: 'var(--fg-dim)' }}
           >
-            读取目录…
+            {t('tree.loadingDirectory')}
           </div>
         )}
         {open && loadError && (
@@ -251,7 +262,7 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
             className="tree-node"
             style={{ paddingLeft: 10 + (depth + 1) * 14, color: 'var(--danger)' }}
           >
-            目录读取失败
+            {t('tree.directoryFailed')}
           </div>
         )}
       </div>
@@ -282,7 +293,7 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
             className="tree-node"
             style={{ paddingLeft: 10 + (depth + 1) * 14, color: 'var(--fg-dim)' }}
           >
-            读取清单…
+            {t('tree.loadingArchive')}
           </div>
         )}
         {open &&
@@ -302,7 +313,7 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
                   className={'tree-node' + (props.activeKey === key ? ' selected' : '')}
                   style={{ paddingLeft: 10 + (depth + 1) * 14 }}
                   onClick={() => e.isLog && props.onOpenFile(key)}
-                  title={e.encrypted ? '加密条目(暂不支持)' : e.isLog ? '' : '非日志文件'}
+                  title={e.encrypted ? t('tree.encrypted') : e.isLog ? '' : t('tree.notLog')}
                 >
                   <span className="twisty" />
                   <span className="ico">{e.isLog ? '📄' : '⬡'}</span>

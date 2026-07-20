@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useI18n } from '../i18n/I18nProvider';
 
 export type LogTabStatus = 'opening' | 'ready' | 'dormant' | 'error';
 
@@ -31,6 +32,7 @@ export function LogTabs({
   onClose,
   onCapacityChange,
 }: Props) {
+  const { t } = useI18n();
   const barRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const moreButtonRef = useRef<HTMLButtonElement>(null);
@@ -83,7 +85,7 @@ export function LogTabs({
       className={'log-tabs' + (overflowIds.length > 0 ? ' has-overflow' : '')}
       ref={barRef}
       role="tablist"
-      aria-label="已打开日志"
+      aria-label={t('tabs.openLogs')}
     >
       <div className="log-tabs-visible">
         {visibleIds.map((id) => {
@@ -108,7 +110,7 @@ export function LogTabs({
               <button
                 type="button"
                 className="log-tab-close"
-                aria-label={`关闭 ${tab.title}`}
+                aria-label={t('tabs.close', { name: tab.title })}
                 onClick={(event) => {
                   event.stopPropagation();
                   onClose(id);
@@ -131,7 +133,7 @@ export function LogTabs({
             aria-expanded={menuOpen}
             onClick={() => setMenuOpen((open) => !open)}
           >
-            更多 ({overflowIds.length}) ▾
+            {t('tabs.more', { count: overflowIds.length })}
           </button>
           {menuOpen && (
             <div className="log-tabs-menu" ref={menuRef} role="menu">
@@ -155,7 +157,7 @@ export function LogTabs({
                     <button
                       type="button"
                       className="log-tab-close"
-                      aria-label={`关闭 ${tab.title}`}
+                      aria-label={t('tabs.close', { name: tab.title })}
                       onClick={(event) => {
                         event.stopPropagation();
                         onClose(id);

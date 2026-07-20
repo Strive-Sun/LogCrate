@@ -4,8 +4,8 @@ import { planFileDrop, singleDroppedPath } from './fileDrop';
 
 test('singleDroppedPath accepts exactly one path and rejects a batch as a whole', () => {
   assert.equal(singleDroppedPath(['D:\\logs\\server.log']), 'D:\\logs\\server.log');
-  assert.throws(() => singleDroppedPath([]), /一次拖入一个文件或文件夹/);
-  assert.throws(() => singleDroppedPath(['one.log', 'two.log']), /一次拖入一个文件或文件夹/);
+  assert.throws(() => singleDroppedPath([]), /fileDrop\.single/);
+  assert.throws(() => singleDroppedPath(['one.log', 'two.log']), /fileDrop\.single/);
 });
 
 test('plain text opens immediately while its parent is added automatically', () => {

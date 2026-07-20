@@ -55,19 +55,20 @@ flowchart LR
 
 ## Highlights
 
-| Capability | What it does |
-|---|---|
-| Live directory monitoring | Reflects external create, delete, rename, and modify operations; discovers new logs at any directory depth |
-| ZIP without manual extraction | Browses the archive directory and opens internal log entries directly |
-| Plain log viewing | Reads `.log`, `.txt`, `.out`, `.err`, `.trace`, `.json`, `.csv`, and other recognized text files |
-| Drag and start | Dropping one file watches its parent; dropping a folder watches that folder; dropping a text log also opens and locates it |
-| Multi-file tabs | Deduplicates repeated opens, moves overflow into a More menu, and preserves per-file reading state |
-| Virtual scrolling for large logs | Uses line-offset indexing, windowed reads, and bounded caches so memory usage does not scale with the full file |
-| Encoding support | Detects UTF-8, GBK / GB18030, UTF-16LE / UTF-16BE, with manual override |
-| New-log notifications | Shows an unread badge, locates individual arrivals, and supports marking everything as read |
-| Suffix filtering | Controls which file extensions appear and trigger notifications, with an option to show everything |
-| Automatic updates | Supports startup or manual checks, download progress, signature verification, installation, and relaunch |
-| Desktop behavior | Includes light/dark themes, close-to-tray, auto-hiding scrollbars, and a resizable directory pane |
+| Capability                       | What it does                                                                                                               |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Live directory monitoring        | Reflects external create, delete, rename, and modify operations; discovers new logs at any directory depth                 |
+| ZIP without manual extraction    | Browses the archive directory and opens internal log entries directly                                                      |
+| Plain log viewing                | Reads `.log`, `.txt`, `.out`, `.err`, `.trace`, `.json`, `.csv`, and other recognized text files                           |
+| Drag and start                   | Dropping one file watches its parent; dropping a folder watches that folder; dropping a text log also opens and locates it |
+| Multi-file tabs                  | Deduplicates repeated opens, moves overflow into a More menu, and preserves per-file reading state                         |
+| Virtual scrolling for large logs | Uses line-offset indexing, windowed reads, and bounded caches so memory usage does not scale with the full file            |
+| Encoding support                 | Detects UTF-8, GBK / GB18030, UTF-16LE / UTF-16BE, with manual override                                                    |
+| New-log notifications            | Shows an unread badge, locates individual arrivals, and supports marking everything as read                                |
+| Suffix filtering                 | Controls which file extensions appear and trigger notifications, with an option to show everything                         |
+| Automatic updates                | Supports startup or manual checks, download progress, signature verification, installation, and relaunch                   |
+| Desktop behavior                 | Includes light/dark themes, close-to-tray, auto-hiding scrollbars, and a resizable directory pane                          |
+| UI languages                     | Follows the system by default and switches instantly between English and Simplified Chinese in Settings                    |
 
 > LogPeek is currently a **read-only viewer**. It can rename or delete files on disk, but it cannot edit and save log content or rewrite entries inside a ZIP.
 
@@ -129,20 +130,20 @@ When a new ZIP or matching log appears under a watched folder, the bell in the t
 
 ## Common tasks
 
-| I want to… | Action | Result |
-|---|---|---|
-| Watch another folder | Click “+ Add watched folder” | Saves the folder and starts recursive monitoring immediately |
-| Inspect a local log quickly | Drop one log into the window | Adds its parent, locates the file, and opens it |
-| Watch a whole folder | Drop the folder into the window | Adds that folder as a watch root |
-| Read a log inside a ZIP | Expand the ZIP and click an entry | Creates a viewing session without manual extraction |
-| Distinguish same-named files | Hover a tab | Shows the absolute disk path and archive entry path |
-| Change text encoding | Use the encoding menu below the content | Rebuilds the line index in the background |
-| Locate a path in the file manager | Right-click a file or folder | Opens the system file manager at that path |
-| Stop watching but keep files | Right-click a watch root → Remove watch | Removes monitoring without changing disk content |
-| Delete a file or directory | Right-click → Delete, then confirm | Moves it to the system recycle bin instead of permanently deleting it |
-| Keep LogPeek running in the background | Click the window close button | Hides to the tray while monitoring continues |
-| Exit completely | Tray menu → Exit LogPeek | Stops monitoring and terminates the process |
-| Check for a new release | Settings → Check for updates | Downloads, verifies, and installs an official release |
+| I want to…                             | Action                                  | Result                                                                |
+| -------------------------------------- | --------------------------------------- | --------------------------------------------------------------------- |
+| Watch another folder                   | Click “+ Add watched folder”            | Saves the folder and starts recursive monitoring immediately          |
+| Inspect a local log quickly            | Drop one log into the window            | Adds its parent, locates the file, and opens it                       |
+| Watch a whole folder                   | Drop the folder into the window         | Adds that folder as a watch root                                      |
+| Read a log inside a ZIP                | Expand the ZIP and click an entry       | Creates a viewing session without manual extraction                   |
+| Distinguish same-named files           | Hover a tab                             | Shows the absolute disk path and archive entry path                   |
+| Change text encoding                   | Use the encoding menu below the content | Rebuilds the line index in the background                             |
+| Locate a path in the file manager      | Right-click a file or folder            | Opens the system file manager at that path                            |
+| Stop watching but keep files           | Right-click a watch root → Remove watch | Removes monitoring without changing disk content                      |
+| Delete a file or directory             | Right-click → Delete, then confirm      | Moves it to the system recycle bin instead of permanently deleting it |
+| Keep LogPeek running in the background | Click the window close button           | Hides to the tray while monitoring continues                          |
+| Exit completely                        | Tray menu → Exit LogPeek                | Stops monitoring and terminates the process                           |
+| Check for a new release                | Settings → Check for updates            | Downloads, verifies, and installs an official release                 |
 
 ## Support matrix
 
@@ -152,6 +153,7 @@ When a new ZIP or matching log appears under a watched folder, the bell in the t
 - **Archives** — ZIP.
 - **Text** — common log extensions plus files recognized as text through content sampling.
 - **Encodings** — UTF-8, GBK, GB18030, UTF-16LE, and UTF-16BE.
+- **Interface languages** — English and Simplified Chinese, with a persisted system/manual preference.
 
 ### Current boundaries
 
@@ -193,13 +195,13 @@ The roadmap describes direction, not a promised version or delivery date. Issues
 
 LogPeek is built with Tauri 2. The frontend owns interaction and virtualized lists; the Rust backend owns file watching, ZIP access, encoding detection, and line indexing.
 
-| Layer | Responsibility |
-|---|---|
-| React + TypeScript | Directory tree, notifications, tabs, settings, and the virtualized log view |
-| Tauri IPC | Commands and progress events between the UI and local Rust capabilities |
-| Rust watcher | Recursive directory monitoring, event coalescing, file stability checks, and configuration persistence |
-| ArchiveReader | ZIP central-directory access and a shared abstraction for archive entries and plain text |
-| SessionManager | Encoding detection, line-offset indexes, bounded-session LRU, and temporary-resource cleanup |
+| Layer              | Responsibility                                                                                         |
+| ------------------ | ------------------------------------------------------------------------------------------------------ |
+| React + TypeScript | Directory tree, notifications, tabs, settings, and the virtualized log view                            |
+| Tauri IPC          | Commands and progress events between the UI and local Rust capabilities                                |
+| Rust watcher       | Recursive directory monitoring, event coalescing, file stability checks, and configuration persistence |
+| ArchiveReader      | ZIP central-directory access and a shared abstraction for archive entries and plain text               |
+| SessionManager     | Encoding detection, line-offset indexes, bounded-session LRU, and temporary-resource cleanup           |
 
 Read the [technical design](docs/technical-design.md) for implementation detail and [CHANGELOG.md](CHANGELOG.md) for version history.
 
@@ -280,4 +282,3 @@ New capabilities are specified through OpenSpec before implementation. See [docs
 ## License
 
 This repository does not currently include an open-source license. Until a license is added, do not assume the code may be freely copied, modified, or redistributed.
-

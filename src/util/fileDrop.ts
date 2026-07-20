@@ -8,7 +8,7 @@ export type FileDropPlan = {
 
 export function singleDroppedPath(paths: readonly string[]): string {
   if (paths.length !== 1) {
-    throw new Error('当前仅支持一次拖入一个文件或文件夹，多路径拖入将在后续版本支持。');
+    throw new Error('fileDrop.single');
   }
   return paths[0];
 }

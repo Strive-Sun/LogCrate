@@ -1,6 +1,7 @@
 import { memo } from 'react';
 import type { LogLine } from '../api';
 import { detectLevel } from '../util/format';
+import { useI18n } from '../i18n/I18nProvider';
 
 interface Props {
   top: number;
@@ -11,6 +12,7 @@ interface Props {
 
 /** 单行日志:行号固定在左、内容可横向滚动、级别着色、截断标记 */
 export const LogRow = memo(function LogRow({ top, lineNo, line, ready }: Props) {
+  const { t } = useI18n();
   const lvl = line ? detectLevel(line.content) : null;
   return (
     <div className="log-line" style={{ position: 'absolute', top, left: 0, right: 0, height: 18 }}>
@@ -19,11 +21,11 @@ export const LogRow = memo(function LogRow({ top, lineNo, line, ready }: Props) 
         {line ? (
           <span className={lvl ? `lvl-${lvl}` : undefined}>{line.content}</span>
         ) : ready ? (
-          <span style={{ color: 'var(--fg-faint)' }}>加载中…</span>
+          <span style={{ color: 'var(--fg-faint)' }}>{t('log.loading')}</span>
         ) : (
-          <span style={{ color: 'var(--fg-faint)' }}>解压中…(该行尚未建索引)</span>
+          <span style={{ color: 'var(--fg-faint)' }}>{t('log.extracting')}</span>
         )}
-        {line?.truncated && <span className="trunc-tag">已截断</span>}
+        {line?.truncated && <span className="trunc-tag">{t('log.truncated')}</span>}
       </span>
     </div>
   );

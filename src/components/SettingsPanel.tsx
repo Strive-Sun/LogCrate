@@ -1,5 +1,6 @@
 import type { AppUpdateInfo, AppUpdateProgress } from '../api';
 import { formatBytes, type UpdateStatus } from '../util/update';
+import { useI18n } from '../i18n/I18nProvider';
 
 interface Props {
   currentVersion: string;
@@ -18,18 +19,19 @@ interface Props {
 const busyStatuses: UpdateStatus[] = ['checking', 'downloading', 'installing'];
 
 export function SettingsPanel(props: Props) {
+  const { preference, setPreference, t } = useI18n();
   const busy = busyStatuses.includes(props.status);
   const progressLabel = props.progress
     ? props.progress.totalBytes
       ? `${formatBytes(props.progress.downloadedBytes)} / ${formatBytes(props.progress.totalBytes)}`
-      : `${formatBytes(props.progress.downloadedBytes)} 已下载`
+      : t('update.downloaded', { size: formatBytes(props.progress.downloadedBytes) })
     : '';
 
   return (
-    <div className="pop settings-pop" role="dialog" aria-label="设置">
+    <div className="pop settings-pop" role="dialog" aria-label={t('settings.title')}>
       <div className="pop-head">
-        <span>设置</span>
-        <button className="settings-close" onClick={props.onClose} aria-label="关闭设置">
+        <span>{t('settings.title')}</span>
+        <button className="settings-close" onClick={props.onClose} aria-label={t('settings.close')}>
           ×
         </button>
       </div>
@@ -37,16 +39,32 @@ export function SettingsPanel(props: Props) {
       <div className="settings-section">
         <div className="settings-row">
           <div>
-            <div className="settings-label">当前版本</div>
-            <div className="settings-hint">LogPeek 桌面应用</div>
+            <div className="settings-label">{t('settings.version')}</div>
+            <div className="settings-hint">{t('settings.appHint')}</div>
           </div>
           <code className="version-value">v{props.currentVersion}</code>
         </div>
 
+        <label className="settings-row">
+          <div>
+            <div className="settings-label">{t('settings.language')}</div>
+            <div className="settings-hint">{t('settings.languageHint')}</div>
+          </div>
+          <select
+            className="language-select"
+            value={preference}
+            onChange={(e) => setPreference(e.target.value as typeof preference)}
+          >
+            <option value="system">{t('settings.language.system')}</option>
+            <option value="zh-CN">{t('settings.language.zhCN')}</option>
+            <option value="en">{t('settings.language.en')}</option>
+          </select>
+        </label>
+
         <label className="settings-row settings-toggle-row">
           <div>
-            <div className="settings-label">启动时自动检查更新</div>
-            <div className="settings-hint">仅发现新版本时提示</div>
+            <div className="settings-label">{t('settings.autoUpdate')}</div>
+            <div className="settings-hint">{t('settings.autoUpdateHint')}</div>
           </div>
           <input
             type="checkbox"
@@ -59,27 +77,29 @@ export function SettingsPanel(props: Props) {
       <div className="settings-section update-section" aria-live="polite">
         <div className="update-row">
           <div>
-            <div className="settings-label">软件更新</div>
-            <div className="settings-hint">通过签名验证后自动安装</div>
+            <div className="settings-label">{t('settings.softwareUpdate')}</div>
+            <div className="settings-hint">{t('settings.softwareUpdateHint')}</div>
           </div>
           <button className="settings-button" disabled={busy} onClick={props.onCheck}>
-            {props.status === 'checking' ? '检查中…' : '检查更新'}
+            {props.status === 'checking' ? t('update.checking') : t('update.check')}
           </button>
         </div>
 
         {props.status === 'up-to-date' && (
-          <div className="update-message success">当前已是最新版本</div>
+          <div className="update-message success">{t('update.latest')}</div>
         )}
         {props.status === 'available' && props.update && (
           <div className="update-card">
-            <div className="update-version">发现新版本 v{props.update.version}</div>
-            <div className="settings-hint">下载完成后将自动安装并重启应用</div>
+            <div className="update-version">
+              {t('update.available', { version: props.update.version })}
+            </div>
+            <div className="settings-hint">{t('update.installHint')}</div>
             <div className="update-actions">
               <button className="settings-button secondary" onClick={props.onSkip}>
-                跳过此版本
+                {t('update.skip')}
               </button>
               <button className="settings-button primary" onClick={props.onDownload}>
-                下载更新
+                {t('update.download')}
               </button>
             </div>
           </div>
@@ -87,7 +107,9 @@ export function SettingsPanel(props: Props) {
         {(props.status === 'downloading' || props.status === 'installing') && props.progress && (
           <div className="update-progress-wrap">
             <div className="update-progress-label">
-              <span>{props.status === 'installing' ? '正在安装…' : '正在下载…'}</span>
+              <span>
+                {props.status === 'installing' ? t('update.installing') : t('update.downloading')}
+              </span>
               <span>
                 {props.progress.percent === undefined
                   ? progressLabel
@@ -99,7 +121,9 @@ export function SettingsPanel(props: Props) {
                 'update-progress' + (props.progress.percent === undefined ? ' indeterminate' : '')
               }
               role="progressbar"
-              aria-label={props.status === 'installing' ? '安装更新' : '下载更新'}
+              aria-label={
+                props.status === 'installing' ? t('update.installAria') : t('update.downloadAria')
+              }
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={props.progress.percent}
@@ -110,10 +134,12 @@ export function SettingsPanel(props: Props) {
           </div>
         )}
         {props.status === 'installed' && (
-          <div className="update-message success">更新已安装，正在重启…</div>
+          <div className="update-message success">{t('update.installed')}</div>
         )}
         {props.status === 'error' && (
-          <div className="update-message error">更新失败：{props.error ?? '未知错误'}</div>
+          <div className="update-message error">
+            {t('update.failed', { error: props.error ?? t('common.unknown') })}
+          </div>
         )}
       </div>
     </div>

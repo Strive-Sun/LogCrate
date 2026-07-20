@@ -74,7 +74,8 @@ export function errorMessage(error: unknown): string {
 }
 
 export function updateFailureMessage(phase: 'downloading' | 'installing', error: unknown): string {
-  return `${phase === 'installing' ? '安装' : '下载'}更新失败：${errorMessage(error)}`;
+  void phase;
+  return errorMessage(error);
 }
 
 export function formatBytes(bytes: number): string {

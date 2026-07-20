@@ -92,6 +92,9 @@ function treeNode(raw: RawDetectedItem): TreeNode {
 }
 
 export const tauriApi = {
+  async setAppLocale(locale: 'zh-CN' | 'en'): Promise<void> {
+    await invoke('set_app_locale', { locale });
+  },
   getAppVersion(): Promise<string> {
     return getVersion();
   },
@@ -115,7 +118,7 @@ export const tauriApi = {
 
   async downloadAndInstallUpdate(onProgress: (progress: AppUpdateProgress) => void): Promise<void> {
     const update = pendingUpdate;
-    if (!update) throw new Error('没有可安装的更新，请重新检查');
+    if (!update) throw new Error('update.none');
 
     let downloadedBytes = 0;
     let totalBytes: number | undefined;
@@ -328,8 +331,8 @@ export const tauriApi = {
   },
 
   /** 弹出文件夹选择器,添加监控目录;返回是否添加成功 */
-  async addWatchDir(): Promise<boolean> {
-    const dir = await openDialog({ directory: true, multiple: false, title: '选择监控目录' });
+  async addWatchDir(title?: string): Promise<boolean> {
+    const dir = await openDialog({ directory: true, multiple: false, title });
     if (!dir || typeof dir !== 'string') return false;
     await invoke('add_watch_dir', { path: dir });
     return true;

@@ -11,9 +11,10 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 use watcher::{DetectedItem, DirectoryChange, DirectoryChangeBatch, DroppedFileInfo, WatchState};
 
+use tauri::menu::MenuItem;
 #[cfg(desktop)]
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::Menu,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 
@@ -56,6 +57,27 @@ fn tray_click_action(is_left_button: bool, is_released: bool) -> LifecycleAction
 struct AppState {
     watch: Arc<WatchState>,
     sessions: Arc<SessionManager>,
+}
+
+struct TrayMenuItems {
+    show: MenuItem<tauri::Wry>,
+    exit: MenuItem<tauri::Wry>,
+}
+
+fn tray_labels(locale: &str) -> (&'static str, &'static str) {
+    if locale == "zh-CN" {
+        ("显示主窗口", "退出 LogPeek")
+    } else {
+        ("Show main window", "Exit LogPeek")
+    }
+}
+
+#[tauri::command]
+fn set_app_locale(locale: String, items: State<TrayMenuItems>) -> Result<(), String> {
+    let (show, exit) = tray_labels(&locale);
+    items.show.set_text(show).map_err(|e| e.to_string())?;
+    items.exit.set_text(exit).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -460,8 +482,14 @@ fn show_main_window(app: &tauri::AppHandle) {
 
 #[cfg(desktop)]
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
-    let show_item = MenuItem::with_id(app, SHOW_MAIN_MENU_ID, "显示主窗口", true, None::<&str>)?;
-    let exit_item = MenuItem::with_id(app, EXIT_APP_MENU_ID, "退出 LogPeek", true, None::<&str>)?;
+    let show_item = MenuItem::with_id(
+        app,
+        SHOW_MAIN_MENU_ID,
+        "Show main window",
+        true,
+        None::<&str>,
+    )?;
+    let exit_item = MenuItem::with_id(app, EXIT_APP_MENU_ID, "Exit LogPeek", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_item, &exit_item])?;
 
     let mut tray = TrayIconBuilder::new()
@@ -494,6 +522,10 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         tray = tray.icon(icon);
     }
     tray.build(app)?;
+    app.manage(TrayMenuItems {
+        show: show_item,
+        exit: exit_item,
+    });
     Ok(())
 }
 
@@ -560,7 +592,8 @@ pub fn run() {
             read_lines,
             line_count,
             set_session_encoding,
-            close_log_session
+            close_log_session,
+            set_app_locale
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -590,6 +623,13 @@ mod lifecycle_tests {
             LifecycleAction::ExitApplication
         );
         assert_eq!(menu_action("unknown"), LifecycleAction::Ignore);
+    }
+
+    #[test]
+    fn tray_labels_support_chinese_and_fall_back_to_english() {
+        assert_eq!(tray_labels("zh-CN"), ("显示主窗口", "退出 LogPeek"));
+        assert_eq!(tray_labels("en"), ("Show main window", "Exit LogPeek"));
+        assert_eq!(tray_labels("fr"), ("Show main window", "Exit LogPeek"));
     }
 
     #[test]

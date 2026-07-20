@@ -105,6 +105,7 @@ let encodingGeneration = 0;
 const encodingByKey = new Map<string, string>();
 
 export const mockApi = {
+  async setAppLocale(_locale: 'zh-CN' | 'en'): Promise<void> {},
   async getAppVersion(): Promise<string> {
     return '1.0.1';
   },
@@ -323,13 +324,12 @@ export const mockApi = {
     return () => window.clearTimeout(timer);
   },
 
-  async addWatchDir(): Promise<boolean> {
-    alert('浏览器 mock 模式下无法真正选择目录;在 Tauri 桌面应用中可用。');
-    return false;
+  async addWatchDir(_title?: string): Promise<boolean> {
+    throw new Error('mock.selectDirectory');
   },
 
   async inspectDroppedFile(_path: string): Promise<DroppedFileInfo> {
-    throw new Error('浏览器 mock 模式不支持本地文件拖放');
+    throw new Error('mock.dropUnsupported');
   },
 
   async addWatchPath(_path: string): Promise<void> {},
@@ -344,7 +344,7 @@ export const mockApi = {
   async deleteFile(_path: string): Promise<void> {},
 
   async openPath(_path: string): Promise<void> {
-    alert('浏览器 mock 模式下无法打开文件管理器;在 Tauri 桌面应用中可用。');
+    throw new Error('mock.fileManager');
   },
 
   async renameWatchDir(path: string, newName: string): Promise<string> {

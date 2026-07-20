@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useI18n } from '../i18n/I18nProvider';
 
 interface Props {
   filter: string[];
@@ -10,6 +11,7 @@ interface Props {
 const SUFFIX_CHOICES = ['.log', '.txt', '.out', '.json'];
 
 export function SuffixFilter(props: Props) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [custom, setCustom] = useState('');
 
@@ -29,14 +31,14 @@ export function SuffixFilter(props: Props) {
 
   return (
     <div className="suffix-filter">
-      <button className="suffix-btn" onClick={() => setOpen((v) => !v)} title="后缀筛选">
-        后缀 ▾
+      <button className="suffix-btn" onClick={() => setOpen((v) => !v)} title={t('filter.title')}>
+        {t('filter.button')}
       </button>
       {open && (
         <>
           <div className="backdrop" onClick={() => setOpen(false)} />
           <div className="pop suffix-pop">
-            <div className="pop-head">后缀筛选</div>
+            <div className="pop-head">{t('filter.title')}</div>
             {SUFFIX_CHOICES.map((s) => (
               <div className="filter-row" key={s}>
                 <label>
@@ -56,7 +58,7 @@ export function SuffixFilter(props: Props) {
                   checked={props.showAll}
                   onChange={(e) => props.onShowAllChange(e.target.checked)}
                 />
-                显示全部(含非日志)
+                {t('filter.showAll')}
               </label>
             </div>
             <div className="filter-custom">

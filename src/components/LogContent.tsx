@@ -4,6 +4,7 @@ import { api } from '../api';
 import type { LogLine, OpenSessionResult } from '../api';
 import { fmtNum, fmtSize } from '../util/format';
 import { LogRow } from './LogRow';
+import { useI18n } from '../i18n/I18nProvider';
 
 interface Props {
   session: OpenSessionResult | null;
@@ -17,6 +18,7 @@ const MAX_CACHED_LINES = 5_000;
 const ENCODINGS = ['UTF-8', 'GBK', 'GB18030', 'UTF-16LE', 'UTF-16BE'];
 
 export function LogContent({ session, activeKey, status = 'ready', error }: Props) {
+  const { t } = useI18n();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [percent, setPercent] = useState(100);
   const [indexedLines, setIndexedLines] = useState(0);
@@ -33,33 +35,36 @@ export function LogContent({ session, activeKey, status = 'ready', error }: Prop
   const encodingUnsub = useRef<() => void>(() => {});
   const preferredEncoding = useRef<string | null>(null);
 
-  const rebuildForEncoding = useCallback(async (entryKey: string, encoding: string) => {
-    encodingUnsub.current();
-    setEncodingChanging(true);
-    setEncodingPercent(0);
-    try {
-      const generation = await api.setSessionEncoding(entryKey, encoding);
-      encodingUnsub.current = api.subscribeEncodingProgress(entryKey, generation, (progress) => {
-        setEncodingPercent(progress.percent);
-        if (!progress.done) return;
+  const rebuildForEncoding = useCallback(
+    async (entryKey: string, encoding: string) => {
+      encodingUnsub.current();
+      setEncodingChanging(true);
+      setEncodingPercent(0);
+      try {
+        const generation = await api.setSessionEncoding(entryKey, encoding);
+        encodingUnsub.current = api.subscribeEncodingProgress(entryKey, generation, (progress) => {
+          setEncodingPercent(progress.percent);
+          if (!progress.done) return;
+          setEncodingChanging(false);
+          if (progress.failed) {
+            alert(t('error.encodingFailed', { error: progress.error ?? t('common.unknown') }));
+            return;
+          }
+          preferredEncoding.current = progress.encoding;
+          setEffectiveEncoding(progress.encoding);
+          setTotalLines(progress.lineCount);
+          setIndexedLines(progress.lineCount);
+          setCache(new Map());
+          pending.current = new Set();
+          scrollRef.current?.scrollTo({ top: 0 });
+        });
+      } catch (error) {
         setEncodingChanging(false);
-        if (progress.failed) {
-          alert(`切换编码失败: ${progress.error ?? '未知错误'}`);
-          return;
-        }
-        preferredEncoding.current = progress.encoding;
-        setEffectiveEncoding(progress.encoding);
-        setTotalLines(progress.lineCount);
-        setIndexedLines(progress.lineCount);
-        setCache(new Map());
-        pending.current = new Set();
-        scrollRef.current?.scrollTo({ top: 0 });
-      });
-    } catch (error) {
-      setEncodingChanging(false);
-      alert(`切换编码失败: ${String(error)}`);
-    }
-  }, []);
+        alert(t('error.encodingFailed', { error: String(error) }));
+      }
+    },
+    [t],
+  );
 
   useEffect(
     () => () => {
@@ -173,7 +178,7 @@ export function LogContent({ session, activeKey, status = 'ready', error }: Prop
       <div className="col log-content-panel">
         <div className="empty-state">
           <div className="big">📄</div>
-          <div className="desc">从左侧选择一个日志条目查看内容</div>
+          <div className="desc">{t('log.choose')}</div>
         </div>
       </div>
     );
@@ -182,10 +187,10 @@ export function LogContent({ session, activeKey, status = 'ready', error }: Prop
   if (!session && activeKey) {
     const message =
       status === 'error'
-        ? `打开失败：${error ?? '未知错误'}（点击选项卡重试）`
+        ? t('log.openFailed', { error: error ?? t('common.unknown') })
         : status === 'dormant'
-          ? '会话已休眠，点击选项卡重新加载'
-          : '正在打开日志…';
+          ? t('log.dormant')
+          : t('log.opening');
     return (
       <div className="col log-content-panel">
         <div className="empty-state log-session-state">
@@ -200,17 +205,17 @@ export function LogContent({ session, activeKey, status = 'ready', error }: Prop
     <div className="col log-content-panel">
       {indexing && (
         <div className="index-bar">
-          <span>解压+建索引 {percent}%</span>
+          <span>{t('log.indexing', { percent })}</span>
           <div className="track">
             <div className="fill" style={{ width: `${percent}%` }} />
           </div>
-          <span>已可读 1–{fmtNum(indexedLines)} 行</span>
+          <span>{t('log.readable', { count: fmtNum(indexedLines) })}</span>
         </div>
       )}
 
       {encodingChanging && (
         <div className="index-bar">
-          <span>重建编码索引 {encodingPercent}%</span>
+          <span>{t('log.reencoding', { percent: encodingPercent })}</span>
           <div className="track">
             <div className="fill" style={{ width: `${encodingPercent}%` }} />
           </div>
@@ -247,10 +252,12 @@ export function LogContent({ session, activeKey, status = 'ready', error }: Prop
           className="encoding-select"
           value={effectiveEncoding}
           disabled={indexing || encodingChanging}
-          title={`自动检测: ${detectedEncoding}`}
+          title={t('log.autoDetected', { encoding: detectedEncoding })}
           onChange={(event) => void changeEncoding(event.target.value)}
         >
-          {effectiveEncoding === 'Detecting' && <option value="Detecting">检测中…</option>}
+          {effectiveEncoding === 'Detecting' && (
+            <option value="Detecting">{t('log.detecting')}</option>
+          )}
           {ENCODINGS.map((encoding) => (
             <option key={encoding} value={encoding}>
               {encoding}
@@ -258,7 +265,7 @@ export function LogContent({ session, activeKey, status = 'ready', error }: Prop
           ))}
         </select>
         <span>
-          行 {fmtNum(currentLine)}/{fmtNum(totalLines)}
+          {t('log.lineStatus', { current: fmtNum(currentLine), total: fmtNum(totalLines) })}
         </span>
         <span style={{ marginLeft: 'auto' }}>{fmtSize(session?.size)}</span>
       </div>

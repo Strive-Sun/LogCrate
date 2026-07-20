@@ -3,16 +3,18 @@ interface Props {
 }
 
 export function EmptyState({ onAddDir }: Props) {
+  const { t } = useI18n();
   return (
     <div className="col col-content">
       <div className="empty-state">
         <div className="big">📂</div>
-        <div className="title">还没有监控目录</div>
-        <div className="desc">添加一个目录,LogPeek 会自动发现新到达的日志压缩包和文本文件</div>
+        <div className="title">{t('empty.title')}</div>
+        <div className="desc">{t('empty.description')}</div>
         <button className="cta" onClick={onAddDir}>
-          + 添加监控目录
+          {t('tree.add')}
         </button>
       </div>
     </div>
   );
 }
+import { useI18n } from '../i18n/I18nProvider';

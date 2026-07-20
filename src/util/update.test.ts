@@ -61,10 +61,7 @@ describe('更新状态格式化', () => {
     assert.equal(downloadPercent(5, 10), 50);
     assert.equal(downloadPercent(10, 10), 99);
     assert.equal(downloadPercent(5), undefined);
-    assert.equal(
-      updateFailureMessage('downloading', new Error('网络中断')),
-      '下载更新失败：网络中断',
-    );
-    assert.equal(updateFailureMessage('installing', '签名无效'), '安装更新失败：签名无效');
+    assert.equal(updateFailureMessage('downloading', new Error('网络中断')), '网络中断');
+    assert.equal(updateFailureMessage('installing', '签名无效'), '签名无效');
   });
 });
