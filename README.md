@@ -208,6 +208,7 @@ The roadmap describes direction, not a promised version or delivery date. Issues
 - [ ] **Search indexes for huge logs** — accelerate repeated queries without loading the complete file into memory.
 - [ ] **Export investigation snippets** — export the smallest useful range by selected lines or time window for issues and team sharing.
 - [ ] **Reusable rule sets** — save combinations of levels, keywords, colors, and suffixes, then switch between projects quickly.
+- [ ] **AI-assisted log analysis** — summarize explicitly selected log ranges, identify abnormal patterns, and suggest likely causes and investigation steps, with configurable local or remote models and clear redaction controls before any content is sent.
 
 ## How it works
 
