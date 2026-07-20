@@ -6,6 +6,7 @@ import { isActiveTreeNode, isPathInsideDirectory, sameFilePath } from '../util/d
 import { SuffixFilter } from './SuffixFilter';
 import { ContextMenu } from './ContextMenu';
 import { useI18n } from '../i18n/I18nProvider';
+import { localizeKnownError } from '../i18n/errors';
 
 interface Props {
   nodes: TreeNode[];
@@ -302,26 +303,24 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
               const key = `${node.path ?? node.name}::${e.path}`;
               return (
                 props.activeKey === key ||
-                props.passesFilter({ name: e.path, kind: 'file', isLog: e.isLog })
+                props.passesFilter({
+                  name: e.path,
+                  kind: e.isArchive ? 'archive' : 'file',
+                  isLog: e.isLog,
+                })
               );
             })
-            .map((e) => {
-              const key = `${node.path ?? node.name}::${e.path}`;
-              return (
-                <div
-                  key={key}
-                  className={'tree-node' + (props.activeKey === key ? ' selected' : '')}
-                  style={{ paddingLeft: 10 + (depth + 1) * 14 }}
-                  onClick={() => e.isLog && props.onOpenFile(key)}
-                  title={e.encrypted ? t('tree.encrypted') : e.isLog ? '' : t('tree.notLog')}
-                >
-                  <span className="twisty" />
-                  <span className="ico">{e.isLog ? '📄' : '⬡'}</span>
-                  <span className={'label' + (e.isLog ? '' : ' notlog')}>{e.path}</span>
-                  <span className="size">{fmtSize(e.size)}</span>
-                </div>
-              );
-            })}
+            .map((entry) => (
+              <ArchiveEntryItem
+                key={`${node.path ?? node.name}::${entry.path}`}
+                entry={entry}
+                archiveChain={node.path ?? node.name}
+                depth={depth + 1}
+                activeKey={props.activeKey}
+                passesFilter={props.passesFilter}
+                onOpenFile={props.onOpenFile}
+              />
+            ))}
       </div>
     );
   }
@@ -341,6 +340,108 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
       <span className="ico">{node.isLog === false ? '⬡' : '📄'}</span>
       {renderLabel(node.isLog === false ? ' notlog' : '')}
       {unread && !renaming && <span className="dot-unread" />}
+    </div>
+  );
+}
+
+function ArchiveEntryItem({
+  entry,
+  archiveChain,
+  depth,
+  activeKey,
+  passesFilter,
+  onOpenFile,
+}: {
+  entry: ArchiveEntry;
+  archiveChain: string;
+  depth: number;
+  activeKey: string | null;
+  passesFilter: Props['passesFilter'];
+  onOpenFile: Props['onOpenFile'];
+}) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const [children, setChildren] = useState<ArchiveEntry[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const key = `${archiveChain}::${entry.path}`;
+
+  const activate = async () => {
+    if (!entry.isArchive) {
+      if (entry.isLog) onOpenFile(key);
+      return;
+    }
+    const next = !open;
+    setOpen(next);
+    if (!next || children !== null) return;
+    setLoading(true);
+    setError(null);
+    try {
+      setChildren(await api.listArchiveEntries(key));
+    } catch (reason) {
+      setError(localizeKnownError(String(reason), t));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div>
+      <div
+        className={'tree-node' + (activeKey === key ? ' selected' : '')}
+        style={{ paddingLeft: 10 + depth * 14 }}
+        onClick={() => void activate()}
+        title={
+          entry.encrypted
+            ? t('tree.encrypted')
+            : entry.isArchive || entry.isLog
+              ? ''
+              : t('tree.notLog')
+        }
+      >
+        <span className="twisty">{entry.isArchive ? (open ? '▾' : '▸') : ''}</span>
+        <span className="ico">{entry.isArchive ? '📦' : entry.isLog ? '📄' : '⬡'}</span>
+        <span className={'label' + (entry.isLog || entry.isArchive ? '' : ' notlog')}>
+          {entry.path}
+        </span>
+        <span className="size">{fmtSize(entry.size)}</span>
+      </div>
+      {open && loading && (
+        <div className="tree-node" style={{ paddingLeft: 10 + (depth + 1) * 14 }}>
+          {t('tree.loadingArchive')}
+        </div>
+      )}
+      {open && error && (
+        <div
+          className="tree-node"
+          style={{ paddingLeft: 10 + (depth + 1) * 14, color: 'var(--danger)' }}
+          title={error}
+        >
+          {error}
+        </div>
+      )}
+      {open &&
+        children
+          ?.filter(
+            (child) =>
+              activeKey === `${key}::${child.path}` ||
+              passesFilter({
+                name: child.path,
+                kind: child.isArchive ? 'archive' : 'file',
+                isLog: child.isLog,
+              }),
+          )
+          .map((child) => (
+            <ArchiveEntryItem
+              key={`${key}::${child.path}`}
+              entry={child}
+              archiveChain={key}
+              depth={depth + 1}
+              activeKey={activeKey}
+              passesFilter={passesFilter}
+              onOpenFile={onOpenFile}
+            />
+          ))}
     </div>
   );
 }

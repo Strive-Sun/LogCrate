@@ -2,7 +2,7 @@ mod archive;
 mod index;
 mod watcher;
 
-use archive::{open_archive, ArchiveEntry};
+use archive::{open_archive, resolve_archive_chain, ArchiveEntry};
 use index::{IndexProgress, LogLine, OpenResult, SessionManager};
 use serde::Serialize;
 use std::io::SeekFrom;
@@ -57,6 +57,7 @@ fn tray_click_action(is_left_button: bool, is_released: bool) -> LifecycleAction
 struct AppState {
     watch: Arc<WatchState>,
     sessions: Arc<SessionManager>,
+    archive_cache: PathBuf,
 }
 
 struct TrayMenuItems {
@@ -312,9 +313,13 @@ fn delete_watch_dir(state: State<AppState>, path: String) -> Result<(), String> 
 }
 
 #[tauri::command]
-fn list_archive_entries(path: String) -> Result<Vec<ArchiveEntry>, String> {
-    let mut reader = open_archive(&PathBuf::from(&path)).map_err(|e| e.to_string())?;
-    reader.entries().map_err(|e| e.to_string())
+fn list_archive_entries(state: State<AppState>, path: String) -> Result<Vec<ArchiveEntry>, String> {
+    let resolved = resolve_archive_chain(&path, &state.archive_cache).map_err(|e| e.to_string())?;
+    let mut reader = open_archive(resolved.path()).map_err(|e| e.to_string())?;
+    let entries = reader.entries().map_err(|e| e.to_string())?;
+    drop(reader);
+    drop(resolved);
+    Ok(entries)
 }
 
 #[tauri::command]
@@ -324,7 +329,9 @@ fn open_log_session(
     archive_path: String,
     entry_path: String,
 ) -> Result<OpenResult, String> {
-    let mut reader = open_archive(&PathBuf::from(&archive_path)).map_err(|e| e.to_string())?;
+    let resolved =
+        resolve_archive_chain(&archive_path, &state.archive_cache).map_err(|e| e.to_string())?;
+    let mut reader = open_archive(resolved.path()).map_err(|e| e.to_string())?;
     let entries = reader.entries().map_err(|e| e.to_string())?;
     let meta = entries
         .iter()
@@ -337,15 +344,26 @@ fn open_log_session(
         return Err("该条目不是文本日志,无法查看".into());
     }
     let declared = meta.size;
-    let display = if entry_path == archive_path || !archive_path.ends_with(".zip") {
+    let remaining_limit = index::MAX_UNCOMPRESSED.saturating_sub(resolved.decoded_bytes());
+    if declared > remaining_limit {
+        return Err("嵌套归档链累计解码内容超过 2 GiB 安全上限".into());
+    }
+    let display = if entry_path == archive_path {
         entry_path.clone()
     } else {
-        let arc_name = PathBuf::from(&archive_path)
+        let root_archive = archive_path.split("::").next().unwrap_or(&archive_path);
+        let arc_name = PathBuf::from(root_archive)
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or(&archive_path)
+            .unwrap_or(root_archive)
             .to_string();
-        format!("{arc_name} › {entry_path}")
+        let nested = archive_path
+            .split("::")
+            .skip(1)
+            .chain(std::iter::once(entry_path.as_str()))
+            .collect::<Vec<_>>()
+            .join(" › ");
+        format!("{arc_name} › {nested}")
     };
     let result = state
         .sessions
@@ -353,14 +371,42 @@ fn open_log_session(
         .map_err(|e| e.to_string())?;
     let session_id = result.session_id.clone();
     let sessions = state.sessions.clone();
-    std::thread::spawn(move || match reader.open_entry(&entry_path) {
-        Ok(mut stream) => {
-            let reset = if stream.is_seekable() {
-                stream.seek(SeekFrom::Start(0)).map(|_| ())
-            } else {
-                Ok(())
-            };
-            if let Err(error) = reset {
+    std::thread::spawn(move || {
+        // Keep lazily materialized ancestor archives alive until indexing has
+        // finished, then remove them through ResolvedArchiveChain::drop.
+        let _resolved = resolved;
+        match reader.open_entry(&entry_path) {
+            Ok(mut stream) => {
+                let reset = if stream.is_seekable() {
+                    stream.seek(SeekFrom::Start(0)).map(|_| ())
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = reset {
+                    let event = IndexProgress {
+                        session_id,
+                        percent: 100,
+                        indexed_lines: 0,
+                        done: true,
+                        failed: true,
+                        detected_encoding: "Unknown".into(),
+                        effective_encoding: "UTF-8".into(),
+                        error: Some(error.to_string()),
+                    };
+                    let _ = app.emit("index-progress", event);
+                    return;
+                }
+                sessions.index_with_limit(
+                    &session_id,
+                    declared,
+                    stream,
+                    remaining_limit,
+                    |event| {
+                        let _ = app.emit("index-progress", event);
+                    },
+                );
+            }
+            Err(error) => {
                 let event = IndexProgress {
                     session_id,
                     percent: 100,
@@ -372,24 +418,7 @@ fn open_log_session(
                     error: Some(error.to_string()),
                 };
                 let _ = app.emit("index-progress", event);
-                return;
             }
-            sessions.index(&session_id, declared, stream, |event| {
-                let _ = app.emit("index-progress", event);
-            });
-        }
-        Err(error) => {
-            let event = IndexProgress {
-                session_id,
-                percent: 100,
-                indexed_lines: 0,
-                done: true,
-                failed: true,
-                detected_encoding: "Unknown".into(),
-                effective_encoding: "UTF-8".into(),
-                error: Some(error.to_string()),
-            };
-            let _ = app.emit("index-progress", event);
         }
     });
     Ok(result)
@@ -564,14 +593,22 @@ pub fn run() {
                 .unwrap_or_else(|_| std::env::temp_dir())
                 // Legacy cache directory keeps in-place LogPeek upgrades free of orphaned data.
                 .join("logpeek-cache");
-            sessions.set_cache_dir(cache_dir);
+            sessions.set_cache_dir(cache_dir.clone());
+            let archive_cache = cache_dir.join("nested-archives");
+            // A clean application start invalidates every prior nested chain.
+            let _ = std::fs::remove_dir_all(&archive_cache);
+            std::fs::create_dir_all(&archive_cache).ok();
 
             // 启动恢复:对已配置目录建立监听
             for dir in watch.list_dirs() {
                 let _ = spawn_watch(&watch, app.handle(), &dir);
             }
 
-            app.manage(AppState { watch, sessions });
+            app.manage(AppState {
+                watch,
+                sessions,
+                archive_cache,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

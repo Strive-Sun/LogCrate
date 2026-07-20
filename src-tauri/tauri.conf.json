@@ -27,6 +27,9 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "resources": {
+      "../resources/licenses/unrar.txt": "licenses/unrar.txt"
+    },
     "icon": ["../resources/icons/app/32x32.png", "../resources/icons/app/128x128.png", "../resources/icons/app/128x128@2x.png", "../resources/icons/app/icon.icns", "../resources/icons/app/icon.ico", "../resources/icons/app/icon.png"]
   },
   "plugins": {

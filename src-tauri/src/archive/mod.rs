@@ -2,15 +2,202 @@
 //! `entries()` 只读元信息(zip 仅读中央目录,不解压);
 //! `open_entry()` 返回可流式读取的解压流。
 
+mod channel_reader;
 mod plain;
+mod rar_reader;
+mod sevenz_reader;
+mod stream_reader;
+mod tar_reader;
 mod zip_reader;
 
 use serde::Serialize;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use plain::PlainReader;
+pub use rar_reader::RarArchiveReader;
+pub use sevenz_reader::SevenZipArchiveReader;
+pub use stream_reader::CompressedStreamReader;
+pub use tar_reader::{StreamCompression, TarArchiveReader};
 pub use zip_reader::ZipArchiveReader;
+
+const MAX_NESTED_DEPTH: usize = 5;
+const MAX_NESTED_DECODED_BYTES: u64 = crate::index::MAX_UNCOMPRESSED;
+pub(crate) const MAX_ARCHIVE_ENTRIES: usize = 100_000;
+static NESTED_CACHE_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// Materialized ancestors for a lazily opened nested chain. Each ancestor is
+/// streamed into the application cache only when its node is expanded. Files
+/// are removed when the command/indexing thread releases this guard.
+pub struct ResolvedArchiveChain {
+    path: PathBuf,
+    temporary_files: Vec<PathBuf>,
+    decoded_bytes: u64,
+}
+
+impl ResolvedArchiveChain {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn decoded_bytes(&self) -> u64 {
+        self.decoded_bytes
+    }
+}
+
+impl Drop for ResolvedArchiveChain {
+    fn drop(&mut self) {
+        for path in self.temporary_files.iter().rev() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+pub fn resolve_archive_chain(
+    chain: &str,
+    cache_dir: &Path,
+) -> anyhow::Result<ResolvedArchiveChain> {
+    let parts: Vec<&str> = chain.split("::").collect();
+    if parts.is_empty() || parts[0].is_empty() {
+        anyhow::bail!("归档路径为空");
+    }
+    if parts.len().saturating_sub(1) > MAX_NESTED_DEPTH {
+        anyhow::bail!("嵌套归档超过最大深度 {MAX_NESTED_DEPTH}");
+    }
+    std::fs::create_dir_all(cache_dir)?;
+    let mut current = PathBuf::from(parts[0]);
+    let mut temporary_files = Vec::new();
+    let mut decoded_total = 0u64;
+
+    for entry_path in &parts[1..] {
+        let result = (|| -> anyhow::Result<PathBuf> {
+            let mut reader = open_archive(&current)?;
+            let entry = reader
+                .entries()?
+                .into_iter()
+                .find(|entry| entry.path == *entry_path)
+                .ok_or_else(|| anyhow::anyhow!("条目不存在: {entry_path}"))?;
+            if entry.encrypted {
+                anyhow::bail!("归档条目已加密，暂不支持密码输入: {entry_path}");
+            }
+            if !entry.is_archive {
+                anyhow::bail!("条目不是受支持的归档: {entry_path}");
+            }
+            let suffix = Path::new(entry_path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("nested.archive")
+                .replace(['/', '\\', ':'], "_");
+            let output = cache_dir.join(format!(
+                "nested-{}-{}-{suffix}",
+                std::process::id(),
+                NESTED_CACHE_SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut source = reader.open_entry(entry_path)?;
+            let mut destination = File::create(&output)?;
+            let mut buffer = [0u8; 64 * 1024];
+            loop {
+                let count = source.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                decoded_total = decoded_total.saturating_add(count as u64);
+                if decoded_total > MAX_NESTED_DECODED_BYTES {
+                    let _ = std::fs::remove_file(&output);
+                    anyhow::bail!("嵌套归档累计解码内容超过 2 GiB 安全上限");
+                }
+                destination.write_all(&buffer[..count])?;
+            }
+            destination.flush()?;
+            // Magic validation prevents a forged extension from creating a
+            // misleading expandable node.
+            if !detect_format(&output)?.is_archive() {
+                let _ = std::fs::remove_file(&output);
+                anyhow::bail!("嵌套条目内容不是受支持的归档: {entry_path}");
+            }
+            Ok(output)
+        })();
+        match result {
+            Ok(output) => {
+                current = output.clone();
+                temporary_files.push(output);
+            }
+            Err(error) => {
+                for path in temporary_files.iter().rev() {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    Ok(ResolvedArchiveChain {
+        path: current,
+        temporary_files,
+        decoded_bytes: decoded_total,
+    })
+}
+
+pub(crate) fn is_safe_entry_name(name: &str) -> bool {
+    if name.is_empty()
+        || name.len() > 4096
+        || name.contains('\0')
+        || name.starts_with(['/', '\\'])
+        || name.contains("::")
+    {
+        return false;
+    }
+    let normalized = name.replace('\\', "/");
+    !normalized
+        .split('/')
+        .any(|part| part == ".." || part.contains(':'))
+}
+
+/// The single source of truth for archive detection across opening, directory
+/// inventory, drag-and-drop and arrival notifications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveFormat {
+    Zip,
+    SevenZip,
+    Rar,
+    Tar,
+    TarGzip,
+    TarBzip2,
+    TarXz,
+    TarZstd,
+    Gzip,
+    Bzip2,
+    Xz,
+    Zstd,
+    Plain,
+}
+
+impl ArchiveFormat {
+    #[allow(dead_code)]
+    pub fn canonical_name(self) -> &'static str {
+        match self {
+            Self::Zip => "ZIP",
+            Self::SevenZip => "7z",
+            Self::Rar => "RAR",
+            Self::Tar => "TAR",
+            Self::TarGzip => "tar.gz",
+            Self::TarBzip2 => "tar.bz2",
+            Self::TarXz => "tar.xz",
+            Self::TarZstd => "tar.zst",
+            Self::Gzip => "gzip",
+            Self::Bzip2 => "bzip2",
+            Self::Xz => "xz",
+            Self::Zstd => "zstd",
+            Self::Plain => "plain",
+        }
+    }
+
+    pub fn is_archive(self) -> bool {
+        !matches!(self, Self::Plain)
+    }
+}
 
 /// 归档内的一个条目(仅元信息)
 #[derive(Debug, Clone, Serialize)]
@@ -24,6 +211,21 @@ pub struct ArchiveEntry {
     pub is_log: bool,
     /// 是否加密条目(M1 不支持)
     pub encrypted: bool,
+    /// Whether this entry is itself a supported archive and can be expanded lazily.
+    pub is_archive: bool,
+}
+
+impl ArchiveEntry {
+    pub(crate) fn new(path: String, size: u64, encrypted: bool) -> Self {
+        let is_archive = is_archive_name(&path);
+        Self {
+            is_log: !encrypted && is_log_name(&path),
+            path,
+            size,
+            encrypted,
+            is_archive,
+        }
+    }
 }
 
 pub trait ReadSeek: Read + Seek {}
@@ -68,29 +270,194 @@ pub trait ArchiveReader: Send {
     fn open_entry(&mut self, path: &str) -> anyhow::Result<EntryReader<'_>>;
 }
 
-/// 按路径构造合适的读取器:zip → ZipArchiveReader,其余文本 → PlainReader
+/// Construct a reader through the central format registry.
 pub fn open_archive(path: &Path) -> anyhow::Result<Box<dyn ArchiveReader>> {
-    if is_zip(path)? {
-        Ok(Box::new(ZipArchiveReader::open(path)?))
-    } else {
-        Ok(Box::new(PlainReader::open(path)?))
+    match detect_format(path)? {
+        ArchiveFormat::Zip => Ok(Box::new(ZipArchiveReader::open(path)?)),
+        ArchiveFormat::SevenZip => Ok(Box::new(SevenZipArchiveReader::open(path)?)),
+        ArchiveFormat::Rar => Ok(Box::new(RarArchiveReader::open(path)?)),
+        ArchiveFormat::Tar => Ok(Box::new(TarArchiveReader::open(
+            path,
+            StreamCompression::None,
+        )?)),
+        ArchiveFormat::TarGzip => Ok(Box::new(TarArchiveReader::open(
+            path,
+            StreamCompression::Gzip,
+        )?)),
+        ArchiveFormat::TarBzip2 => Ok(Box::new(TarArchiveReader::open(
+            path,
+            StreamCompression::Bzip2,
+        )?)),
+        ArchiveFormat::TarXz => Ok(Box::new(TarArchiveReader::open(
+            path,
+            StreamCompression::Xz,
+        )?)),
+        ArchiveFormat::TarZstd => Ok(Box::new(TarArchiveReader::open(
+            path,
+            StreamCompression::Zstd,
+        )?)),
+        ArchiveFormat::Gzip => Ok(Box::new(CompressedStreamReader::open(
+            path,
+            StreamCompression::Gzip,
+        )?)),
+        ArchiveFormat::Bzip2 => Ok(Box::new(CompressedStreamReader::open(
+            path,
+            StreamCompression::Bzip2,
+        )?)),
+        ArchiveFormat::Xz => Ok(Box::new(CompressedStreamReader::open(
+            path,
+            StreamCompression::Xz,
+        )?)),
+        ArchiveFormat::Zstd => Ok(Box::new(CompressedStreamReader::open(
+            path,
+            StreamCompression::Zstd,
+        )?)),
+        ArchiveFormat::Plain => Ok(Box::new(PlainReader::open(path)?)),
     }
 }
 
-/// 按扩展名 + 文件头判定是否 zip
-pub fn is_zip(path: &Path) -> anyhow::Result<bool> {
-    use std::io::Read;
-    let ext_zip = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("zip"))
-        .unwrap_or(false);
-    // 文件头 magic:PK\x03\x04 / PK\x05\x06(空归档)
-    let mut f = std::fs::File::open(path)?;
-    let mut magic = [0u8; 4];
-    let n = f.read(&mut magic)?;
-    let head_zip = n >= 4 && magic[0] == b'P' && magic[1] == b'K';
-    Ok(ext_zip || head_zip)
+pub fn is_archive(path: &Path) -> anyhow::Result<bool> {
+    Ok(detect_format(path)?.is_archive())
+}
+
+pub fn is_archive_name(name: &str) -> bool {
+    format_from_name(name).is_some()
+}
+
+fn format_from_name(name: &str) -> Option<ArchiveFormat> {
+    let lower = name.to_ascii_lowercase();
+    let suffixes = [
+        (".tar.bz2", ArchiveFormat::TarBzip2),
+        (".tar.zst", ArchiveFormat::TarZstd),
+        (".tar.gz", ArchiveFormat::TarGzip),
+        (".tar.xz", ArchiveFormat::TarXz),
+        (".tbz2", ArchiveFormat::TarBzip2),
+        (".tzst", ArchiveFormat::TarZstd),
+        (".tgz", ArchiveFormat::TarGzip),
+        (".tbz", ArchiveFormat::TarBzip2),
+        (".txz", ArchiveFormat::TarXz),
+        (".zip", ArchiveFormat::Zip),
+        (".7z", ArchiveFormat::SevenZip),
+        (".rar", ArchiveFormat::Rar),
+        (".tar", ArchiveFormat::Tar),
+        (".gz", ArchiveFormat::Gzip),
+        (".bz2", ArchiveFormat::Bzip2),
+        (".xz", ArchiveFormat::Xz),
+        (".zst", ArchiveFormat::Zstd),
+    ];
+    suffixes
+        .iter()
+        .find_map(|(suffix, format)| lower.ends_with(suffix).then_some(*format))
+}
+
+pub fn detect_format(path: &Path) -> anyhow::Result<ArchiveFormat> {
+    let mut file = File::open(path)?;
+    let mut head = [0u8; 512];
+    let count = file.read(&mut head)?;
+    let head = &head[..count];
+
+    if head.starts_with(b"PK\x03\x04")
+        || head.starts_with(b"PK\x05\x06")
+        || head.starts_with(b"PK\x07\x08")
+    {
+        return Ok(ArchiveFormat::Zip);
+    }
+    if head.starts_with(&[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]) {
+        return Ok(ArchiveFormat::SevenZip);
+    }
+    if head.starts_with(b"Rar!\x1a\x07\x00") || head.starts_with(b"Rar!\x1a\x07\x01\x00") {
+        return Ok(ArchiveFormat::Rar);
+    }
+    if is_tar_header(head) {
+        return Ok(ArchiveFormat::Tar);
+    }
+
+    let compression = if head.starts_with(&[0x1f, 0x8b]) {
+        Some((
+            StreamCompression::Gzip,
+            ArchiveFormat::Gzip,
+            ArchiveFormat::TarGzip,
+        ))
+    } else if head.starts_with(b"BZh") {
+        Some((
+            StreamCompression::Bzip2,
+            ArchiveFormat::Bzip2,
+            ArchiveFormat::TarBzip2,
+        ))
+    } else if head.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0x00]) {
+        Some((
+            StreamCompression::Xz,
+            ArchiveFormat::Xz,
+            ArchiveFormat::TarXz,
+        ))
+    } else if head.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        Some((
+            StreamCompression::Zstd,
+            ArchiveFormat::Zstd,
+            ArchiveFormat::TarZstd,
+        ))
+    } else {
+        None
+    };
+    if let Some((compression, stream_format, tar_format)) = compression {
+        let mut decoded = compression.reader(path)?;
+        let mut tar_head = [0u8; 512];
+        let mut filled = 0;
+        while filled < tar_head.len() {
+            let read = decoded.read(&mut tar_head[filled..])?;
+            if read == 0 {
+                break;
+            }
+            filled += read;
+        }
+        let named_format = format_from_name(path.to_string_lossy().as_ref());
+        let named_as_tar = named_format == Some(tar_format);
+        let empty_tar = filled >= 512 && tar_head[..512].iter().all(|byte| *byte == 0);
+        return Ok(
+            if is_tar_header(&tar_head[..filled]) || (named_as_tar && empty_tar) {
+                tar_format
+            } else {
+                stream_format
+            },
+        );
+    }
+
+    // Extension is only a hint for headerless TAR. Formats with mandatory
+    // magic must not be accepted solely because a file was renamed.
+    if matches!(
+        format_from_name(path.to_string_lossy().as_ref()),
+        Some(ArchiveFormat::Tar)
+    ) {
+        return Ok(ArchiveFormat::Tar);
+    }
+    Ok(ArchiveFormat::Plain)
+}
+
+fn is_tar_header(head: &[u8]) -> bool {
+    if head.len() < 512 {
+        return false;
+    }
+    if &head[257..262] == b"ustar" {
+        return true;
+    }
+    let stored = std::str::from_utf8(&head[148..156])
+        .ok()
+        .and_then(|value| u32::from_str_radix(value.trim_matches(['\0', ' ']), 8).ok());
+    let Some(stored) = stored else {
+        return false;
+    };
+    let calculated: u32 = head
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| {
+            if (148..156).contains(&index) {
+                b' ' as u32
+            } else {
+                *byte as u32
+            }
+        })
+        .sum();
+    stored == calculated
 }
 
 const LOG_EXTS: &[&str] = &["log", "txt", "out", "err", "trace", "json", "csv"];
@@ -103,7 +470,10 @@ pub fn is_log_name(name: &str) -> bool {
             return true;
         }
         // 已知二进制扩展名直接判否
-        const BIN_EXTS: &[&str] = &["bin", "png", "jpg", "gz", "zip", "exe", "dll", "so", "o"];
+        const BIN_EXTS: &[&str] = &[
+            "bin", "png", "jpg", "gz", "bz2", "xz", "zst", "zip", "7z", "rar", "tar", "exe", "dll",
+            "so", "o",
+        ];
         if BIN_EXTS.contains(&ext) {
             return false;
         }
@@ -124,4 +494,266 @@ pub fn is_text_sample(sample: &[u8]) -> bool {
         .filter(|&&b| b < 0x09 || (b > 0x0d && b < 0x20))
         .count();
     (non_print as f64) / (sample.len() as f64) < 0.10
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static FIXTURE_SEQ: AtomicU64 = AtomicU64::new(1);
+
+    struct FixtureDir(PathBuf);
+
+    impl FixtureDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "logcrate-archive-formats-{}-{}",
+                std::process::id(),
+                FIXTURE_SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for FixtureDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn tar_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            let content = b"hello from tar\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "logs/server.log", &content[..])
+                .unwrap();
+            let binary = [0, 1, 2, 3];
+            let mut binary_header = tar::Header::new_gnu();
+            binary_header.set_size(binary.len() as u64);
+            binary_header.set_mode(0o644);
+            binary_header.set_cksum();
+            builder
+                .append_data(&mut binary_header, "assets/image.bin", &binary[..])
+                .unwrap();
+            let unicode = "Unicode 日志\n".as_bytes();
+            let mut unicode_header = tar::Header::new_gnu();
+            unicode_header.set_size(unicode.len() as u64);
+            unicode_header.set_mode(0o644);
+            unicode_header.set_cksum();
+            builder
+                .append_data(&mut unicode_header, "日志/服务.txt", unicode)
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn write_compressed(path: &Path, compression: StreamCompression, content: &[u8]) {
+        let file = File::create(path).unwrap();
+        match compression {
+            StreamCompression::Gzip => {
+                let mut encoder =
+                    flate2::write::GzEncoder::new(file, flate2::Compression::default());
+                encoder.write_all(content).unwrap();
+                encoder.finish().unwrap();
+            }
+            StreamCompression::Bzip2 => {
+                let mut encoder = bzip2::write::BzEncoder::new(file, bzip2::Compression::default());
+                encoder.write_all(content).unwrap();
+                encoder.finish().unwrap();
+            }
+            StreamCompression::Xz => {
+                let mut encoder = xz2::write::XzEncoder::new(file, 6);
+                encoder.write_all(content).unwrap();
+                encoder.finish().unwrap();
+            }
+            StreamCompression::Zstd => {
+                let mut encoder = zstd::stream::write::Encoder::new(file, 3).unwrap();
+                encoder.write_all(content).unwrap();
+                encoder.finish().unwrap();
+            }
+            StreamCompression::None => std::fs::write(path, content).unwrap(),
+        }
+    }
+
+    #[test]
+    fn magic_wins_over_a_forged_extension() {
+        let fixture = FixtureDir::new();
+        let zip_named_text = fixture.path("fake.zip");
+        std::fs::write(&zip_named_text, b"ordinary text").unwrap();
+        assert_eq!(
+            detect_format(&zip_named_text).unwrap(),
+            ArchiveFormat::Plain
+        );
+
+        let extensionless_zip = fixture.path("download.part");
+        std::fs::write(&extensionless_zip, b"PK\x05\x06\0\0\0\0").unwrap();
+        assert_eq!(
+            detect_format(&extensionless_zip).unwrap(),
+            ArchiveFormat::Zip
+        );
+        assert!(is_archive_name("BUNDLE.TAR.GZ"));
+        assert!(is_archive_name("diagnostics.TZST"));
+        assert!(!is_archive_name("archive.zip.txt"));
+        assert!(!is_safe_entry_name("../outside.log"));
+        assert!(!is_safe_entry_name("C:\\outside.log"));
+    }
+
+    #[test]
+    fn tar_and_compressed_tar_are_detected_and_streamed() {
+        let fixture = FixtureDir::new();
+        let tar = tar_bytes();
+        let cases = [
+            ("logs.tar", StreamCompression::None, ArchiveFormat::Tar),
+            ("logs.tgz", StreamCompression::Gzip, ArchiveFormat::TarGzip),
+            (
+                "logs.tbz2",
+                StreamCompression::Bzip2,
+                ArchiveFormat::TarBzip2,
+            ),
+            ("logs.txz", StreamCompression::Xz, ArchiveFormat::TarXz),
+            ("logs.tzst", StreamCompression::Zstd, ArchiveFormat::TarZstd),
+        ];
+        for (name, compression, expected) in cases {
+            let path = fixture.path(name);
+            write_compressed(&path, compression, &tar);
+            assert_eq!(detect_format(&path).unwrap(), expected);
+            let mut archive = open_archive(&path).unwrap();
+            let entries = archive.entries().unwrap();
+            assert_eq!(entries.len(), 3);
+            assert!(entries
+                .iter()
+                .any(|entry| entry.path == "logs/server.log" && entry.is_log));
+            assert!(entries
+                .iter()
+                .any(|entry| entry.path == "assets/image.bin" && !entry.is_log));
+            assert!(entries
+                .iter()
+                .any(|entry| entry.path == "日志/服务.txt" && entry.is_log));
+            let mut content = String::new();
+            archive
+                .open_entry("logs/server.log")
+                .unwrap()
+                .read_to_string(&mut content)
+                .unwrap();
+            assert_eq!(content, "hello from tar\n");
+        }
+    }
+
+    #[test]
+    fn single_file_streams_synthesize_a_readable_entry() {
+        let fixture = FixtureDir::new();
+        let cases = [
+            ("server.log.gz", StreamCompression::Gzip),
+            ("server.log.bz2", StreamCompression::Bzip2),
+            ("server.log.xz", StreamCompression::Xz),
+            ("server.log.zst", StreamCompression::Zstd),
+        ];
+        for (name, compression) in cases {
+            let path = fixture.path(name);
+            write_compressed(&path, compression, b"line one\nline two\n");
+            let mut archive = open_archive(&path).unwrap();
+            let entries = archive.entries().unwrap();
+            assert_eq!(entries[0].path, "server.log");
+            assert!(entries[0].is_log);
+            let mut content = String::new();
+            archive
+                .open_entry("server.log")
+                .unwrap()
+                .read_to_string(&mut content)
+                .unwrap();
+            assert_eq!(content, "line one\nline two\n");
+        }
+    }
+
+    #[test]
+    fn empty_tar_combinations_and_truncated_streams_are_handled() {
+        let fixture = FixtureDir::new();
+        let empty_tar = vec![0u8; 1024];
+        let cases = [
+            ("empty.tar", StreamCompression::None, ArchiveFormat::Tar),
+            ("empty.tgz", StreamCompression::Gzip, ArchiveFormat::TarGzip),
+            (
+                "empty.tbz2",
+                StreamCompression::Bzip2,
+                ArchiveFormat::TarBzip2,
+            ),
+            ("empty.txz", StreamCompression::Xz, ArchiveFormat::TarXz),
+            (
+                "empty.tzst",
+                StreamCompression::Zstd,
+                ArchiveFormat::TarZstd,
+            ),
+        ];
+        for (name, compression, expected) in cases {
+            let path = fixture.path(name);
+            write_compressed(&path, compression, &empty_tar);
+            assert_eq!(detect_format(&path).unwrap(), expected);
+            assert!(open_archive(&path).unwrap().entries().unwrap().is_empty());
+        }
+
+        for (name, bytes) in [
+            ("broken.gz", &[0x1f, 0x8b, 0x08][..]),
+            ("broken.bz2", b"BZh"),
+            ("broken.xz", &[0xfd, b'7', b'z', b'X', b'Z', 0x00][..]),
+            ("broken.zst", &[0x28, 0xb5, 0x2f, 0xfd][..]),
+        ] {
+            let path = fixture.path(name);
+            std::fs::write(&path, bytes).unwrap();
+            assert!(detect_format(&path).is_err(), "{name} was accepted");
+        }
+    }
+
+    #[test]
+    fn nested_archive_is_materialized_only_when_the_chain_is_resolved() {
+        let fixture = FixtureDir::new();
+        let inner = tar_bytes();
+        let outer_path = fixture.path("outer.zip");
+        {
+            let file = File::create(&outer_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file(
+                "nested/diagnostics.tar",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(&inner).unwrap();
+            zip.finish().unwrap();
+        }
+        let cache = fixture.path("cache");
+        assert!(!cache.exists());
+        let chain = format!("{}::nested/diagnostics.tar", outer_path.to_string_lossy());
+        let resolved = resolve_archive_chain(&chain, &cache).unwrap();
+        assert!(resolved.path().exists());
+        let nested_path = resolved.path().to_path_buf();
+        let mut archive = open_archive(resolved.path()).unwrap();
+        assert_eq!(archive.entries().unwrap()[0].path, "logs/server.log");
+        drop(archive);
+        drop(resolved);
+        assert!(!nested_path.exists());
+    }
+
+    #[test]
+    fn nested_chain_rejects_more_than_five_layers_before_reading() {
+        let fixture = FixtureDir::new();
+        let chain = "missing.zip::1.zip::2.zip::3.zip::4.zip::5.zip::6.zip";
+        let error = match resolve_archive_chain(chain, &fixture.path("cache")) {
+            Ok(_) => panic!("over-deep chain unexpectedly resolved"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("最大深度 5"));
+    }
 }

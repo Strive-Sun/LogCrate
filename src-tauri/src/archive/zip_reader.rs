@@ -23,18 +23,31 @@ impl ArchiveReader for ZipArchiveReader {
     fn entries(&mut self) -> anyhow::Result<Vec<ArchiveEntry>> {
         let mut out = Vec::with_capacity(self.archive.len());
         for i in 0..self.archive.len() {
+            if out.len() >= super::MAX_ARCHIVE_ENTRIES {
+                anyhow::bail!("归档条目数量超过安全上限");
+            }
             // by_index 读取的是中央目录里的元信息,不解压内容
             let entry = self.archive.by_index_raw(i)?;
             if entry.is_dir() {
                 continue;
             }
+            if entry.unix_mode().is_some_and(|mode| {
+                let kind = mode & 0o170000;
+                kind != 0 && kind != 0o100000
+            }) {
+                continue;
+            }
             let name = entry.name().to_string();
+            if !super::is_safe_entry_name(&name) {
+                continue;
+            }
             let encrypted = entry.encrypted();
             out.push(ArchiveEntry {
                 path: name.clone(),
                 size: entry.size(),
                 is_log: !encrypted && is_log_name(&name),
                 encrypted,
+                is_archive: !encrypted && super::is_archive_name(&name),
             });
         }
         Ok(out)

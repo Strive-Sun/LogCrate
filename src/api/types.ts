@@ -10,6 +10,8 @@ export interface ArchiveEntry {
   isLog: boolean;
   /** 是否加密条目(M1 不支持,列出但标记) */
   encrypted: boolean;
+  /** 是否为可继续惰性展开的嵌套归档 */
+  isArchive: boolean;
 }
 
 /** 一行返回给前端的内容 */

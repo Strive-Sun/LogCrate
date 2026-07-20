@@ -58,7 +58,7 @@ LogCrate is built around that exact path:
 
 ```mermaid
 flowchart LR
-    A[Downloads / Log folders] -->|Live watch| B[Discover ZIPs and text logs]
+    A[Downloads / Log folders] -->|Live watch| B[Discover archives and text logs]
     B --> C[Notify and locate]
     C --> D[Read without manual extraction]
     D --> E[Line index + virtual scrolling]
@@ -66,7 +66,8 @@ flowchart LR
 ```
 
 - **Discover logs as they arrive** — recursively watch directories and notify even when new logs land deep inside unopened subfolders.
-- **Read ZIPs directly** — browse archive entries like a folder without creating a scattered manual extraction directory.
+- **Read archives directly** — browse ZIP, 7z, RAR, TAR and compressed streams like folders without creating a scattered manual extraction directory.
+- **Expand nested archives lazily** — recognize archive entries inside another archive and read the next layer only when you expand it.
 - **Open large logs** — build line indexes in the background and load only the visible range instead of putting a multi-gigabyte file into memory.
 - **Keep investigation context** — each tab retains its own scroll position, encoding, and loaded content.
 - **Local-first processing** — logs stay on your machine; no cloud upload service is required.
@@ -76,7 +77,7 @@ flowchart LR
 | Capability                       | What it does                                                                                                               |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | Live directory monitoring        | Reflects external create, delete, rename, and modify operations; discovers new logs at any directory depth                 |
-| ZIP without manual extraction    | Browses the archive directory and opens internal log entries directly                                                      |
+| Archives without manual extraction | Reads ZIP, 7z, RAR4/RAR5, TAR, tar.gz/bz2/xz/zst and single-file compressed streams directly                              |
 | Plain log viewing                | Reads `.log`, `.txt`, `.out`, `.err`, `.trace`, `.json`, `.csv`, and other recognized text files                           |
 | Drag and start                   | Dropping one file watches its parent; dropping a folder watches that folder; dropping a text log also opens and locates it |
 | Multi-file tabs                  | Deduplicates repeated opens, moves overflow into a More menu, and preserves per-file reading state                         |
@@ -88,7 +89,7 @@ flowchart LR
 | Desktop behavior                 | Includes light/dark themes, close-to-tray, auto-hiding scrollbars, and a resizable directory pane                          |
 | UI languages                     | Follows the system by default and switches instantly between English and Simplified Chinese in Settings                    |
 
-> LogCrate is currently a **read-only viewer**. It can rename or delete files on disk, but it cannot edit and save log content or rewrite entries inside a ZIP.
+> LogCrate is currently a **read-only viewer**. It can rename or delete files on disk, but it cannot edit log content or create, modify, or repack archives.
 
 ## Get started in 5 minutes
 
@@ -117,10 +118,10 @@ LogCrate persists watched folders and restores them on the next launch. Watch ro
 Start reading in any of these ways:
 
 1. Click a plain log file in the directory tree.
-2. Expand a ZIP and click one of its log entries.
-3. Drag a log, ZIP, or folder from the file manager into LogCrate.
+2. Expand an archive, then expand nested archives as needed and click a log entry.
+3. Drag a log, archive, or folder from the file manager into LogCrate.
 
-When you drop a text log, LogCrate adds its parent folder, expands the tree, locates the file, and opens it. Dropping a ZIP or another file adds its containing folder to monitoring. Dropping a folder watches that folder itself.
+When you drop a text log, LogCrate adds its parent folder, expands the tree, locates the file, and opens it. Dropping an archive or another file adds its containing folder to monitoring. Dropping a folder watches that folder itself.
 
 > One dropped path is handled at a time today. Multi-file drag and drop is on the roadmap.
 
@@ -144,7 +145,7 @@ The backend keeps a bounded number of active sessions. An older tab may become d
 
 ### 6. Handle newly arrived logs
 
-When a new ZIP or matching log appears under a watched folder, the bell in the top-right shows an unread count. Clicking a notification expands the directory chain and locates the target. “Mark all as read” clears notifications only; it never deletes files.
+When a new supported archive or matching log appears under a watched folder, the bell in the top-right shows an unread count. Clicking a notification expands the directory chain and locates the target. “Mark all as read” clears notifications only; it never deletes files.
 
 ## Common tasks
 
@@ -153,7 +154,7 @@ When a new ZIP or matching log appears under a watched folder, the bell in the t
 | Watch another folder                   | Click “+ Add watched folder”            | Saves the folder and starts recursive monitoring immediately          |
 | Inspect a local log quickly            | Drop one log into the window            | Adds its parent, locates the file, and opens it                       |
 | Watch a whole folder                   | Drop the folder into the window         | Adds that folder as a watch root                                      |
-| Read a log inside a ZIP                | Expand the ZIP and click an entry       | Creates a viewing session without manual extraction                   |
+| Read a log inside an archive           | Expand each required layer and click a log | Lazily opens nested archives without manual extraction             |
 | Distinguish same-named files           | Hover a tab                             | Shows the absolute disk path and archive entry path                   |
 | Change text encoding                   | Use the encoding menu below the content | Rebuilds the line index in the background                             |
 | Locate a path in the file manager      | Right-click a file or folder            | Opens the system file manager at that path                            |
@@ -168,7 +169,9 @@ When a new ZIP or matching log appears under a watched folder, the bell in the t
 ### Supported today
 
 - **Operating systems** — 64-bit Windows; Intel and Apple Silicon macOS.
-- **Archives** — ZIP.
+- **Archives** — ZIP, 7z, single-volume RAR4/RAR5, TAR, tar.gz/tgz, tar.bz2/tbz/tbz2, tar.xz/txz, and tar.zst/tzst.
+- **Single-file streams** — gzip, bzip2, xz, and zstd synthesize one directly readable log entry.
+- **Nested archives** — any supported format can contain another; each next layer is read only after you explicitly expand it (maximum depth: 5).
 - **Text** — common log extensions plus files recognized as text through content sampling.
 - **Encodings** — UTF-8, GBK, GB18030, UTF-16LE, and UTF-16BE.
 - **Interface languages** — English and Simplified Chinese, with a persisted system/manual preference.
@@ -177,9 +180,10 @@ When a new ZIP or matching log appears under a watched folder, the bell in the t
 
 - Read-only preview; no editing or saving of log content.
 - One path per drag-and-drop operation.
-- No direct modification of ZIP entries.
+- No archive creation, modification, entry deletion, or repacking.
+- Password-protected and multi-volume 7z/RAR archives are detected but not opened yet.
+- WIM disk-image containers are not supported. WIM support requires separate native-dependency and cross-platform packaging work.
 - Automatic updates require access to GitHub Release download endpoints.
-- tar.gz, 7z, and rar are not implemented yet; see the roadmap below.
 
 ## Roadmap
 
@@ -203,7 +207,6 @@ The roadmap describes direction, not a promised version or delivery date. Issues
 
 ### Long term: more formats and stronger workflows
 
-- [ ] **More archive formats** — tar.gz and 7z, plus rar where licensing and cross-platform constraints allow it.
 - [ ] **Structured log views** — expand fields, select columns, and apply conditions to formats such as JSON Lines.
 - [ ] **Search indexes for huge logs** — accelerate repeated queries without loading the complete file into memory.
 - [ ] **Export investigation snippets** — export the smallest useful range by selected lines or time window for issues and team sharing.
@@ -212,14 +215,14 @@ The roadmap describes direction, not a promised version or delivery date. Issues
 
 ## How it works
 
-LogCrate is built with Tauri 2. The frontend owns interaction and virtualized lists; the Rust backend owns file watching, ZIP access, encoding detection, and line indexing.
+LogCrate is built with Tauri 2. The frontend owns interaction and virtualized lists; the Rust backend owns file watching, archive access, encoding detection, and line indexing.
 
 | Layer              | Responsibility                                                                                         |
 | ------------------ | ------------------------------------------------------------------------------------------------------ |
 | React + TypeScript | Directory tree, notifications, tabs, settings, and the virtualized log view                            |
 | Tauri IPC          | Commands and progress events between the UI and local Rust capabilities                                |
 | Rust watcher       | Recursive directory monitoring, event coalescing, file stability checks, and configuration persistence |
-| ArchiveReader      | ZIP central-directory access and a shared abstraction for archive entries and plain text               |
+| ArchiveReader      | Bounded streaming access for ZIP, 7z, RAR, TAR, compressed streams, nested archives, and plain text     |
 | SessionManager     | Encoding detection, line-offset indexes, bounded-session LRU, and temporary-resource cleanup           |
 
 Read the [technical design](docs/technical-design.md) for implementation detail and [CHANGELOG.md](CHANGELOG.md) for version history.
@@ -278,7 +281,7 @@ logpeek/
 │   └── util/             # Pure state helpers and frontend unit tests
 ├── src-tauri/            # Rust + Tauri backend
 │   └── src/
-│       ├── archive/      # ZIP and plain-text reader abstraction
+│       ├── archive/      # Archive registry, format readers, nested streams, and plain text
 │       ├── index.rs      # Line indexes, encodings, caches, and session lifecycle
 │       ├── watcher.rs    # Directory monitoring, stability checks, and persisted configuration
 │       └── lib.rs        # Tauri commands, events, tray, and application lifecycle
@@ -292,7 +295,7 @@ logpeek/
 Issues, feature proposals, and pull requests are welcome. When reporting a problem, please include:
 
 - the LogCrate version and operating system;
-- whether the log is a plain file or an entry inside a ZIP;
+- whether the log is a plain file or an entry inside a possibly nested archive;
 - the file size, encoding, and reproduction steps;
 - a screenshot for UI issues, after removing sensitive log content and local paths.
 

@@ -44,6 +44,7 @@ impl ArchiveReader for PlainReader {
             size: self.size,
             is_log: super::is_log_name(&self.name) || self.sample_is_text(),
             encrypted: false,
+            is_archive: false,
         }])
     }
 

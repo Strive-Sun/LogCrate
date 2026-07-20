@@ -202,11 +202,14 @@ export const tauriApi = {
     await previousOpen;
     try {
       await progressListenerReady;
-      const [archiveName, entry] = entryKey.includes('::')
-        ? entryKey.split('::')
-        : [entryKey, entryKey.split(/[/\\]/).pop() ?? entryKey];
-      const archivePath = pathByName.get(archiveName) ?? archiveName;
-      const entryPath = entry || archiveName;
+      const segments = entryKey.split('::');
+      const root = segments[0];
+      const archivePath =
+        segments.length > 1
+          ? [pathByName.get(root) ?? root, ...segments.slice(1, -1)].join('::')
+          : pathByName.get(root) ?? root;
+      const entryPath =
+        segments.length > 1 ? segments[segments.length - 1] : root.split(/[/\\]/).pop() ?? root;
       const res = await invoke<OpenSessionResult>('open_log_session', {
         archivePath,
         entryPath,

@@ -296,6 +296,7 @@ impl SessionManager {
     }
 
     /// Fill a prepared session. Flushed bytes and their offsets are published atomically.
+    #[cfg(test)]
     pub fn index<R, F>(&self, session_id: &str, declared_size: u64, reader: R, progress: F)
     where
         R: Read,
@@ -310,7 +311,7 @@ impl SessionManager {
         );
     }
 
-    fn index_with_limit<R, F>(
+    pub(crate) fn index_with_limit<R, F>(
         &self,
         session_id: &str,
         declared_size: u64,

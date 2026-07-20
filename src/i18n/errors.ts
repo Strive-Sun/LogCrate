@@ -15,6 +15,20 @@ export function localizeKnownError(message: string, t: Translator): string {
     文件名不能包含路径分隔符: 'error.pathSeparator',
   };
   if (exact[message]) return t(exact[message]);
+  if (message.includes('已加密') || message.includes('密码缺失')) {
+    return t('error.encryptedArchive');
+  }
+  if (message.includes('分卷归档暂不支持') || message.includes('换卷')) {
+    return t('error.multiVolumeArchive');
+  }
+  if (message.includes('嵌套归档超过最大深度')) return t('error.nestedDepth');
+  if (message.includes('累计解码内容超过') || message.includes('实际解码内容超过')) {
+    return t('error.nestedBytes');
+  }
+  if (message.includes('归档条目数量超过安全上限')) return t('error.archiveEntries');
+  if (message.includes('归档已损坏') || message.includes('ChecksumVerificationFailed')) {
+    return t('error.archiveDamaged');
+  }
   const entry = message.match(/^条目不存在:\s*(.+)$/);
   if (entry) return t('error.entryMissing', { path: entry[1] });
   const directory = message.match(/^目录不存在:\s*(.+)$/);

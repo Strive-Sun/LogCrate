@@ -1,6 +1,6 @@
 //! 目录监控:多目录 notify + 大小稳定检测 + 类型判定 + 配置持久化。
 
-use crate::archive::{is_log_name, is_zip};
+use crate::archive::{is_archive, is_archive_name, is_log_name};
 use notify::event::{ModifyKind, RenameMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
@@ -281,7 +281,7 @@ fn is_arrival_candidate(config: &WatchConfig, path: &Path) -> bool {
         return false;
     };
     let lower = name.to_lowercase();
-    lower.ends_with(".zip")
+    is_archive_name(&lower)
         || config
             .suffixes
             .iter()
@@ -1148,7 +1148,7 @@ fn inventory_item(path: &Path, source: &str) -> Option<DetectedItem> {
     let name = path.file_name()?.to_str()?.to_string();
     let size = std::fs::metadata(path).ok()?.len();
     let path_str = path.to_str()?.to_string();
-    let archive = is_zip(path).unwrap_or(false);
+    let archive = is_archive(path).unwrap_or(false);
     // 库存扫描不采样未知文件内容；稳定检测会异步补全其文本分类。
     let is_log = archive || is_log_name(&name);
     Some(DetectedItem {
@@ -1161,13 +1161,13 @@ fn inventory_item(path: &Path, source: &str) -> Option<DetectedItem> {
     })
 }
 
-/// 类型判定:zip 归档 / 裸文本日志 / 其余忽略
+/// 类型判定:受支持归档 / 裸文本日志 / 其余忽略
 fn classify(path: &Path, source: &str) -> Option<DetectedItem> {
     let name = path.file_name()?.to_str()?.to_string();
     let size = std::fs::metadata(path).ok()?.len();
     let path_str = path.to_str()?.to_string();
 
-    if is_zip(path).unwrap_or(false) {
+    if is_archive(path).unwrap_or(false) {
         return Some(DetectedItem {
             path: path_str,
             name,
