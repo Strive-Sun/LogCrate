@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "LogPeek",
+  "productName": "LogCrate",
   "identifier": "com.logpeek.app",
   "build": {
     "frontendDist": "../dist",
@@ -12,7 +12,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "LogPeek",
+        "title": "LogCrate",
         "width": 1200,
         "height": 760,
         "minWidth": 800,
@@ -27,7 +27,7 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico", "icons/icon.png"]
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico", "icons/icon.png"]
   },
   "plugins": {
     "updater": {

@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">LogCrate icon</title>
+  <desc id="desc">An open orange archive crate containing three cyan log lines on a navy background</desc>
+  <rect x="40" y="40" width="944" height="944" rx="220" fill="#111827"/>
+  <path
+    d="M184 408 330 266l182 142 182-142 146 142"
+    fill="none"
+    stroke="#F59E0B"
+    stroke-width="72"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M206 464h612l-70 330H276l-70-330Z"
+    fill="none"
+    stroke="#F59E0B"
+    stroke-width="72"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M350 536h324M372 626h280M394 716h236"
+    fill="none"
+    stroke="#22D3EE"
+    stroke-width="48"
+    stroke-linecap="round"
+  />
+</svg>

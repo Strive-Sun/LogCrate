@@ -254,7 +254,7 @@ fn minimal_coverage_roots(dirs: &[String]) -> Vec<PathBuf> {
 fn source_label(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or_else(|| path.to_str().unwrap_or("LogPeek"))
+        .unwrap_or_else(|| path.to_str().unwrap_or("LogCrate"))
         .to_string()
 }
 

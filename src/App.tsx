@@ -151,6 +151,7 @@ export function App() {
 
   // 左栏宽度(可拖动调整),持久化到 localStorage
   const [treeWidth, setTreeWidth] = useState<number>(() => {
+    // Legacy key is intentionally retained so LogPeek users keep their layout after rebranding.
     const saved = Number(localStorage.getItem('logpeek.treeWidth'));
     return saved >= 160 && saved <= 720 ? saved : 300;
   });

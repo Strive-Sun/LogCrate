@@ -13,7 +13,7 @@ export const en = {
   'settings.title': 'Settings',
   'settings.close': 'Close settings',
   'settings.version': 'Current version',
-  'settings.appHint': 'LogPeek desktop app',
+  'settings.appHint': 'LogCrate desktop app',
   'settings.language': 'Language',
   'settings.languageHint': 'Changes apply immediately',
   'settings.language.system': 'Follow system',
@@ -53,7 +53,7 @@ export const en = {
   'tree.notLog': 'Not a text log',
   'empty.title': 'No watched folders yet',
   'empty.description':
-    'Add a folder and LogPeek will discover newly arrived archives and text logs.',
+    'Add a folder and LogCrate will discover newly arrived archives and text logs.',
   'filter.title': 'Suffix filter',
   'filter.button': 'Suffixes ▾',
   'filter.showAll': 'Show all files (including non-logs)',
@@ -113,7 +113,7 @@ export const en = {
   'mock.fileManager':
     'The system file manager is available in the Tauri desktop app, not browser mock mode.',
   'tray.show': 'Show main window',
-  'tray.exit': 'Exit LogPeek',
+  'tray.exit': 'Exit LogCrate',
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -134,7 +134,7 @@ export const zhCN: MessageDictionary = {
   'settings.title': '设置',
   'settings.close': '关闭设置',
   'settings.version': '当前版本',
-  'settings.appHint': 'LogPeek 桌面应用',
+  'settings.appHint': 'LogCrate 桌面应用',
   'settings.language': '界面语言',
   'settings.languageHint': '切换后立即生效',
   'settings.language.system': '跟随系统',
@@ -172,7 +172,7 @@ export const zhCN: MessageDictionary = {
   'tree.encrypted': '加密条目（暂不支持）',
   'tree.notLog': '非日志文件',
   'empty.title': '还没有监控目录',
-  'empty.description': '添加一个目录，LogPeek 会自动发现新到达的日志压缩包和文本文件。',
+  'empty.description': '添加一个目录，LogCrate 会自动发现新到达的日志压缩包和文本文件。',
   'filter.title': '后缀筛选',
   'filter.button': '后缀 ▾',
   'filter.showAll': '显示全部（含非日志）',
@@ -226,5 +226,5 @@ export const zhCN: MessageDictionary = {
   'mock.dropUnsupported': '浏览器 mock 模式不支持本地文件拖放',
   'mock.fileManager': '浏览器 mock 模式下无法打开文件管理器；在 Tauri 桌面应用中可用。',
   'tray.show': '显示主窗口',
-  'tray.exit': '退出 LogPeek',
+  'tray.exit': '退出 LogCrate',
 };

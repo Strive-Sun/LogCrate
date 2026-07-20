@@ -1,5 +1,6 @@
 import type { AppUpdateInfo } from '../api/types';
 
+// Legacy keys are intentionally retained for in-place LogPeek → LogCrate upgrades.
 export const AUTO_CHECK_STORAGE_KEY = 'logpeek.update.autoCheck';
 export const SKIPPED_VERSION_STORAGE_KEY = 'logpeek.update.skippedVersion';
 

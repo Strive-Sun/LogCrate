@@ -1,6 +1,6 @@
 # 开发协作流程
 
-本文档记录 LogPeek 在使用 AI 助手(Claude)+ OpenSpec + Codex 审阅时的标准往返流程。
+本文档记录 LogCrate 在使用 AI 助手(Claude)+ OpenSpec + Codex 审阅时的标准往返流程。
 
 Codex 审阅通过 Claude Code 官方插件 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) 的 `/codex:review` 命令完成(底层走 Codex 原生 review target,上下文独立、省 token),不再使用 `codex mcp-server`。
 
@@ -87,7 +87,7 @@ Tauri updater 会拒绝任何未通过签名验证的更新包。签名公钥保
 
 首次配置或需要重建发布环境时:
 
-1. 运行 `npm run tauri signer generate -- --ci -w ~/.tauri/logpeek-updater.key` 生成密钥对；生产密钥建议通过 `--password` 设置密码。
+1. 运行 `npm run tauri signer generate -- --ci -w ~/.tauri/logpeek-updater.key` 生成密钥对；该 legacy 文件名为兼容既有密钥备份而保留，生产密钥建议通过 `--password` 设置密码。
 2. 将 `.pub` 文件的完整内容填写到 `tauri.conf.json` 的 `plugins.updater.pubkey`。
 3. 在 GitHub 仓库的 Actions secrets 中配置:
    - `TAURI_SIGNING_PRIVATE_KEY`:私钥文件的完整内容。

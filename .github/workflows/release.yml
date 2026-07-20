@@ -71,7 +71,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'LogPeek ${{ github.ref_name }}'
+          releaseName: 'LogCrate ${{ github.ref_name }}'
           releaseBody: ${{ steps.release_notes.outputs.body }}
           # 自动发布(非草稿):Release 跑完即公开,点进 tag/Releases 页面可直接下载安装包
           releaseDraft: false

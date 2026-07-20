@@ -3,10 +3,10 @@
 </p>
 
 <p align="center">
-  <img src="src-tauri/icons/128x128.png" width="88" height="88" alt="LogPeek logo">
+  <img src="src-tauri/icons/128x128.png" width="88" height="88" alt="LogCrate logo">
 </p>
 
-<h1 align="center">LogPeek</h1>
+<h1 align="center">LogCrate</h1>
 
 <p align="center">
   <strong>Watch folders. Catch new logs. Skip extraction. Start reading.</strong>
@@ -30,13 +30,15 @@
   · <a href="docs/technical-design.md">Technical design</a>
 </p>
 
+> LogCrate was previously named LogPeek. The existing GitHub repository and update endpoint are retained for upgrade compatibility.
+
 ---
 
-## Why LogPeek
+## Why LogCrate
 
 Production debugging often starts with a ZIP file: download it, extract it, dig through nested folders for `.log` or `.txt` files, then open them one by one. The larger the files and the more archives you receive, the more this repetitive workflow interrupts the investigation.
 
-LogPeek is built around that exact path:
+LogCrate is built around that exact path:
 
 ```mermaid
 flowchart LR
@@ -70,7 +72,7 @@ flowchart LR
 | Desktop behavior                 | Includes light/dark themes, close-to-tray, auto-hiding scrollbars, and a resizable directory pane                          |
 | UI languages                     | Follows the system by default and switches instantly between English and Simplified Chinese in Settings                    |
 
-> LogPeek is currently a **read-only viewer**. It can rename or delete files on disk, but it cannot edit and save log content or rewrite entries inside a ZIP.
+> LogCrate is currently a **read-only viewer**. It can rename or delete files on disk, but it cannot edit and save log content or rewrite entries inside a ZIP.
 
 ## Get started in 5 minutes
 
@@ -81,7 +83,7 @@ Open [GitHub Releases](https://github.com/Strive-Sun/LogPeek/releases/latest) an
 - **Windows** — prefer `setup.exe`; an `.msi` package is also available.
 - **macOS** — download the `.dmg`; releases are built as universal binaries.
 
-LogPeek uses the system WebView. Windows 10 and 11 usually include WebView2 already; if it is missing, Windows will prompt you to install it.
+LogCrate uses the system WebView. Windows 10 and 11 usually include WebView2 already; if it is missing, Windows will prompt you to install it.
 
 ### 2. Add a watched folder
 
@@ -92,7 +94,7 @@ On first launch, click **“+ Add watched folder”** at the bottom of the left 
 - a test-device export directory;
 - a local service log directory.
 
-LogPeek persists watched folders and restores them on the next launch. Watch roots are normalized by parent-child coverage, so a child is not watched twice after its parent has been added.
+LogCrate persists watched folders and restores them on the next launch. Watch roots are normalized by parent-child coverage, so a child is not watched twice after its parent has been added.
 
 ### 3. Open a log
 
@@ -100,9 +102,9 @@ Start reading in any of these ways:
 
 1. Click a plain log file in the directory tree.
 2. Expand a ZIP and click one of its log entries.
-3. Drag a log, ZIP, or folder from the file manager into LogPeek.
+3. Drag a log, ZIP, or folder from the file manager into LogCrate.
 
-When you drop a text log, LogPeek adds its parent folder, expands the tree, locates the file, and opens it. Dropping a ZIP or another file adds its containing folder to monitoring. Dropping a folder watches that folder itself.
+When you drop a text log, LogCrate adds its parent folder, expands the tree, locates the file, and opens it. Dropping a ZIP or another file adds its containing folder to monitoring. Dropping a folder watches that folder itself.
 
 > One dropped path is handled at a time today. Multi-file drag and drop is on the roadmap.
 
@@ -141,8 +143,8 @@ When a new ZIP or matching log appears under a watched folder, the bell in the t
 | Locate a path in the file manager      | Right-click a file or folder            | Opens the system file manager at that path                            |
 | Stop watching but keep files           | Right-click a watch root → Remove watch | Removes monitoring without changing disk content                      |
 | Delete a file or directory             | Right-click → Delete, then confirm      | Moves it to the system recycle bin instead of permanently deleting it |
-| Keep LogPeek running in the background | Click the window close button           | Hides to the tray while monitoring continues                          |
-| Exit completely                        | Tray menu → Exit LogPeek                | Stops monitoring and terminates the process                           |
+| Keep LogCrate running in the background | Click the window close button          | Hides to the tray while monitoring continues                          |
+| Exit completely                         | Tray menu → Exit LogCrate              | Stops monitoring and terminates the process                           |
 | Check for a new release                | Settings → Check for updates            | Downloads, verifies, and installs an official release                 |
 
 ## Support matrix
@@ -193,7 +195,7 @@ The roadmap describes direction, not a promised version or delivery date. Issues
 
 ## How it works
 
-LogPeek is built with Tauri 2. The frontend owns interaction and virtualized lists; the Rust backend owns file watching, ZIP access, encoding detection, and line indexing.
+LogCrate is built with Tauri 2. The frontend owns interaction and virtualized lists; the Rust backend owns file watching, ZIP access, encoding detection, and line indexing.
 
 | Layer              | Responsibility                                                                                         |
 | ------------------ | ------------------------------------------------------------------------------------------------------ |
@@ -272,7 +274,7 @@ logpeek/
 
 Issues, feature proposals, and pull requests are welcome. When reporting a problem, please include:
 
-- the LogPeek version and operating system;
+- the LogCrate version and operating system;
 - whether the log is a plain file or an entry inside a ZIP;
 - the file size, encoding, and reproduction steps;
 - a screenshot for UI issues, after removing sensitive log content and local paths.

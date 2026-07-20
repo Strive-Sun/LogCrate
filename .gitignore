@@ -19,6 +19,12 @@ dist-ssr/
 Thumbs.db
 *.swp
 
+# LogCrate is desktop-only; `tauri icon` also emits unused mobile/Store assets.
+/src-tauri/icons/android/
+/src-tauri/icons/ios/
+/src-tauri/icons/Square*Logo.png
+/src-tauri/icons/StoreLogo.png
+
 # 日志与临时
 *.log
 .tmp/

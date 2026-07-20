@@ -1,8 +1,5 @@
-# application-lifecycle Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change add-close-to-tray. Update Purpose after archive.
-## Requirements
 ### Requirement: 关闭主窗口时保持后台运行
 
 系统 SHALL 在用户点击主窗口关闭按钮时阻止窗口销毁并将其隐藏到系统托盘，同时 MUST 保持应用进程、目录监控和已启动后台任务继续运行；普通最小化按钮 SHALL 保持平台默认行为。
@@ -21,20 +18,6 @@ TBD - created by archiving change add-close-to-tray. Update Purpose after archiv
 
 - **WHEN** 用户点击主窗口最小化按钮
 - **THEN** 系统按平台默认方式最小化窗口，不将其解释为关闭或退出
-
-### Requirement: 从系统托盘恢复主窗口
-
-系统 SHALL 提供托盘“显示主窗口”操作，并在平台支持时允许点击托盘图标恢复同一个主窗口实例；恢复操作 SHALL 显示、取消最小化并聚焦窗口，且 MUST NOT 重建或清空现有前端状态。
-
-#### Scenario: 通过托盘菜单恢复
-
-- **WHEN** 主窗口隐藏且用户选择托盘菜单“显示主窗口”
-- **THEN** 系统显示并聚焦原主窗口，目录树、查看会话和未读状态保持不变
-
-#### Scenario: 重复显示已可见窗口
-
-- **WHEN** 主窗口已经可见且用户再次触发托盘显示操作
-- **THEN** 系统聚焦现有窗口且不创建第二个窗口实例
 
 ### Requirement: 通过系统托盘退出应用
 

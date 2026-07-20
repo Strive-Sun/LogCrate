@@ -54,7 +54,7 @@ export function TopBar(props: Props) {
 
   return (
     <div className="topbar">
-      <span className="brand">LogPeek</span>
+      <span className="brand">LogCrate</span>
       <span className="search" title={t('top.searchLater')}>
         🔍 {t('top.search')}
       </span>

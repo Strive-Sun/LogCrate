@@ -66,9 +66,9 @@ struct TrayMenuItems {
 
 fn tray_labels(locale: &str) -> (&'static str, &'static str) {
     if locale == "zh-CN" {
-        ("显示主窗口", "退出 LogPeek")
+        ("显示主窗口", "退出 LogCrate")
     } else {
-        ("Show main window", "Exit LogPeek")
+        ("Show main window", "Exit LogCrate")
     }
 }
 
@@ -489,11 +489,11 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
-    let exit_item = MenuItem::with_id(app, EXIT_APP_MENU_ID, "Exit LogPeek", true, None::<&str>)?;
+    let exit_item = MenuItem::with_id(app, EXIT_APP_MENU_ID, "Exit LogCrate", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_item, &exit_item])?;
 
     let mut tray = TrayIconBuilder::new()
-        .tooltip("LogPeek")
+        .tooltip("LogCrate")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match menu_action(event.id().as_ref()) {
@@ -562,6 +562,7 @@ pub fn run() {
                 .path()
                 .app_cache_dir()
                 .unwrap_or_else(|_| std::env::temp_dir())
+                // Legacy cache directory keeps in-place LogPeek upgrades free of orphaned data.
                 .join("logpeek-cache");
             sessions.set_cache_dir(cache_dir);
 
@@ -627,9 +628,9 @@ mod lifecycle_tests {
 
     #[test]
     fn tray_labels_support_chinese_and_fall_back_to_english() {
-        assert_eq!(tray_labels("zh-CN"), ("显示主窗口", "退出 LogPeek"));
-        assert_eq!(tray_labels("en"), ("Show main window", "Exit LogPeek"));
-        assert_eq!(tray_labels("fr"), ("Show main window", "Exit LogPeek"));
+        assert_eq!(tray_labels("zh-CN"), ("显示主窗口", "退出 LogCrate"));
+        assert_eq!(tray_labels("en"), ("Show main window", "Exit LogCrate"));
+        assert_eq!(tray_labels("fr"), ("Show main window", "Exit LogCrate"));
     }
 
     #[test]
