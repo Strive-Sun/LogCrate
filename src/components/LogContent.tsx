@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { api } from '../api';
 import type { LogLine, OpenSessionResult } from '../api';
@@ -8,12 +8,15 @@ import { LogRow } from './LogRow';
 interface Props {
   session: OpenSessionResult | null;
   activeKey: string | null;
+  status?: 'opening' | 'ready' | 'dormant' | 'error';
+  error?: string;
 }
 
 const PAGE = 200;
+const MAX_CACHED_LINES = 5_000;
 const ENCODINGS = ['UTF-8', 'GBK', 'GB18030', 'UTF-16LE', 'UTF-16BE'];
 
-export function LogContent({ session, activeKey }: Props) {
+export function LogContent({ session, activeKey, status = 'ready', error }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [percent, setPercent] = useState(100);
   const [indexedLines, setIndexedLines] = useState(0);
@@ -28,7 +31,35 @@ export function LogContent({ session, activeKey }: Props) {
   const [currentLine, setCurrentLine] = useState(1);
   const pending = useRef<Set<number>>(new Set());
   const encodingUnsub = useRef<() => void>(() => {});
-  const absoluteEntryPath = activeKey?.replace('::', ' › ') ?? session?.entryPath;
+  const preferredEncoding = useRef<string | null>(null);
+
+  const rebuildForEncoding = useCallback(async (entryKey: string, encoding: string) => {
+    encodingUnsub.current();
+    setEncodingChanging(true);
+    setEncodingPercent(0);
+    try {
+      const generation = await api.setSessionEncoding(entryKey, encoding);
+      encodingUnsub.current = api.subscribeEncodingProgress(entryKey, generation, (progress) => {
+        setEncodingPercent(progress.percent);
+        if (!progress.done) return;
+        setEncodingChanging(false);
+        if (progress.failed) {
+          alert(`切换编码失败: ${progress.error ?? '未知错误'}`);
+          return;
+        }
+        preferredEncoding.current = progress.encoding;
+        setEffectiveEncoding(progress.encoding);
+        setTotalLines(progress.lineCount);
+        setIndexedLines(progress.lineCount);
+        setCache(new Map());
+        pending.current = new Set();
+        scrollRef.current?.scrollTo({ top: 0 });
+      });
+    } catch (error) {
+      setEncodingChanging(false);
+      alert(`切换编码失败: ${String(error)}`);
+    }
+  }, []);
 
   useEffect(
     () => () => {
@@ -39,7 +70,17 @@ export function LogContent({ session, activeKey }: Props) {
 
   // 打开新条目:重置并按需订阅建索引进度
   useEffect(() => {
-    if (!session || !activeKey) return;
+    if (!session || !activeKey) {
+      setCache(new Map());
+      pending.current = new Set();
+      setTotalLines(0);
+      setIndexedLines(0);
+      setIndexing(false);
+      encodingUnsub.current();
+      return;
+    }
+    const encodingToRestore = preferredEncoding.current;
+    if (!encodingToRestore) preferredEncoding.current = session.encoding;
     setCache(new Map());
     pending.current = new Set();
     const total = api.lineCount(activeKey);
@@ -68,6 +109,9 @@ export function LogContent({ session, activeKey }: Props) {
           setPercent(100);
           setIndexedLines(finalTotal);
           setTotalLines(finalTotal);
+          if (encodingToRestore && encodingToRestore !== session.encoding) {
+            void rebuildForEncoding(activeKey, encodingToRestore);
+          }
         },
       );
       return unsub;
@@ -75,8 +119,11 @@ export function LogContent({ session, activeKey }: Props) {
       setIndexing(false);
       setPercent(100);
       setIndexedLines(total);
+      if (encodingToRestore && encodingToRestore !== session.encoding) {
+        void rebuildForEncoding(activeKey, encodingToRestore);
+      }
     }
-  }, [session, activeKey]);
+  }, [session, activeKey, rebuildForEncoding]);
 
   const rowVirtualizer = useVirtualizer({
     count: totalLines,
@@ -104,6 +151,11 @@ export function LogContent({ session, activeKey }: Props) {
           setCache((prev) => {
             const next = new Map(prev);
             for (const l of lines) next.set(l.lineNo - 1, l);
+            while (next.size > MAX_CACHED_LINES) {
+              const oldest = next.keys().next().value;
+              if (oldest === undefined) break;
+              next.delete(oldest);
+            }
             return next;
           });
         })
@@ -113,35 +165,12 @@ export function LogContent({ session, activeKey }: Props) {
 
   async function changeEncoding(encoding: string) {
     if (!activeKey || encoding === effectiveEncoding) return;
-    encodingUnsub.current();
-    setEncodingChanging(true);
-    setEncodingPercent(0);
-    try {
-      const generation = await api.setSessionEncoding(activeKey, encoding);
-      encodingUnsub.current = api.subscribeEncodingProgress(activeKey, generation, (progress) => {
-        setEncodingPercent(progress.percent);
-        if (!progress.done) return;
-        setEncodingChanging(false);
-        if (progress.failed) {
-          alert(`切换编码失败: ${progress.error ?? '未知错误'}`);
-          return;
-        }
-        setEffectiveEncoding(progress.encoding);
-        setTotalLines(progress.lineCount);
-        setIndexedLines(progress.lineCount);
-        setCache(new Map());
-        pending.current = new Set();
-        scrollRef.current?.scrollTo({ top: 0 });
-      });
-    } catch (error) {
-      setEncodingChanging(false);
-      alert(`切换编码失败: ${String(error)}`);
-    }
+    await rebuildForEncoding(activeKey, encoding);
   }
 
   if (!session && !activeKey) {
     return (
-      <div className="col col-content">
+      <div className="col log-content-panel">
         <div className="empty-state">
           <div className="big">📄</div>
           <div className="desc">从左侧选择一个日志条目查看内容</div>
@@ -150,28 +179,25 @@ export function LogContent({ session, activeKey }: Props) {
     );
   }
 
-  return (
-    <div className="col col-content">
-      <div className="content-head">
-        {session ? (
-          <>
-            {session.entryPath.split(' › ').map((p, i, arr) => (
-              <span key={i}>
-                <span
-                  className={i === arr.length - 1 ? 'crumb-file' : ''}
-                  title={i === arr.length - 1 ? absoluteEntryPath : undefined}
-                >
-                  {p}
-                </span>
-                {i < arr.length - 1 && <span className="crumb-sep"> › </span>}
-              </span>
-            ))}
-          </>
-        ) : (
-          <span>打开中…</span>
-        )}
+  if (!session && activeKey) {
+    const message =
+      status === 'error'
+        ? `打开失败：${error ?? '未知错误'}（点击选项卡重试）`
+        : status === 'dormant'
+          ? '会话已休眠，点击选项卡重新加载'
+          : '正在打开日志…';
+    return (
+      <div className="col log-content-panel">
+        <div className="empty-state log-session-state">
+          <div className="big">{status === 'error' ? '⚠' : '↻'}</div>
+          <div className="desc">{message}</div>
+        </div>
       </div>
+    );
+  }
 
+  return (
+    <div className="col log-content-panel">
       {indexing && (
         <div className="index-bar">
           <span>解压+建索引 {percent}%</span>

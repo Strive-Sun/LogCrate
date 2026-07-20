@@ -92,6 +92,8 @@ export interface OpenSessionResult {
   indexing: boolean;
   /** 检测到的编码 */
   encoding: string;
+  /** 本次打开因后端会话上限而被 LRU 回收的旧 session。 */
+  evictedSessionIds: string[];
 }
 
 /** 后端到达检测事件载荷 */

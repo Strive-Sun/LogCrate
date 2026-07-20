@@ -100,7 +100,7 @@ const ARCHIVE_ENTRIES: Record<string, string[]> = {
   'device3.zip': ['device.log'],
 };
 
-let progressTimer: number | undefined;
+const progressTimers = new Map<string, number>();
 let encodingGeneration = 0;
 const encodingByKey = new Map<string, string>();
 
@@ -225,8 +225,11 @@ export const mockApi = {
       size: meta.entry.size,
       indexing: meta.compressed && meta.lineCount > 300_000,
       encoding: 'UTF-8',
+      evictedSessionIds: [],
     };
   },
+
+  async closeLogSession(_entryKey: string, _expectedSessionId?: string): Promise<void> {},
 
   /** 模拟后台建索引进度;返回取消函数 */
   subscribeIndexProgress(
@@ -236,9 +239,10 @@ export const mockApi = {
   ): () => void {
     const meta = ENTRY_TABLE[entryKey];
     const total = meta?.lineCount ?? 0;
-    if (progressTimer) window.clearInterval(progressTimer);
+    const previousTimer = progressTimers.get(entryKey);
+    if (previousTimer) window.clearInterval(previousTimer);
     let percent = 0;
-    progressTimer = window.setInterval(() => {
+    const timer = window.setInterval(() => {
       percent += 7 + Math.floor(percent / 20);
       if (percent >= 100) {
         percent = 100;
@@ -252,7 +256,8 @@ export const mockApi = {
           effectiveEncoding: encodingByKey.get(entryKey) ?? 'UTF-8',
         });
         onDone(total);
-        if (progressTimer) window.clearInterval(progressTimer);
+        window.clearInterval(timer);
+        progressTimers.delete(entryKey);
         return;
       }
       onProgress({
@@ -265,7 +270,11 @@ export const mockApi = {
         effectiveEncoding: encodingByKey.get(entryKey) ?? 'UTF-8',
       });
     }, 180);
-    return () => progressTimer && window.clearInterval(progressTimer);
+    progressTimers.set(entryKey, timer);
+    return () => {
+      window.clearInterval(timer);
+      if (progressTimers.get(entryKey) === timer) progressTimers.delete(entryKey);
+    };
   },
 
   async readLines(entryKey: string, start: number, count: number): Promise<LogLine[]> {

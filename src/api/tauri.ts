@@ -33,6 +33,7 @@ const progressSubscribers = new Map<string, Set<(progress: IndexProgress) => voi
 const latestEncodingProgress = new Map<string, EncodingProgress>();
 const encodingSubscribers = new Map<string, Set<(progress: EncodingProgress) => void>>();
 let pendingUpdate: Update | null = null;
+let sessionOpenQueue: Promise<void> = Promise.resolve();
 
 // Start listening before any session opens so fast jobs can be replayed to late subscribers.
 const progressListenerReady = listen<IndexProgress>('index-progress', (event) => {
@@ -192,20 +193,56 @@ export const tauriApi = {
   },
 
   async openLogSession(entryKey: string): Promise<OpenSessionResult> {
-    await progressListenerReady;
-    const [archiveName, entry] = entryKey.includes('::')
-      ? entryKey.split('::')
-      : [entryKey, entryKey.split(/[/\\]/).pop() ?? entryKey];
-    const archivePath = pathByName.get(archiveName) ?? archiveName;
-    const entryPath = entry || archiveName;
-    const res = await invoke<OpenSessionResult>('open_log_session', {
-      archivePath,
-      entryPath,
+    let releaseQueue!: () => void;
+    const previousOpen = sessionOpenQueue;
+    sessionOpenQueue = new Promise<void>((resolve) => {
+      releaseQueue = resolve;
     });
-    sessionByKey.set(entryKey, res.sessionId);
-    const total = await invoke<number>('line_count', { sessionId: res.sessionId });
-    totalByKey.set(entryKey, latestProgress.get(res.sessionId)?.indexedLines ?? total);
-    return res;
+    await previousOpen;
+    try {
+      await progressListenerReady;
+      const [archiveName, entry] = entryKey.includes('::')
+        ? entryKey.split('::')
+        : [entryKey, entryKey.split(/[/\\]/).pop() ?? entryKey];
+      const archivePath = pathByName.get(archiveName) ?? archiveName;
+      const entryPath = entry || archiveName;
+      const res = await invoke<OpenSessionResult>('open_log_session', {
+        archivePath,
+        entryPath,
+      });
+      for (const evictedSessionId of res.evictedSessionIds) {
+        for (const [key, sessionId] of sessionByKey) {
+          if (sessionId !== evictedSessionId) continue;
+          sessionByKey.delete(key);
+          totalByKey.delete(key);
+        }
+        progressSubscribers.delete(evictedSessionId);
+        latestProgress.delete(evictedSessionId);
+        encodingSubscribers.delete(evictedSessionId);
+        latestEncodingProgress.delete(evictedSessionId);
+      }
+      sessionByKey.set(entryKey, res.sessionId);
+      const total = await invoke<number>('line_count', { sessionId: res.sessionId });
+      totalByKey.set(entryKey, latestProgress.get(res.sessionId)?.indexedLines ?? total);
+      return res;
+    } finally {
+      releaseQueue();
+    }
+  },
+
+  async closeLogSession(entryKey: string, expectedSessionId?: string): Promise<void> {
+    const currentSessionId = sessionByKey.get(entryKey);
+    const sessionId = expectedSessionId ?? currentSessionId;
+    if (!expectedSessionId || currentSessionId === expectedSessionId) {
+      sessionByKey.delete(entryKey);
+      totalByKey.delete(entryKey);
+    }
+    if (!sessionId) return;
+    progressSubscribers.delete(sessionId);
+    latestProgress.delete(sessionId);
+    encodingSubscribers.delete(sessionId);
+    latestEncodingProgress.delete(sessionId);
+    await invoke('close_log_session', { sessionId });
   },
 
   subscribeIndexProgress(

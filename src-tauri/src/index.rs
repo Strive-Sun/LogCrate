@@ -32,6 +32,7 @@ pub struct OpenResult {
     pub size: u64,
     pub indexing: bool,
     pub encoding: String,
+    pub evicted_session_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -282,7 +283,7 @@ impl SessionManager {
             .lock()
             .unwrap()
             .insert(session_id.clone(), Arc::new(Mutex::new(session)));
-        self.touch_lru(&session_id);
+        let evicted_session_ids = self.touch_lru(&session_id);
 
         Ok(OpenResult {
             session_id,
@@ -290,6 +291,7 @@ impl SessionManager {
             size: declared_size,
             indexing: true,
             encoding: "Detecting".to_string(),
+            evicted_session_ids,
         })
     }
 
@@ -468,7 +470,7 @@ impl SessionManager {
             sessions.get(session_id).cloned()
         }
         .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
-        self.touch_lru(session_id);
+        let _ = self.touch_lru(session_id);
         let mut current = session.lock().unwrap();
         if current.indexing {
             anyhow::bail!("wait for initial indexing to finish before changing encoding");
@@ -579,10 +581,11 @@ impl SessionManager {
         }
     }
 
-    fn touch_lru(&self, session_id: &str) {
+    fn touch_lru(&self, session_id: &str) -> Vec<String> {
         let mut lru = self.lru.lock().unwrap();
         lru.retain(|s| s != session_id);
         lru.push(session_id.to_string());
+        let mut evicted_session_ids = Vec::new();
         while lru.len() > MAX_SESSIONS {
             let evict = lru.remove(0);
             let removed = self.sessions.lock().unwrap().remove(&evict);
@@ -592,8 +595,10 @@ impl SessionManager {
                     .unwrap()
                     .cancel
                     .store(true, Ordering::Release);
+                evicted_session_ids.push(evict);
             }
         }
+        evicted_session_ids
     }
 
     pub fn read_lines(
@@ -607,7 +612,7 @@ impl SessionManager {
             map.get(session_id).cloned()
         };
         let session = session.ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
-        self.touch_lru(session_id);
+        let _ = self.touch_lru(session_id);
         let session = session.lock().unwrap();
 
         let total = session.line_count();
@@ -933,9 +938,16 @@ mod tests {
             .unwrap()
             .cache_path
             .clone();
+        let mut evicted = Vec::new();
         for index in 0..MAX_SESSIONS {
-            manager.prepare(format!("extra-{index}.log"), 0).unwrap();
+            evicted.extend(
+                manager
+                    .prepare(format!("extra-{index}.log"), 0)
+                    .unwrap()
+                    .evicted_session_ids,
+            );
         }
+        assert_eq!(evicted, vec![first.session_id.clone()]);
         assert_eq!(manager.line_count(&first.session_id), 0);
         assert!(!first_path.exists());
         manager.clear_all();

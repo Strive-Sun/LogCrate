@@ -14,6 +14,7 @@ import { UpdateDialog } from './components/UpdateDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { DirTree } from './components/DirTree';
 import { LogContent } from './components/LogContent';
+import { LogTabs, type LogTabItem } from './components/LogTabs';
 import { EmptyState } from './components/EmptyState';
 import {
   classifyUpdateCheck,
@@ -27,11 +28,22 @@ import {
 import {
   applyDirectoryChanges,
   findTreeNode,
+  isPathInsideDirectory,
   passesDirectoryFilter,
   revealDirectoryChain,
   removedDirectoryNodes,
+  sameFilePath,
 } from './util/directoryTree';
 import { planFileDrop, singleDroppedPath } from './util/fileDrop';
+import {
+  activateTab,
+  closeTab,
+  emptyTabLayout,
+  markEvictedSessions,
+  openTab,
+  resizeTabs,
+  tabIds,
+} from './util/logTabs';
 
 function flattenNodes(nodes: readonly TreeNode[]): TreeNode[] {
   return nodes.flatMap((node) => [node, ...flattenNodes(node.children ?? [])]);
@@ -42,6 +54,24 @@ interface ConfirmationRequest {
   message: string;
   confirmLabel: string;
   action: () => Promise<void>;
+}
+
+interface LogTab extends LogTabItem {
+  session: OpenSessionResult | null;
+  error?: string;
+}
+
+function tabTitle(entryKey: string): string {
+  const target = entryKey.includes('::') ? entryKey.split('::').slice(1).join('::') : entryKey;
+  return target.split(/[/\\]/).pop() ?? target;
+}
+
+function tabContainerPath(entryKey: string): string {
+  return entryKey.includes('::') ? entryKey.split('::')[0] : entryKey;
+}
+
+function archiveForEntryKey(entryKey: string | null): string | null {
+  return entryKey?.includes('::') ? entryKey.split('::')[0] : null;
 }
 
 export function App() {
@@ -68,11 +98,6 @@ export function App() {
   // 未读项 id 集合(id 即文件路径),用于左树高亮;不依赖后端 unread 标记
   const unreadIds = new Set(newItems.map((it) => it.id));
   const seen = useRef<Set<string>>(new Set());
-  // 打开请求序号:防止并发打开时旧请求覆盖新请求的视图状态
-  const openSeq = useRef(0);
-  // activeKey 的实时镜像:供 rename/delete 在 await 之后读取当前值(避免闭包捕获过时值)
-  const activeKeyRef = useRef<string | null>(null);
-
   // 当前选中的压缩包(用于左侧树高亮)与当前查看的条目 key
   const [selectedArchive, setSelectedArchive] = useState<string | null>(null);
   const selectedArchiveRef = useRef<string | null>(null);
@@ -80,8 +105,23 @@ export function App() {
     path: string;
     directories: string[];
   } | null>(null);
-  const [session, setSession] = useState<OpenSessionResult | null>(null);
-  const [activeKey, setActiveKey] = useState<string | null>(null);
+  const [tabs, setTabs] = useState<Record<string, LogTab>>({});
+  const tabsRef = useRef<Record<string, LogTab>>({});
+  const [tabLayout, setTabLayout] = useState(() => emptyTabLayout(4));
+  const tabLayoutRef = useRef(tabLayout);
+  const tabOpenGeneration = useRef(new Map<string, number>());
+  const closeTabsMatchingRef = useRef<(predicate: (entryKey: string) => boolean) => void>(() => {});
+  const activeKey = tabLayout.active;
+
+  const updateTabLayout = useCallback(
+    (updater: (current: typeof tabLayout) => typeof tabLayout) => {
+      const next = updater(tabLayoutRef.current);
+      tabLayoutRef.current = next;
+      setTabLayout(next);
+      return next;
+    },
+    [],
+  );
 
   // 后缀筛选
   const [filter, setFilter] = useState<string[]>(['.log', '.txt', '.out']);
@@ -215,10 +255,13 @@ export function App() {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
 
-  // 保持 activeKey 镜像与状态同步,供异步回调读取最新值
   useEffect(() => {
-    activeKeyRef.current = activeKey;
-  }, [activeKey]);
+    tabsRef.current = tabs;
+  }, [tabs]);
+
+  useEffect(() => {
+    tabLayoutRef.current = tabLayout;
+  }, [tabLayout]);
 
   useEffect(() => {
     selectedArchiveRef.current = selectedArchive;
@@ -237,14 +280,6 @@ export function App() {
     const onCtx = (e: MouseEvent) => e.preventDefault();
     document.addEventListener('contextmenu', onCtx);
     return () => document.removeEventListener('contextmenu', onCtx);
-  }, []);
-
-  // 清空当前查看视图，并使任何进行中的打开请求失效。
-  const resetView = useCallback(() => {
-    openSeq.current++;
-    setActiveKey(null);
-    setSession(null);
-    setSelectedArchive(null);
   }, []);
 
   const refreshTree = useCallback(async () => {
@@ -290,26 +325,24 @@ export function App() {
           return false;
         }),
       );
-      const active = activeKeyRef.current;
       const selected = selectedArchiveRef.current;
-      if (
-        removedTree.some(
-          (node) =>
-            active === node.name ||
-            active === node.id ||
-            active?.startsWith(node.name + '::') ||
-            active?.startsWith(node.id + '::') ||
-            selected === node.id,
-        )
-      ) {
-        resetView();
+      const removedPaths = removedTree.map((node) => node.path ?? node.id);
+      closeTabsMatchingRef.current((entryKey) => {
+        const path = tabContainerPath(entryKey);
+        return removedPaths.some(
+          (removedPath) =>
+            sameFilePath(path, removedPath) || isPathInsideDirectory(path, removedPath),
+        );
+      });
+      if (selected && removedPaths.some((path) => sameFilePath(path, selected))) {
+        setSelectedArchive(archiveForEntryKey(tabLayoutRef.current.active));
       }
     });
     return () => {
       unsub();
       unsubChanges();
     };
-  }, [refreshTree, resetView]);
+  }, [refreshTree]);
 
   const addDir = useCallback(async () => {
     const ok = await api.addWatchDir();
@@ -349,30 +382,114 @@ export function App() {
     setNewItems((items) => items.filter((it) => it.id !== id));
   }, []);
 
+  const updateTabs = useCallback(
+    (updater: (current: Record<string, LogTab>) => Record<string, LogTab>) => {
+      const next = updater(tabsRef.current);
+      tabsRef.current = next;
+      setTabs(next);
+    },
+    [],
+  );
+
   const openEntry = useCallback(
     async (entryKey: string, unreadId?: string) => {
-      // 请求令牌:仅最新一次打开可提交状态,避免旧请求的成功/失败覆盖新请求
-      const token = ++openSeq.current;
-      setActiveKey(entryKey);
-      setSession(null);
+      const existing = tabsRef.current[entryKey];
+      updateTabLayout((layout) => openTab(layout, entryKey));
+      setSelectedArchive(archiveForEntryKey(entryKey));
+      if (!existing) {
+        updateTabs((current) => ({
+          ...current,
+          [entryKey]: {
+            id: entryKey,
+            title: tabTitle(entryKey),
+            absolutePath: entryKey.replace('::', ' › '),
+            status: 'opening',
+            session: null,
+          },
+        }));
+      } else if (existing.status === 'ready' || existing.status === 'opening') {
+        if (unreadId) markSeen(unreadId);
+        return;
+      } else {
+        updateTabs((current) => ({
+          ...current,
+          [entryKey]: { ...current[entryKey], status: 'opening', error: undefined },
+        }));
+      }
+
+      const generation = (tabOpenGeneration.current.get(entryKey) ?? 0) + 1;
+      tabOpenGeneration.current.set(entryKey, generation);
       try {
-        const s = await api.openLogSession(entryKey);
-        // 点击通知即视为已读,与是否被更晚请求取代无关
+        const opened = await api.openLogSession(entryKey);
         if (unreadId) markSeen(unreadId);
-        if (token !== openSeq.current) return; // 已被更晚的打开取代,丢弃
-        setSession(s);
-      } catch (e) {
-        // 失效的新到达项从通知列表移除,防止反复点开报错(与令牌无关,始终执行)
+        if (tabOpenGeneration.current.get(entryKey) !== generation || !tabsRef.current[entryKey]) {
+          await api.closeLogSession(entryKey, opened.sessionId);
+          return;
+        }
+        updateTabs((current) => {
+          const next = { ...markEvictedSessions(current, opened.evictedSessionIds) };
+          next[entryKey] = {
+            ...next[entryKey],
+            session: opened,
+            status: 'ready',
+            error: undefined,
+          };
+          return next;
+        });
+      } catch (error) {
         if (unreadId) markSeen(unreadId);
-        if (token !== openSeq.current) return; // 不覆盖更晚请求的状态
-        // 打开失败(如文件已被重命名/删除):清空视图状态,避免卡在"打开中…"
-        setSession(null);
-        setActiveKey(null);
-        alert('无法打开:' + String(e));
+        if (tabOpenGeneration.current.get(entryKey) !== generation) return;
+        updateTabs((current) => {
+          const tab = current[entryKey];
+          if (!tab) return current;
+          return {
+            ...current,
+            [entryKey]: { ...tab, session: null, status: 'error', error: String(error) },
+          };
+        });
+        alert('无法打开:' + String(error));
       }
     },
-    [markSeen],
+    [markSeen, updateTabLayout, updateTabs],
   );
+
+  const activateLogTab = useCallback(
+    (entryKey: string) => {
+      updateTabLayout((layout) => activateTab(layout, entryKey));
+      setSelectedArchive(archiveForEntryKey(entryKey));
+      const tab = tabsRef.current[entryKey];
+      if (tab?.status === 'dormant' || tab?.status === 'error') void openEntry(entryKey);
+    },
+    [openEntry, updateTabLayout],
+  );
+
+  const closeLogTab = useCallback(
+    (entryKey: string) => {
+      tabOpenGeneration.current.set(entryKey, (tabOpenGeneration.current.get(entryKey) ?? 0) + 1);
+      void api.closeLogSession(entryKey).catch(() => undefined);
+      const nextActive = updateTabLayout((layout) => closeTab(layout, entryKey)).active;
+      setSelectedArchive(archiveForEntryKey(nextActive));
+      updateTabs((current) => {
+        const next = { ...current };
+        delete next[entryKey];
+        return next;
+      });
+      queueMicrotask(() => {
+        if (!nextActive) return;
+        const tab = tabsRef.current[nextActive];
+        if (tab?.status === 'dormant' || tab?.status === 'error') void openEntry(nextActive);
+      });
+    },
+    [openEntry, updateTabLayout, updateTabs],
+  );
+
+  const closeTabsMatching = useCallback(
+    (predicate: (entryKey: string) => boolean) => {
+      Object.keys(tabsRef.current).filter(predicate).forEach(closeLogTab);
+    },
+    [closeLogTab],
+  );
+  closeTabsMatchingRef.current = closeTabsMatching;
 
   const revealNewItem = useCallback(
     async (item: NewLogItem, options?: { openFile?: boolean }) => {
@@ -495,25 +612,18 @@ export function App() {
         else await api.renameFile(path, newName);
         // 旧路径已失效:移除指向旧路径的通知项,避免点开报错
         markSeen(node.id);
-        // 若正在查看被重命名的项,其会话已指向旧路径,重置视图。
-        // 读取镜像的当前值(await 期间用户可能已切换查看目标)。
-        // 裸文件 activeKey 为文件名;压缩包内条目 activeKey 为 `名称::条目`。
-        const cur = activeKeyRef.current;
-        if (
-          node.kind !== 'dir' &&
-          (cur === node.name ||
-            cur === node.id ||
-            cur?.startsWith(node.name + '::') ||
-            cur?.startsWith(node.id + '::'))
-        ) {
-          resetView();
-        }
+        closeTabsMatching((entryKey) => {
+          const container = tabContainerPath(entryKey);
+          return node.kind === 'dir'
+            ? sameFilePath(container, path) || isPathInsideDirectory(container, path)
+            : sameFilePath(container, path);
+        });
         refreshTree();
       } catch (e) {
         alert('重命名失败:' + String(e));
       }
     },
-    [refreshTree, markSeen, resetView],
+    [closeTabsMatching, refreshTree, markSeen],
   );
 
   const openPath = useCallback(async (node: TreeNode) => {
@@ -547,7 +657,10 @@ export function App() {
         action: async () => {
           try {
             await api.deleteWatchDir(path);
-            resetView();
+            closeTabsMatching((entryKey) => {
+              const container = tabContainerPath(entryKey);
+              return sameFilePath(container, path) || isPathInsideDirectory(container, path);
+            });
             // 移除该目录下所有失效的通知项(id 为完整路径,以目录路径为前缀)
             const prefixes = [path + '/', path + '\\'];
             setNewItems((items) =>
@@ -564,7 +677,7 @@ export function App() {
         },
       });
     },
-    [refreshTree, resetView],
+    [closeTabsMatching, refreshTree],
   );
 
   const deleteFile = useCallback(
@@ -577,17 +690,7 @@ export function App() {
         action: async () => {
           try {
             await api.deleteFile(target);
-            // 若当前查看的正是被删文件(或被删压缩包内的条目),清空视图。
-            // 读取镜像的当前值(await 期间用户可能已切换查看目标)。
-            const cur = activeKeyRef.current;
-            if (
-              cur === node.name ||
-              cur === node.id ||
-              cur?.startsWith(node.name + '::') ||
-              cur?.startsWith(node.id + '::')
-            ) {
-              resetView();
-            }
+            closeTabsMatching((entryKey) => sameFilePath(tabContainerPath(entryKey), target));
             markSeen(node.id);
             refreshTree();
           } catch (e) {
@@ -596,7 +699,7 @@ export function App() {
         },
       });
     },
-    [markSeen, refreshTree, resetView],
+    [closeTabsMatching, markSeen, refreshTree],
   );
 
   const hasDirs = tree.length > 0;
@@ -683,8 +786,43 @@ export function App() {
         />
         <div className="col-resizer" onMouseDown={startResize} />
 
-        {hasDirs || session || activeKey ? (
-          <LogContent session={session} activeKey={activeKey} />
+        {hasDirs || tabIds(tabLayout).length > 0 ? (
+          <div className="col col-content log-workspace">
+            <LogTabs
+              tabs={tabs}
+              visibleIds={tabLayout.visible}
+              overflowIds={tabLayout.overflow}
+              activeId={activeKey}
+              onActivate={activateLogTab}
+              onClose={closeLogTab}
+              onCapacityChange={(capacity) =>
+                updateTabLayout((layout) => resizeTabs(layout, capacity))
+              }
+            />
+            <div className="log-panels">
+              {tabIds(tabLayout).length === 0 ? (
+                <LogContent session={null} activeKey={null} />
+              ) : (
+                tabIds(tabLayout).map((id) => {
+                  const tab = tabs[id];
+                  if (!tab) return null;
+                  return (
+                    <div
+                      key={id}
+                      className={'log-panel-slot' + (activeKey === id ? ' active' : '')}
+                    >
+                      <LogContent
+                        session={tab.session}
+                        activeKey={id}
+                        status={tab.status}
+                        error={tab.error}
+                      />
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
         ) : (
           <EmptyState onAddDir={addDir} />
         )}
