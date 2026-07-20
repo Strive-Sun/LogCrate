@@ -1,18 +1,26 @@
 use super::channel_reader::{copy_to_channel, send_error, ChannelReader};
-use super::{ArchiveEntry, ArchiveReader, EntryReader};
+use super::{ArchiveEntry, ArchiveLimits, ArchiveReader, EntryReader};
 use sevenz_rust::{Password, SevenZReader};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::sync_channel;
+use std::time::Instant;
 
 pub struct SevenZipArchiveReader {
     path: PathBuf,
+    limits: ArchiveLimits,
 }
 
 impl SevenZipArchiveReader {
+    #[cfg(test)]
     pub fn open(path: &Path) -> anyhow::Result<Self> {
+        Self::open_with_limits(path, ArchiveLimits::default())
+    }
+
+    pub fn open_with_limits(path: &Path, limits: ArchiveLimits) -> anyhow::Result<Self> {
         SevenZReader::open(path, Password::empty()).map_err(map_error)?;
         Ok(Self {
             path: path.to_path_buf(),
+            limits,
         })
     }
 }
@@ -44,17 +52,22 @@ fn is_regular_entry(entry: &sevenz_rust::SevenZArchiveEntry) -> bool {
 
 impl ArchiveReader for SevenZipArchiveReader {
     fn entries(&mut self) -> anyhow::Result<Vec<ArchiveEntry>> {
+        let started = Instant::now();
         let archive = SevenZReader::open(&self.path, Password::empty()).map_err(map_error)?;
         let entries = archive
             .archive()
             .files
             .iter()
-            .filter(|entry| is_regular_entry(entry) && super::is_safe_entry_name(&entry.name))
+            .filter(|entry| {
+                is_regular_entry(entry)
+                    && super::is_safe_entry_name(&entry.name, self.limits.max_path_bytes)
+            })
             .map(|entry| ArchiveEntry::new(entry.name.clone(), entry.size, false))
             .collect::<Vec<_>>();
-        if entries.len() > super::MAX_ARCHIVE_ENTRIES {
+        if entries.len() > self.limits.max_entries {
             anyhow::bail!("归档条目数量超过安全上限");
         }
+        super::ensure_scan_time(started, self.limits)?;
         Ok(entries)
     }
 
@@ -132,5 +145,23 @@ mod tests {
             .unwrap();
         assert_eq!(content, "this is a file\n");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reparse_points_and_unix_links_are_not_regular_entries() {
+        let mut reparse = sevenz_rust::SevenZArchiveEntry::default();
+        reparse.has_windows_attributes = true;
+        reparse.windows_attributes = 0x400;
+        assert!(!is_regular_entry(&reparse));
+
+        let mut symlink = sevenz_rust::SevenZArchiveEntry::default();
+        symlink.has_windows_attributes = true;
+        symlink.windows_attributes = 0o120777 << 16;
+        assert!(!is_regular_entry(&symlink));
+
+        let mut regular = sevenz_rust::SevenZArchiveEntry::default();
+        regular.has_windows_attributes = true;
+        regular.windows_attributes = 0o100644 << 16;
+        assert!(is_regular_entry(&regular));
     }
 }

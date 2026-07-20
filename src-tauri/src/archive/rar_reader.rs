@@ -10,26 +10,32 @@
 #![allow(clippy::unnecessary_mut_passed)]
 
 use super::channel_reader::{send_error, ChannelReader, StreamMessage};
-use super::{ArchiveEntry, ArchiveReader, EntryReader};
+use super::{ArchiveEntry, ArchiveLimits, ArchiveReader, EntryReader};
 #[cfg(any(target_os = "linux", target_os = "netbsd"))]
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::mpsc::{sync_channel, SyncSender};
-
-const MAX_RAR_DECODED_BYTES: u64 = crate::index::MAX_UNCOMPRESSED;
+use std::time::Instant;
 
 pub struct RarArchiveReader {
     path: PathBuf,
+    limits: ArchiveLimits,
 }
 
 impl RarArchiveReader {
+    #[cfg(test)]
     pub fn open(path: &Path) -> anyhow::Result<Self> {
+        Self::open_with_limits(path, ArchiveLimits::default())
+    }
+
+    pub fn open_with_limits(path: &Path, limits: ArchiveLimits) -> anyhow::Result<Self> {
         if !path.is_file() {
             anyhow::bail!("RAR 归档不存在: {}", path.display());
         }
         Ok(Self {
             path: path.to_path_buf(),
+            limits,
         })
     }
 }
@@ -154,7 +160,9 @@ impl ArchiveReader for RarArchiveReader {
     fn entries(&mut self) -> anyhow::Result<Vec<ArchiveEntry>> {
         let (handle, _) = open_handle(&self.path, unrar_sys::RAR_OM_LIST)?;
         let mut entries = Vec::new();
+        let started = Instant::now();
         loop {
+            super::ensure_scan_time(started, self.limits)?;
             let mut header = unrar_sys::HeaderDataEx::default();
             // SAFETY: handle is valid and header points to writable initialized storage.
             let result = unsafe { unrar_sys::RARReadHeaderEx(handle.0, &mut header) };
@@ -170,8 +178,9 @@ impl ArchiveReader for RarArchiveReader {
             if split {
                 anyhow::bail!("RAR 分卷归档暂不支持");
             }
-            if !is_special(&header) && super::is_safe_entry_name(&name) {
-                if entries.len() >= super::MAX_ARCHIVE_ENTRIES {
+            if !is_special(&header) && super::is_safe_entry_name(&name, self.limits.max_path_bytes)
+            {
+                if entries.len() >= self.limits.max_entries {
                     anyhow::bail!("归档条目数量超过安全上限");
                 }
                 entries.push(ArchiveEntry::new(
@@ -188,15 +197,17 @@ impl ArchiveReader for RarArchiveReader {
                 return Err(rar_error(result, "跳过 RAR 条目"));
             }
         }
+        super::ensure_scan_time(started, self.limits)?;
         Ok(entries)
     }
 
     fn open_entry(&mut self, path: &str) -> anyhow::Result<EntryReader<'_>> {
         let source = self.path.clone();
         let target = path.to_string();
+        let max_decoded_bytes = self.limits.max_decoded_bytes;
         let (sender, receiver) = sync_channel(2);
         std::thread::spawn(move || {
-            if let Err(error) = stream_entry(&source, &target, &sender) {
+            if let Err(error) = stream_entry(&source, &target, max_decoded_bytes, &sender) {
                 send_error(&sender, error);
             }
         });
@@ -210,6 +221,7 @@ struct CallbackState {
     sender: SyncSender<StreamMessage>,
     decoded: u64,
     error: Option<String>,
+    max_decoded_bytes: u64,
 }
 
 extern "C" fn rar_callback(
@@ -233,8 +245,11 @@ extern "C" fn rar_callback(
             // bytes during this callback; data is copied before returning.
             let bytes = unsafe { std::slice::from_raw_parts(param1 as *const u8, length) };
             state.decoded = state.decoded.saturating_add(length as u64);
-            if state.decoded > MAX_RAR_DECODED_BYTES {
-                state.error = Some("RAR 实际解码内容超过 2 GiB 安全上限".into());
+            if state.decoded > state.max_decoded_bytes {
+                state.error = Some(format!(
+                    "RAR 实际解码内容超过 {} 字节安全上限",
+                    state.max_decoded_bytes
+                ));
                 return -1;
             }
             for chunk in bytes.chunks(64 * 1024) {
@@ -264,6 +279,7 @@ extern "C" fn rar_callback(
 fn stream_entry(
     source: &Path,
     target: &str,
+    max_decoded_bytes: u64,
     sender: &SyncSender<StreamMessage>,
 ) -> anyhow::Result<()> {
     let (handle, _) = open_handle(source, unrar_sys::RAR_OM_EXTRACT)?;
@@ -292,6 +308,7 @@ fn stream_entry(
                 sender: sender.clone(),
                 decoded: 0,
                 error: None,
+                max_decoded_bytes,
             });
             // SAFETY: callback and state remain valid for the synchronous process call.
             unsafe {

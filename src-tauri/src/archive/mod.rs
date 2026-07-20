@@ -15,6 +15,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 pub use plain::PlainReader;
 pub use rar_reader::RarArchiveReader;
@@ -23,10 +24,30 @@ pub use stream_reader::CompressedStreamReader;
 pub use tar_reader::{StreamCompression, TarArchiveReader};
 pub use zip_reader::ZipArchiveReader;
 
-const MAX_NESTED_DEPTH: usize = 5;
-const MAX_NESTED_DECODED_BYTES: u64 = crate::index::MAX_UNCOMPRESSED;
-pub(crate) const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 static NESTED_CACHE_SEQ: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy)]
+pub struct ArchiveLimits {
+    pub max_nested_depth: usize,
+    pub max_decoded_bytes: u64,
+    pub max_entries: usize,
+    pub max_path_bytes: usize,
+    pub max_scan_bytes: u64,
+    pub max_scan_duration: Duration,
+}
+
+impl Default for ArchiveLimits {
+    fn default() -> Self {
+        Self {
+            max_nested_depth: 5,
+            max_decoded_bytes: crate::index::MAX_UNCOMPRESSED,
+            max_entries: 100_000,
+            max_path_bytes: 4096,
+            max_scan_bytes: 4 * 1024 * 1024 * 1024,
+            max_scan_duration: Duration::from_secs(30),
+        }
+    }
+}
 
 /// Materialized ancestors for a lazily opened nested chain. Each ancestor is
 /// streamed into the application cache only when its node is expanded. Files
@@ -59,12 +80,20 @@ pub fn resolve_archive_chain(
     chain: &str,
     cache_dir: &Path,
 ) -> anyhow::Result<ResolvedArchiveChain> {
+    resolve_archive_chain_with_limits(chain, cache_dir, ArchiveLimits::default())
+}
+
+pub fn resolve_archive_chain_with_limits(
+    chain: &str,
+    cache_dir: &Path,
+    limits: ArchiveLimits,
+) -> anyhow::Result<ResolvedArchiveChain> {
     let parts: Vec<&str> = chain.split("::").collect();
     if parts.is_empty() || parts[0].is_empty() {
         anyhow::bail!("归档路径为空");
     }
-    if parts.len().saturating_sub(1) > MAX_NESTED_DEPTH {
-        anyhow::bail!("嵌套归档超过最大深度 {MAX_NESTED_DEPTH}");
+    if parts.len().saturating_sub(1) > limits.max_nested_depth {
+        anyhow::bail!("嵌套归档超过最大深度 {}", limits.max_nested_depth);
     }
     std::fs::create_dir_all(cache_dir)?;
     let mut current = PathBuf::from(parts[0]);
@@ -73,7 +102,7 @@ pub fn resolve_archive_chain(
 
     for entry_path in &parts[1..] {
         let result = (|| -> anyhow::Result<PathBuf> {
-            let mut reader = open_archive(&current)?;
+            let mut reader = open_archive_with_limits(&current, limits)?;
             let entry = reader
                 .entries()?
                 .into_iter()
@@ -104,9 +133,12 @@ pub fn resolve_archive_chain(
                     break;
                 }
                 decoded_total = decoded_total.saturating_add(count as u64);
-                if decoded_total > MAX_NESTED_DECODED_BYTES {
+                if decoded_total > limits.max_decoded_bytes {
                     let _ = std::fs::remove_file(&output);
-                    anyhow::bail!("嵌套归档累计解码内容超过 2 GiB 安全上限");
+                    anyhow::bail!(
+                        "嵌套归档累计解码内容超过 {} 字节安全上限",
+                        limits.max_decoded_bytes
+                    );
                 }
                 destination.write_all(&buffer[..count])?;
             }
@@ -140,9 +172,9 @@ pub fn resolve_archive_chain(
     })
 }
 
-pub(crate) fn is_safe_entry_name(name: &str) -> bool {
+pub(crate) fn is_safe_entry_name(name: &str, max_path_bytes: usize) -> bool {
     if name.is_empty()
-        || name.len() > 4096
+        || name.len() > max_path_bytes
         || name.contains('\0')
         || name.starts_with(['/', '\\'])
         || name.contains("::")
@@ -153,6 +185,13 @@ pub(crate) fn is_safe_entry_name(name: &str) -> bool {
     !normalized
         .split('/')
         .any(|part| part == ".." || part.contains(':'))
+}
+
+pub(crate) fn ensure_scan_time(started: Instant, limits: ArchiveLimits) -> anyhow::Result<()> {
+    if started.elapsed() > limits.max_scan_duration {
+        anyhow::bail!("归档扫描超过 {:?} 时间上限", limits.max_scan_duration);
+    }
+    Ok(())
 }
 
 /// The single source of truth for archive detection across opening, directory
@@ -272,48 +311,62 @@ pub trait ArchiveReader: Send {
 
 /// Construct a reader through the central format registry.
 pub fn open_archive(path: &Path) -> anyhow::Result<Box<dyn ArchiveReader>> {
-    match detect_format(path)? {
-        ArchiveFormat::Zip => Ok(Box::new(ZipArchiveReader::open(path)?)),
-        ArchiveFormat::SevenZip => Ok(Box::new(SevenZipArchiveReader::open(path)?)),
-        ArchiveFormat::Rar => Ok(Box::new(RarArchiveReader::open(path)?)),
-        ArchiveFormat::Tar => Ok(Box::new(TarArchiveReader::open(
+    open_archive_with_limits(path, ArchiveLimits::default())
+}
+
+pub fn open_archive_with_limits(
+    path: &Path,
+    limits: ArchiveLimits,
+) -> anyhow::Result<Box<dyn ArchiveReader>> {
+    let input_bytes = std::fs::metadata(path)?.len();
+    if input_bytes > limits.max_scan_bytes {
+        anyhow::bail!("归档扫描输入超过 {} 字节安全上限", limits.max_scan_bytes);
+    }
+    let started = Instant::now();
+    let reader: Box<dyn ArchiveReader> = match detect_format(path)? {
+        ArchiveFormat::Zip => Box::new(ZipArchiveReader::open_with_limits(path, limits)?),
+        ArchiveFormat::SevenZip => Box::new(SevenZipArchiveReader::open_with_limits(path, limits)?),
+        ArchiveFormat::Rar => Box::new(RarArchiveReader::open_with_limits(path, limits)?),
+        ArchiveFormat::Tar => Box::new(TarArchiveReader::open_with_limits(
             path,
             StreamCompression::None,
-        )?)),
-        ArchiveFormat::TarGzip => Ok(Box::new(TarArchiveReader::open(
+            limits,
+        )?),
+        ArchiveFormat::TarGzip => Box::new(TarArchiveReader::open_with_limits(
             path,
             StreamCompression::Gzip,
-        )?)),
-        ArchiveFormat::TarBzip2 => Ok(Box::new(TarArchiveReader::open(
+            limits,
+        )?),
+        ArchiveFormat::TarBzip2 => Box::new(TarArchiveReader::open_with_limits(
             path,
             StreamCompression::Bzip2,
-        )?)),
-        ArchiveFormat::TarXz => Ok(Box::new(TarArchiveReader::open(
+            limits,
+        )?),
+        ArchiveFormat::TarXz => Box::new(TarArchiveReader::open_with_limits(
             path,
             StreamCompression::Xz,
-        )?)),
-        ArchiveFormat::TarZstd => Ok(Box::new(TarArchiveReader::open(
+            limits,
+        )?),
+        ArchiveFormat::TarZstd => Box::new(TarArchiveReader::open_with_limits(
             path,
             StreamCompression::Zstd,
-        )?)),
-        ArchiveFormat::Gzip => Ok(Box::new(CompressedStreamReader::open(
-            path,
-            StreamCompression::Gzip,
-        )?)),
-        ArchiveFormat::Bzip2 => Ok(Box::new(CompressedStreamReader::open(
+            limits,
+        )?),
+        ArchiveFormat::Gzip => {
+            Box::new(CompressedStreamReader::open(path, StreamCompression::Gzip)?)
+        }
+        ArchiveFormat::Bzip2 => Box::new(CompressedStreamReader::open(
             path,
             StreamCompression::Bzip2,
-        )?)),
-        ArchiveFormat::Xz => Ok(Box::new(CompressedStreamReader::open(
-            path,
-            StreamCompression::Xz,
-        )?)),
-        ArchiveFormat::Zstd => Ok(Box::new(CompressedStreamReader::open(
-            path,
-            StreamCompression::Zstd,
-        )?)),
-        ArchiveFormat::Plain => Ok(Box::new(PlainReader::open(path)?)),
-    }
+        )?),
+        ArchiveFormat::Xz => Box::new(CompressedStreamReader::open(path, StreamCompression::Xz)?),
+        ArchiveFormat::Zstd => {
+            Box::new(CompressedStreamReader::open(path, StreamCompression::Zstd)?)
+        }
+        ArchiveFormat::Plain => Box::new(PlainReader::open(path)?),
+    };
+    ensure_scan_time(started, limits)?;
+    Ok(reader)
 }
 
 pub fn is_archive(path: &Path) -> anyhow::Result<bool> {
@@ -422,12 +475,14 @@ pub fn detect_format(path: &Path) -> anyhow::Result<ArchiveFormat> {
         );
     }
 
-    // Extension is only a hint for headerless TAR. Formats with mandatory
-    // magic must not be accepted solely because a file was renamed.
+    // An empty TAR is represented by zero blocks and has no regular header.
+    // Other files must never be accepted solely because they were renamed.
     if matches!(
         format_from_name(path.to_string_lossy().as_ref()),
         Some(ArchiveFormat::Tar)
-    ) {
+    ) && head.len() >= 512
+        && head[..512].iter().all(|byte| *byte == 0)
+    {
         return Ok(ArchiveFormat::Tar);
     }
     Ok(ArchiveFormat::Plain)
@@ -608,8 +663,8 @@ mod format_tests {
         assert!(is_archive_name("BUNDLE.TAR.GZ"));
         assert!(is_archive_name("diagnostics.TZST"));
         assert!(!is_archive_name("archive.zip.txt"));
-        assert!(!is_safe_entry_name("../outside.log"));
-        assert!(!is_safe_entry_name("C:\\outside.log"));
+        assert!(!is_safe_entry_name("../outside.log", 4096));
+        assert!(!is_safe_entry_name("C:\\outside.log", 4096));
     }
 
     #[test]
@@ -755,5 +810,154 @@ mod format_tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("最大深度 5"));
+    }
+
+    #[test]
+    fn injectable_limits_reject_entry_count_paths_and_nested_bytes() {
+        let fixture = FixtureDir::new();
+        let tar_path = fixture.path("limited.tar");
+        std::fs::write(&tar_path, tar_bytes()).unwrap();
+
+        let entry_limit = ArchiveLimits {
+            max_entries: 2,
+            ..ArchiveLimits::default()
+        };
+        let mut archive = open_archive_with_limits(&tar_path, entry_limit).unwrap();
+        assert!(archive
+            .entries()
+            .unwrap_err()
+            .to_string()
+            .contains("条目数量"));
+
+        let path_limit = ArchiveLimits {
+            max_path_bytes: 8,
+            ..ArchiveLimits::default()
+        };
+        let mut archive = open_archive_with_limits(&tar_path, path_limit).unwrap();
+        assert!(archive.entries().unwrap().is_empty());
+
+        let input_limit = ArchiveLimits {
+            max_scan_bytes: 16,
+            ..ArchiveLimits::default()
+        };
+        let error = match open_archive_with_limits(&tar_path, input_limit) {
+            Ok(_) => panic!("oversized scan input unexpectedly opened"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("扫描输入"));
+
+        let compressed_tar = fixture.path("scan-limit.tar.gz");
+        write_compressed(&compressed_tar, StreamCompression::Gzip, &tar_bytes());
+        let compressed_bytes = std::fs::metadata(&compressed_tar).unwrap().len();
+        let decoded_scan_limit = ArchiveLimits {
+            max_scan_bytes: compressed_bytes + 512,
+            ..ArchiveLimits::default()
+        };
+        let mut archive = open_archive_with_limits(&compressed_tar, decoded_scan_limit).unwrap();
+        assert!(archive
+            .entries()
+            .unwrap_err()
+            .to_string()
+            .contains("扫描解码内容"));
+
+        let duration_limit = ArchiveLimits {
+            max_scan_duration: Duration::ZERO,
+            ..ArchiveLimits::default()
+        };
+        let error = match open_archive_with_limits(&tar_path, duration_limit) {
+            Ok(_) => panic!("zero-duration scan unexpectedly opened"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("时间上限"));
+
+        let outer_path = fixture.path("outer-limit.zip");
+        {
+            let file = File::create(&outer_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("inner.tar", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(&tar_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+        let cache = fixture.path("limited-cache");
+        let chain = format!("{}::inner.tar", outer_path.to_string_lossy());
+        let byte_limit = ArchiveLimits {
+            max_decoded_bytes: 128,
+            ..ArchiveLimits::default()
+        };
+        let error = match resolve_archive_chain_with_limits(&chain, &cache, byte_limit) {
+            Ok(_) => panic!("oversized nested archive unexpectedly resolved"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("128 字节"));
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn same_format_nesting_and_forged_nested_suffix_are_lazy_and_safe() {
+        let fixture = FixtureDir::new();
+        let inner_path = fixture.path("inner.zip");
+        {
+            let file = File::create(&inner_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("inside.log", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"nested zip log\n").unwrap();
+            zip.finish().unwrap();
+        }
+        let outer_path = fixture.path("outer.zip");
+        {
+            let file = File::create(&outer_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("inner.zip", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(&std::fs::read(&inner_path).unwrap()).unwrap();
+            zip.start_file("fake.tar", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"not an archive").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let cache = fixture.path("same-format-cache");
+        let nested = format!("{}::inner.zip", outer_path.to_string_lossy());
+        let resolved = resolve_archive_chain(&nested, &cache).unwrap();
+        let mut reader = open_archive(resolved.path()).unwrap();
+        assert_eq!(reader.entries().unwrap()[0].path, "inside.log");
+        drop(reader);
+        drop(resolved);
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+
+        let forged = format!("{}::fake.tar", outer_path.to_string_lossy());
+        let error = match resolve_archive_chain(&forged, &cache) {
+            Ok(_) => panic!("forged nested suffix unexpectedly resolved"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("不是受支持的归档"));
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+
+        let replacement = fixture.path("replacement.zip");
+        {
+            let file = File::create(&replacement).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("changed.log", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"changed parent\n").unwrap();
+            zip.finish().unwrap();
+        }
+        {
+            let file = File::create(&outer_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("inner.zip", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(&std::fs::read(&replacement).unwrap())
+                .unwrap();
+            zip.finish().unwrap();
+        }
+        let resolved = resolve_archive_chain(&nested, &cache).unwrap();
+        let mut reader = open_archive(resolved.path()).unwrap();
+        assert_eq!(reader.entries().unwrap()[0].path, "changed.log");
+        drop(reader);
+        drop(resolved);
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
     }
 }

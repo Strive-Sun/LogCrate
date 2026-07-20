@@ -26,6 +26,12 @@ export function localizeKnownError(message: string, t: Translator): string {
     return t('error.nestedBytes');
   }
   if (message.includes('归档条目数量超过安全上限')) return t('error.archiveEntries');
+  if (message.includes('归档扫描输入超过') || message.includes('归档扫描解码内容超过')) {
+    return t('error.archiveScanBytes');
+  }
+  if (message.includes('归档扫描超过') && message.includes('时间上限')) {
+    return t('error.archiveScanTime');
+  }
   if (message.includes('归档已损坏') || message.includes('ChecksumVerificationFailed')) {
     return t('error.archiveDamaged');
   }

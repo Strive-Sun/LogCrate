@@ -1,29 +1,38 @@
 //! zip 归档读取器。`entries()` 仅读中央目录(不解压);
 //! `open_entry()` 返回条目的解压流(Stored 直读 / Deflate 顺序解压)。
 
-use super::{is_log_name, ArchiveEntry, ArchiveReader, EntryReader};
+use super::{is_log_name, ArchiveEntry, ArchiveLimits, ArchiveReader, EntryReader};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::time::Instant;
 use zip::ZipArchive;
 
 pub struct ZipArchiveReader {
     archive: ZipArchive<BufReader<File>>,
+    limits: ArchiveLimits,
 }
 
 impl ZipArchiveReader {
+    #[cfg(test)]
     pub fn open(path: &Path) -> anyhow::Result<Self> {
+        Self::open_with_limits(path, ArchiveLimits::default())
+    }
+
+    pub fn open_with_limits(path: &Path, limits: ArchiveLimits) -> anyhow::Result<Self> {
         let file = File::open(path)?;
         let archive = ZipArchive::new(BufReader::new(file))?;
-        Ok(Self { archive })
+        Ok(Self { archive, limits })
     }
 }
 
 impl ArchiveReader for ZipArchiveReader {
     fn entries(&mut self) -> anyhow::Result<Vec<ArchiveEntry>> {
         let mut out = Vec::with_capacity(self.archive.len());
+        let started = Instant::now();
         for i in 0..self.archive.len() {
-            if out.len() >= super::MAX_ARCHIVE_ENTRIES {
+            super::ensure_scan_time(started, self.limits)?;
+            if out.len() >= self.limits.max_entries {
                 anyhow::bail!("归档条目数量超过安全上限");
             }
             // by_index 读取的是中央目录里的元信息,不解压内容
@@ -38,7 +47,7 @@ impl ArchiveReader for ZipArchiveReader {
                 continue;
             }
             let name = entry.name().to_string();
-            if !super::is_safe_entry_name(&name) {
+            if !super::is_safe_entry_name(&name, self.limits.max_path_bytes) {
                 continue;
             }
             let encrypted = entry.encrypted();
@@ -50,6 +59,7 @@ impl ArchiveReader for ZipArchiveReader {
                 is_archive: !encrypted && super::is_archive_name(&name),
             });
         }
+        super::ensure_scan_time(started, self.limits)?;
         Ok(out)
     }
 
@@ -187,6 +197,32 @@ mod tests {
             std::fs::write(&path, bytes).unwrap();
             Self { path }
         }
+
+        fn symlink() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "logpeek-zip-test-{}-{}.zip",
+                std::process::id(),
+                FIXTURE_SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let file = File::create(&path).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file("outside.log", SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"../outside.log").unwrap();
+            writer.finish().unwrap();
+
+            let mut bytes = std::fs::read(&path).unwrap();
+            let central = bytes
+                .windows(4)
+                .position(|window| window == b"PK\x01\x02")
+                .unwrap();
+            // Mark creator as Unix and external attributes as a symbolic link.
+            bytes[central + 5] = 3;
+            bytes[central + 38..central + 42].copy_from_slice(&(0o120777u32 << 16).to_le_bytes());
+            std::fs::write(&path, bytes).unwrap();
+            Self { path }
+        }
     }
 
     impl Drop for Fixture {
@@ -260,5 +296,12 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("加密"));
+    }
+
+    #[test]
+    fn symbolic_link_entry_is_not_exposed() {
+        let fixture = Fixture::symlink();
+        let mut archive = ZipArchiveReader::open(&fixture.path).unwrap();
+        assert!(archive.entries().unwrap().is_empty());
     }
 }

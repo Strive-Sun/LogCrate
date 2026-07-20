@@ -1,5 +1,7 @@
 mod archive;
 mod index;
+#[cfg(all(test, windows))]
+mod performance;
 mod watcher;
 
 use archive::{open_archive, resolve_archive_chain, ArchiveEntry};
@@ -52,6 +54,15 @@ fn tray_click_action(is_left_button: bool, is_released: bool) -> LifecycleAction
     } else {
         LifecycleAction::Ignore
     }
+}
+
+fn prepare_archive_cache(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    std::fs::create_dir_all(path)
 }
 
 struct AppState {
@@ -596,8 +607,7 @@ pub fn run() {
             sessions.set_cache_dir(cache_dir.clone());
             let archive_cache = cache_dir.join("nested-archives");
             // A clean application start invalidates every prior nested chain.
-            let _ = std::fs::remove_dir_all(&archive_cache);
-            std::fs::create_dir_all(&archive_cache).ok();
+            prepare_archive_cache(&archive_cache)?;
 
             // 启动恢复:对已配置目录建立监听
             for dir in watch.list_dirs() {
@@ -687,5 +697,19 @@ mod lifecycle_tests {
             menu_action(SHOW_MAIN_MENU_ID),
             LifecycleAction::ShowMainWindow
         );
+    }
+
+    #[test]
+    fn application_start_removes_stale_nested_archive_cache() {
+        let cache = std::env::temp_dir().join(format!(
+            "logcrate-startup-cache-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("stale.archive"), b"stale").unwrap();
+        prepare_archive_cache(&cache).unwrap();
+        assert!(cache.exists());
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+        let _ = std::fs::remove_dir(cache);
     }
 }
