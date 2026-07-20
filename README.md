@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="src-tauri/icons/128x128.png" width="88" height="88" alt="LogCrate logo">
+  <img src="resources/icons/app/128x128.png" width="88" height="88" alt="LogCrate logo">
 </p>
 
 <h1 align="center">LogCrate</h1>
@@ -28,6 +28,24 @@
   <a href="https://github.com/Strive-Sun/LogCrate/releases/latest"><strong>Download the latest release</strong></a>
   · <a href="CHANGELOG.md">Changelog</a>
   · <a href="docs/technical-design.md">Technical design</a>
+</p>
+
+<p align="center">
+  <picture>
+    <source
+      media="(prefers-color-scheme: dark)"
+      srcset="resources/screenshots/logcrate-hero-dark.png"
+    >
+    <source
+      media="(prefers-color-scheme: light)"
+      srcset="resources/screenshots/logcrate-hero-light.png"
+    >
+    <img
+      src="resources/screenshots/logcrate-hero-light.png"
+      alt="LogCrate application preview with a watched folder, expanded ZIP, log tabs, and log content"
+      width="1200"
+    >
+  </picture>
 </p>
 
 > LogCrate was previously named LogPeek. The repository now lives at `Strive-Sun/LogCrate`; legacy repository and updater URLs redirect here so existing installations can continue to upgrade.

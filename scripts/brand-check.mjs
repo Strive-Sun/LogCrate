@@ -91,12 +91,12 @@ assert(
   'Updater signing public key must not change during repository migration',
 );
 for (const icon of [
-  'icons/32x32.png',
-  'icons/128x128.png',
-  'icons/128x128@2x.png',
-  'icons/icon.png',
-  'icons/icon.ico',
-  'icons/icon.icns',
+  '../resources/icons/app/32x32.png',
+  '../resources/icons/app/128x128.png',
+  '../resources/icons/app/128x128@2x.png',
+  '../resources/icons/app/icon.png',
+  '../resources/icons/app/icon.ico',
+  '../resources/icons/app/icon.icns',
 ]) {
   assert(config.bundle.icon.includes(icon), `Tauri bundle must reference ${icon}`);
 }
@@ -130,19 +130,19 @@ for (const [name, contents] of [
 }
 
 for (const icon of [
-  'src-tauri/icons/logcrate.svg',
-  'src-tauri/icons/icon.ico',
-  'src-tauri/icons/icon.icns',
+  'resources/icons/app/logcrate.svg',
+  'resources/icons/app/icon.ico',
+  'resources/icons/app/icon.icns',
 ]) {
   await access(path.join(root, icon));
 }
 
 for (const [icon, expectedSize] of [
-  ['src-tauri/icons/32x32.png', 32],
-  ['src-tauri/icons/64x64.png', 64],
-  ['src-tauri/icons/128x128.png', 128],
-  ['src-tauri/icons/128x128@2x.png', 256],
-  ['src-tauri/icons/icon.png', 512],
+  ['resources/icons/app/32x32.png', 32],
+  ['resources/icons/app/64x64.png', 64],
+  ['resources/icons/app/128x128.png', 128],
+  ['resources/icons/app/128x128@2x.png', 256],
+  ['resources/icons/app/icon.png', 512],
 ]) {
   const { width, height, pixels, stride } = decodePng(await readBinary(icon), icon);
   assert(
@@ -159,6 +159,17 @@ for (const [icon, expectedSize] of [
     cornerAlpha.every((alpha) => alpha === 0),
     `${icon} must have transparent outer corners`,
   );
+}
+
+for (const screenshot of [
+  'resources/screenshots/logcrate-hero-light.png',
+  'resources/screenshots/logcrate-hero-dark.png',
+]) {
+  const buffer = await readBinary(screenshot);
+  const { width, height } = decodePng(buffer, screenshot);
+  assert(width === 1200 && height === 789, `${screenshot} must keep the shared 1200x789 frame`);
+  assert(buffer.length <= 1024 * 1024, `${screenshot} must not exceed 1 MiB`);
+  assert(readme.includes(screenshot), `README must reference ${screenshot}`);
 }
 
 console.log('Brand compatibility check passed: LogCrate repository + legacy upgrade identity.');

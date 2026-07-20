@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="src-tauri/icons/128x128.png" width="88" height="88" alt="LogCrate logo">
+  <img src="resources/icons/app/128x128.png" width="88" height="88" alt="LogCrate logo">
 </p>
 
 <h1 align="center">LogCrate</h1>
@@ -28,6 +28,24 @@
   <a href="https://github.com/Strive-Sun/LogCrate/releases/latest"><strong>下载最新版</strong></a>
   · <a href="CHANGELOG.md">更新日志</a>
   · <a href="docs/technical-design.md">技术设计</a>
+</p>
+
+<p align="center">
+  <picture>
+    <source
+      media="(prefers-color-scheme: dark)"
+      srcset="resources/screenshots/logcrate-hero-dark.png"
+    >
+    <source
+      media="(prefers-color-scheme: light)"
+      srcset="resources/screenshots/logcrate-hero-light.png"
+    >
+    <img
+      src="resources/screenshots/logcrate-hero-light.png"
+      alt="LogCrate 主界面预览，展示监控目录、展开的 ZIP、日志选项卡和日志正文"
+      width="1200"
+    >
+  </picture>
 </p>
 
 > LogCrate 原名 LogPeek，仓库现已迁移到 `Strive-Sun/LogCrate`；旧仓库和 updater 地址会重定向到这里，确保已安装版本可以继续升级。

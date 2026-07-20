@@ -27,7 +27,7 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico", "icons/icon.png"]
+    "icon": ["../resources/icons/app/32x32.png", "../resources/icons/app/128x128.png", "../resources/icons/app/128x128@2x.png", "../resources/icons/app/icon.icns", "../resources/icons/app/icon.ico", "../resources/icons/app/icon.png"]
   },
   "plugins": {
     "updater": {
