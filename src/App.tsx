@@ -35,6 +35,7 @@ import {
   sameFilePath,
 } from './util/directoryTree';
 import { planFileDrop, singleDroppedPath } from './util/fileDrop';
+import { installAutoHideScrollbars } from './util/autoHideScrollbars';
 import {
   activateTab,
   closeTab,
@@ -254,6 +255,8 @@ export function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  useEffect(() => installAutoHideScrollbars(document), []);
 
   useEffect(() => {
     tabsRef.current = tabs;
