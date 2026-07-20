@@ -28,6 +28,7 @@ export function LogContent({ session, activeKey }: Props) {
   const [currentLine, setCurrentLine] = useState(1);
   const pending = useRef<Set<number>>(new Set());
   const encodingUnsub = useRef<() => void>(() => {});
+  const absoluteEntryPath = activeKey?.replace('::', ' › ') ?? session?.entryPath;
 
   useEffect(
     () => () => {
@@ -156,7 +157,12 @@ export function LogContent({ session, activeKey }: Props) {
           <>
             {session.entryPath.split(' › ').map((p, i, arr) => (
               <span key={i}>
-                <span className={i === arr.length - 1 ? 'crumb-file' : ''}>{p}</span>
+                <span
+                  className={i === arr.length - 1 ? 'crumb-file' : ''}
+                  title={i === arr.length - 1 ? absoluteEntryPath : undefined}
+                >
+                  {p}
+                </span>
                 {i < arr.length - 1 && <span className="crumb-sep"> › </span>}
               </span>
             ))}
