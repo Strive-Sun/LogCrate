@@ -87,10 +87,6 @@ function tabContainerPath(entryKey: string): string {
   return entryKey.includes('::') ? entryKey.split('::')[0] : entryKey;
 }
 
-function archiveForEntryKey(entryKey: string | null): string | null {
-  return entryKey?.includes('::') ? entryKey.split('::')[0] : null;
-}
-
 function sourceName(sourcePath: string): string {
   return sourcePath.split(/[/\\]/).pop() ?? sourcePath;
 }
@@ -332,11 +328,7 @@ export function App() {
   }, [tabs]);
 
   useEffect(() => {
-    saveWorkspace(
-      localStorage,
-      tabLayout,
-      (entryKey) => tabs[entryKey]?.sourceState !== 'deleted',
-    );
+    saveWorkspace(localStorage, tabLayout, (entryKey) => tabs[entryKey]?.sourceState !== 'deleted');
   }, [tabLayout, tabs]);
 
   useEffect(() => {
@@ -501,7 +493,8 @@ export function App() {
     async (entryKey: string, unreadId?: string, options?: { force?: boolean }) => {
       const existing = tabsRef.current[entryKey];
       updateTabLayout((layout) => openTab(layout, entryKey));
-      setSelectedArchive(archiveForEntryKey(entryKey));
+      // 打开压缩包内文件时由 activeKey 高亮该文件本身,不再额外高亮其外层压缩包(避免双重背景色)
+      setSelectedArchive(null);
       if (!existing) {
         updateTabs((current) => ({
           ...current,
@@ -581,7 +574,7 @@ export function App() {
   const activateLogTab = useCallback(
     (entryKey: string) => {
       updateTabLayout((layout) => activateTab(layout, entryKey));
-      setSelectedArchive(archiveForEntryKey(entryKey));
+      setSelectedArchive(null);
       const tab = tabsRef.current[entryKey];
       if (tab?.sourceState === 'deleted') return;
       if (tab?.status === 'dormant' || tab?.status === 'error') void openEntry(entryKey);
@@ -594,7 +587,7 @@ export function App() {
       tabOpenGeneration.current.set(entryKey, (tabOpenGeneration.current.get(entryKey) ?? 0) + 1);
       void api.closeLogSession(entryKey).catch(() => undefined);
       const nextActive = updateTabLayout((layout) => closeTab(layout, entryKey)).active;
-      setSelectedArchive(archiveForEntryKey(nextActive));
+      setSelectedArchive(null);
       updateTabs((current) => {
         const next = { ...current };
         delete next[entryKey];
@@ -621,9 +614,7 @@ export function App() {
     [closeLogTab],
   );
   const enqueueSourcePrompt = useCallback((prompt: SourceChangePrompt) => {
-    setSourcePrompts((current) =>
-      mergeSourceChangePrompt(current, prompt, sameFilePath),
-    );
+    setSourcePrompts((current) => mergeSourceChangePrompt(current, prompt, sameFilePath));
   }, []);
 
   const markSourceDeleted = useCallback(
@@ -653,7 +644,9 @@ export function App() {
             ...tab,
             sourceState: 'deleted',
             status: tab.session ? tab.status : 'error',
-            error: tab.session ? tab.error : t('workspace.deletedMessage', { name: sourceName(source) }),
+            error: tab.session
+              ? tab.error
+              : t('workspace.deletedMessage', { name: sourceName(source) }),
           };
         }
         return next;
@@ -663,7 +656,8 @@ export function App() {
           ([id, tab]) => tab.session && sameFilePath(tabSourcePath(id, tab), source),
         );
         const active = tabLayoutRef.current.active;
-        const entryKey = sessionEntries.find(([id]) => id === active)?.[0] ?? sessionEntries[0]?.[0];
+        const entryKey =
+          sessionEntries.find(([id]) => id === active)?.[0] ?? sessionEntries[0]?.[0];
         enqueueSourcePrompt({ sourcePath: source, kind: 'deleted', entryKey });
       }
     },
@@ -808,7 +802,8 @@ export function App() {
           ]),
         ),
       );
-      if (nextLayout.active && !missingIds.has(nextLayout.active)) void openEntry(nextLayout.active);
+      if (nextLayout.active && !missingIds.has(nextLayout.active))
+        void openEntry(nextLayout.active);
     })();
   }, [enqueueSourcePrompt, initialWorkspace, openEntry, updateTabLayout, updateTabs]);
 
@@ -947,7 +942,9 @@ export function App() {
         alert(t('error.renameFailed', { error: localizedError(e) }));
       } finally {
         window.setTimeout(() => {
-          selfDeletedSources.current = selfDeletedSources.current.filter((item) => item !== mutation);
+          selfDeletedSources.current = selfDeletedSources.current.filter(
+            (item) => item !== mutation,
+          );
         }, 10_000);
       }
     },
@@ -1095,8 +1092,8 @@ export function App() {
   );
   const sourcePromptCanSave = Boolean(
     sourcePrompt?.kind === 'deleted' &&
-      sourcePrompt.entryKey &&
-      tabs[sourcePrompt.entryKey]?.session,
+    sourcePrompt.entryKey &&
+    tabs[sourcePrompt.entryKey]?.session,
   );
 
   const hasDirs = tree.length > 0;
@@ -1148,9 +1145,7 @@ export function App() {
       ) : sourcePrompt ? (
         <ConfirmDialog
           title={t(
-            sourcePrompt.kind === 'modified'
-              ? 'workspace.modifiedTitle'
-              : 'workspace.deletedTitle',
+            sourcePrompt.kind === 'modified' ? 'workspace.modifiedTitle' : 'workspace.deletedTitle',
           )}
           message={t(
             sourcePrompt.kind === 'modified'

@@ -174,7 +174,7 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
     return () => cancelAnimationFrame(frame);
   }, [node.id, node.path, onRevealComplete, revealPath]);
 
-  const pad = { paddingLeft: 10 + depth * 14 };
+  const pad = { paddingLeft: 10 + depth * 14, '--depth': depth } as React.CSSProperties;
 
   const toggleArchive = async () => {
     const next = !open;
@@ -253,7 +253,13 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
         {open && loading && (
           <div
             className="tree-node"
-            style={{ paddingLeft: 10 + (depth + 1) * 14, color: 'var(--fg-dim)' }}
+            style={
+              {
+                paddingLeft: 10 + (depth + 1) * 14,
+                '--depth': depth + 1,
+                color: 'var(--fg-dim)',
+              } as React.CSSProperties
+            }
           >
             {t('tree.loadingDirectory')}
           </div>
@@ -261,7 +267,13 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
         {open && loadError && (
           <div
             className="tree-node"
-            style={{ paddingLeft: 10 + (depth + 1) * 14, color: 'var(--danger)' }}
+            style={
+              {
+                paddingLeft: 10 + (depth + 1) * 14,
+                '--depth': depth + 1,
+                color: 'var(--danger)',
+              } as React.CSSProperties
+            }
           >
             {t('tree.directoryFailed')}
           </div>
@@ -292,7 +304,13 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
         {open && loading && (
           <div
             className="tree-node"
-            style={{ paddingLeft: 10 + (depth + 1) * 14, color: 'var(--fg-dim)' }}
+            style={
+              {
+                paddingLeft: 10 + (depth + 1) * 14,
+                '--depth': depth + 1,
+                color: 'var(--fg-dim)',
+              } as React.CSSProperties
+            }
           >
             {t('tree.loadingArchive')}
           </div>
@@ -317,6 +335,7 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
                 archiveChain={node.path ?? node.name}
                 depth={depth + 1}
                 activeKey={props.activeKey}
+                selectedArchive={props.selectedArchive}
                 passesFilter={props.passesFilter}
                 onOpenFile={props.onOpenFile}
               />
@@ -330,7 +349,10 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
     <div
       ref={rowRef}
       className={
-        'tree-node' + (props.activeKey === node.id ? ' selected' : '') + (unread ? ' new-file' : '')
+        'tree-node' +
+        // 有压缩包被选中时(最近点击的是压缩包),压制文件高亮,保证同一时刻仅一行有背景
+        (props.activeKey === node.id && props.selectedArchive === null ? ' selected' : '') +
+        (unread ? ' new-file' : '')
       }
       style={pad}
       onClick={() => props.onOpenFile(node.path ?? node.name, unread ? node.id : undefined)}
@@ -349,6 +371,7 @@ function ArchiveEntryItem({
   archiveChain,
   depth,
   activeKey,
+  selectedArchive,
   passesFilter,
   onOpenFile,
 }: {
@@ -356,6 +379,7 @@ function ArchiveEntryItem({
   archiveChain: string;
   depth: number;
   activeKey: string | null;
+  selectedArchive: string | null;
   passesFilter: Props['passesFilter'];
   onOpenFile: Props['onOpenFile'];
 }) {
@@ -388,8 +412,8 @@ function ArchiveEntryItem({
   return (
     <div>
       <div
-        className={'tree-node' + (activeKey === key ? ' selected' : '')}
-        style={{ paddingLeft: 10 + depth * 14 }}
+        className={'tree-node' + (activeKey === key && selectedArchive === null ? ' selected' : '')}
+        style={{ paddingLeft: 10 + depth * 14, '--depth': depth } as React.CSSProperties}
         onClick={() => void activate()}
         title={
           entry.encrypted
@@ -407,14 +431,25 @@ function ArchiveEntryItem({
         <span className="size">{fmtSize(entry.size)}</span>
       </div>
       {open && loading && (
-        <div className="tree-node" style={{ paddingLeft: 10 + (depth + 1) * 14 }}>
+        <div
+          className="tree-node"
+          style={
+            { paddingLeft: 10 + (depth + 1) * 14, '--depth': depth + 1 } as React.CSSProperties
+          }
+        >
           {t('tree.loadingArchive')}
         </div>
       )}
       {open && error && (
         <div
           className="tree-node"
-          style={{ paddingLeft: 10 + (depth + 1) * 14, color: 'var(--danger)' }}
+          style={
+            {
+              paddingLeft: 10 + (depth + 1) * 14,
+              '--depth': depth + 1,
+              color: 'var(--danger)',
+            } as React.CSSProperties
+          }
           title={error}
         >
           {error}
@@ -438,6 +473,7 @@ function ArchiveEntryItem({
               archiveChain={key}
               depth={depth + 1}
               activeKey={activeKey}
+              selectedArchive={selectedArchive}
               passesFilter={passesFilter}
               onOpenFile={onOpenFile}
             />
