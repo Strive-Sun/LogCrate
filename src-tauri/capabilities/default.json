@@ -3,5 +3,11 @@
   "identifier": "default",
   "description": "LogCrate 默认权限:核心命令、文件夹选择与签名更新",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open", "updater:default", "process:default"]
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "updater:default",
+    "process:default"
+  ]
 }

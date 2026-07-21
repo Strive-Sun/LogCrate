@@ -86,6 +86,8 @@ export interface EncodingProgress {
 /** 打开会话的结果 */
 export interface OpenSessionResult {
   sessionId: string;
+  /** 当前会话实际读取的最外层磁盘源绝对路径。 */
+  sourcePath: string;
   /** 条目路径(用于面包屑) */
   entryPath: string;
   /** 解压后大小 */
@@ -96,6 +98,13 @@ export interface OpenSessionResult {
   encoding: string;
   /** 本次打开因后端会话上限而被 LRU 回收的旧 session。 */
   evictedSessionIds: string[];
+}
+
+/** 将当前只读会话缓存导出到用户选择路径后的结果。 */
+export interface SnapshotExportResult {
+  bytes: number;
+  /** false 表示索引仍在进行，仅导出了调用时已经稳定写入的部分。 */
+  complete: boolean;
 }
 
 /** 后端到达检测事件载荷 */
@@ -115,6 +124,12 @@ export interface DroppedFileInfo {
   watchPath: string;
   isLog: boolean;
   alreadyMonitored: boolean;
+}
+
+/** 最外层磁盘源的存在性与稳定修订标识。 */
+export interface FileRevision {
+  exists: boolean;
+  revision?: string;
 }
 
 /** 后端归一化后的单个目录结构变化。 */

@@ -4,10 +4,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
-import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import { IndexProgressStore } from '../util/indexProgress';
+import { exportSnapshotAfterSelection } from '../util/snapshotExport';
 import { downloadPercent, updateFailureMessage } from '../util/update';
 import type {
   AppUpdateInfo,
@@ -15,12 +16,14 @@ import type {
   ArchiveEntry,
   DetectedItem,
   DirectoryChangeBatch,
+  FileRevision,
   DroppedFileInfo,
   EncodingProgress,
   IndexProgress,
   LogLine,
   NewLogItem,
   OpenSessionResult,
+  SnapshotExportResult,
   TreeNode,
 } from './types';
 
@@ -89,7 +92,15 @@ function treeNode(raw: RawDetectedItem): TreeNode {
   };
 }
 
+function resolveOuterSourcePath(pathOrEntryKey: string): string {
+  const root = pathOrEntryKey.split('::', 1)[0];
+  return pathByName.get(root) ?? root;
+}
+
 export const tauriApi = {
+  async fileRevision(path: string): Promise<FileRevision> {
+    return invoke<FileRevision>('file_revision', { path: resolveOuterSourcePath(path) });
+  },
   async setAppLocale(locale: 'zh-CN' | 'en'): Promise<void> {
     await invoke('set_app_locale', { locale });
   },
@@ -204,10 +215,11 @@ export const tauriApi = {
       await progressListenerReady;
       const segments = entryKey.split('::');
       const root = segments[0];
+      const sourcePath = resolveOuterSourcePath(root);
       const archivePath =
         segments.length > 1
-          ? [pathByName.get(root) ?? root, ...segments.slice(1, -1)].join('::')
-          : pathByName.get(root) ?? root;
+          ? [sourcePath, ...segments.slice(1, -1)].join('::')
+          : sourcePath;
       const entryPath =
         segments.length > 1 ? segments[segments.length - 1] : root.split(/[/\\]/).pop() ?? root;
       const res = await invoke<OpenSessionResult>('open_log_session', {
@@ -227,7 +239,7 @@ export const tauriApi = {
       sessionByKey.set(entryKey, res.sessionId);
       const total = await invoke<number>('line_count', { sessionId: res.sessionId });
       totalByKey.set(entryKey, indexProgress.getLatest(res.sessionId)?.indexedLines ?? total);
-      return res;
+      return { ...res, sourcePath };
     } finally {
       releaseQueue();
     }
@@ -245,6 +257,23 @@ export const tauriApi = {
     encodingSubscribers.delete(sessionId);
     latestEncodingProgress.delete(sessionId);
     await invoke('close_log_session', { sessionId });
+  },
+
+  async saveSessionSnapshot(
+    entryKey: string,
+    suggestedName: string,
+    title: string,
+  ): Promise<SnapshotExportResult | null> {
+    const sessionId = sessionByKey.get(entryKey);
+    if (!sessionId) throw new Error('session not found');
+    return exportSnapshotAfterSelection(
+      () => saveDialog({ defaultPath: suggestedName, title }),
+      (destination) =>
+        invoke<SnapshotExportResult>('export_session_snapshot', {
+          sessionId,
+          destination,
+        }),
+    );
   },
 
   subscribeIndexProgress(

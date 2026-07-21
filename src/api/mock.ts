@@ -6,6 +6,7 @@ import type {
   AppUpdateProgress,
   ArchiveEntry,
   DirectoryChangeBatch,
+  FileRevision,
   DroppedFileInfo,
   EncodingProgress,
   IndexProgress,
@@ -105,6 +106,9 @@ let encodingGeneration = 0;
 const encodingByKey = new Map<string, string>();
 
 export const mockApi = {
+  async fileRevision(_path: string): Promise<FileRevision> {
+    return { exists: true, revision: 'mock:1' };
+  },
   async setAppLocale(_locale: 'zh-CN' | 'en'): Promise<void> {},
   async getAppVersion(): Promise<string> {
     return '1.0.1';
@@ -222,6 +226,7 @@ export const mockApi = {
     if (!meta.entry.isLog) throw new Error('该条目不是文本日志,无法查看');
     return {
       sessionId: `sess:${entryKey}`,
+      sourcePath: entryKey.split('::', 1)[0],
       entryPath: entryKey.replace('::', ' › '),
       size: meta.entry.size,
       indexing: meta.compressed && meta.lineCount > 300_000,
@@ -231,6 +236,16 @@ export const mockApi = {
   },
 
   async closeLogSession(_entryKey: string, _expectedSessionId?: string): Promise<void> {},
+
+  async saveSessionSnapshot(
+    entryKey: string,
+    _suggestedName: string,
+    _title: string,
+  ): Promise<{ bytes: number; complete: boolean } | null> {
+    const meta = ENTRY_TABLE[entryKey];
+    if (!meta) throw new Error(`条目不存在: ${entryKey}`);
+    return { bytes: meta.entry.size, complete: true };
+  },
 
   /** 模拟后台建索引进度;返回取消函数 */
   subscribeIndexProgress(

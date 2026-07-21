@@ -201,7 +201,7 @@ The roadmap describes direction, not a promised version or delivery date. Issues
 
 - [ ] **Side-by-side log panes** — display two logs next to each other with independent or synchronized scrolling.
 - [ ] **Log comparison** — align by line, time, or key fields and highlight additions, omissions, and changes.
-- [ ] **Workspace restoration** — restore open files, the active tab, and reading positions after a restart.
+- [x] **Workspace restoration** — restore open files, tab order, and the active tab after a restart; missing sources are reported instead of reopened.
 - [ ] **Bookmarks and line annotations** — save important lines and local notes, then recover their location when possible after a file changes.
 - [ ] **Follow appended content** — provide a `tail -f`-style follow mode for plain logs that are still being written.
 

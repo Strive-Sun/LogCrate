@@ -3,9 +3,9 @@
 use encoding_rs::Encoding;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -63,8 +63,16 @@ pub struct EncodingProgress {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotExportResult {
+    pub bytes: u64,
+    pub complete: bool,
+}
+
 pub struct Session {
     cache_path: PathBuf,
+    cache_io: Arc<Mutex<()>>,
     /// Starts of complete lines, followed by the current readable boundary.
     offsets: Vec<u64>,
     detected_encoding: Option<&'static Encoding>,
@@ -212,6 +220,7 @@ impl SessionManager {
 
     fn append_index_chunk(
         session: &Arc<Mutex<Session>>,
+        cache_io: &Arc<Mutex<()>>,
         output: &mut BufWriter<File>,
         scanner: &mut LineScanner,
         bytes: &[u8],
@@ -222,11 +231,14 @@ impl SessionManager {
         if next_written > max_uncompressed {
             anyhow::bail!("uncompressed content exceeds the size limit");
         }
-        output.write_all(bytes)?;
         let new_offsets = scanner.scan(bytes, *written);
+        {
+            let _cache_guard = cache_io.lock().unwrap();
+            output.write_all(bytes)?;
+            // A reader or exporter must never observe a boundary before its bytes are stable.
+            output.flush()?;
+        }
         *written = next_written;
-        // A reader must never observe an offset before the corresponding bytes.
-        output.flush()?;
         let mut current = session.lock().unwrap();
         current.offsets.extend(new_offsets);
         Ok(current.line_count())
@@ -272,6 +284,7 @@ impl SessionManager {
         File::create(&cache_path)?;
         let session = Session {
             cache_path,
+            cache_io: Arc::new(Mutex::new(())),
             offsets: vec![0],
             detected_encoding: None,
             effective_encoding: encoding_rs::UTF_8,
@@ -327,13 +340,20 @@ impl SessionManager {
             map.get(session_id).cloned()
         };
         let Some(session) = session else { return };
-        let (cache_path, cancel) = {
+        let (cache_path, cache_io, cancel) = {
             let session = session.lock().unwrap();
-            (session.cache_path.clone(), session.cancel.clone())
+            (
+                session.cache_path.clone(),
+                session.cache_io.clone(),
+                session.cancel.clone(),
+            )
         };
 
         let result = (|| -> anyhow::Result<u64> {
-            let mut out = BufWriter::new(File::create(&cache_path)?);
+            let mut out = {
+                let _cache_guard = cache_io.lock().unwrap();
+                BufWriter::new(File::create(&cache_path)?)
+            };
             let mut written = 0u64;
             let mut sample = [0u8; 4096];
             let sample_len = reader.read(&mut sample)?;
@@ -351,6 +371,7 @@ impl SessionManager {
             if sample_len > 0 {
                 let indexed_lines = Self::append_index_chunk(
                     &session,
+                    &cache_io,
                     &mut out,
                     &mut scanner,
                     &sample[..sample_len],
@@ -384,6 +405,7 @@ impl SessionManager {
                 }
                 let indexed_lines = Self::append_index_chunk(
                     &session,
+                    &cache_io,
                     &mut out,
                     &mut scanner,
                     &buf[..n],
@@ -414,7 +436,10 @@ impl SessionManager {
                 }
             }
 
-            out.flush()?;
+            {
+                let _cache_guard = cache_io.lock().unwrap();
+                out.flush()?;
+            }
             let indexed_lines = {
                 let mut current = session.lock().unwrap();
                 if *current.offsets.last().unwrap() != written {
@@ -651,6 +676,46 @@ impl SessionManager {
             .unwrap_or(0)
     }
 
+    pub fn export_snapshot(
+        &self,
+        session_id: &str,
+        destination: &Path,
+    ) -> anyhow::Result<SnapshotExportResult> {
+        let session = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
+        let (cache_path, cache_io) = {
+            let current = session.lock().unwrap();
+            (current.cache_path.clone(), current.cache_io.clone())
+        };
+        if destination == cache_path {
+            anyhow::bail!("snapshot destination cannot be the session cache");
+        }
+        if destination.is_dir() {
+            anyhow::bail!("snapshot destination is a directory");
+        }
+
+        let (stable_len, complete) = {
+            let _cache_guard = cache_io.lock().unwrap();
+            let stable_len = std::fs::metadata(&cache_path)?.len();
+            let complete = !session.lock().unwrap().indexing;
+            (stable_len, complete)
+        };
+        let source = File::open(&cache_path)?;
+        let mut destination = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(destination)?;
+        let bytes = std::io::copy(&mut source.take(stable_len), &mut destination)?;
+        destination.flush()?;
+        Ok(SnapshotExportResult { bytes, complete })
+    }
+
     pub fn close(&self, session_id: &str) {
         let removed = self.sessions.lock().unwrap().remove(session_id);
         if let Some(session) = removed {
@@ -699,6 +764,14 @@ mod tests {
             |event| events.push(event),
         );
         (manager, open.session_id, events)
+    }
+
+    fn snapshot_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "logcrate-snapshot-test-{}-{}-{name}",
+            std::process::id(),
+            CACHE_TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+        ))
     }
 
     fn utf16_bytes(text: &str, big_endian: bool, bom: bool) -> Vec<u8> {
@@ -760,6 +833,68 @@ mod tests {
             .read_lines(&open.session_id, 0, 200)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn exports_complete_session_bytes() {
+        let bytes = b"first\nsecond\nlast".to_vec();
+        let (manager, session_id, _) = indexed_manager(bytes.clone());
+        let destination = snapshot_path("complete.log");
+
+        let result = manager.export_snapshot(&session_id, &destination).unwrap();
+
+        assert_eq!(result.bytes, bytes.len() as u64);
+        assert!(result.complete);
+        assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+        std::fs::remove_file(destination).unwrap();
+    }
+
+    #[test]
+    fn exports_only_the_stable_prefix_while_indexing() {
+        let bytes = vec![b'x'; 8 * 1024];
+        let manager = SessionManager::default();
+        let open = manager
+            .prepare("partial-export.log".into(), bytes.len() as u64)
+            .unwrap();
+        let destination = snapshot_path("partial.log");
+        let mut exported = None;
+
+        manager.index(
+            &open.session_id,
+            bytes.len() as u64,
+            Cursor::new(bytes.clone()),
+            |event| {
+                if !event.done && exported.is_none() {
+                    exported = Some(
+                        manager
+                            .export_snapshot(&open.session_id, &destination)
+                            .unwrap(),
+                    );
+                }
+            },
+        );
+
+        let result = exported.unwrap();
+        assert_eq!(result.bytes, 4096);
+        assert!(!result.complete);
+        assert_eq!(std::fs::read(&destination).unwrap(), bytes[..4096]);
+        std::fs::remove_file(destination).unwrap();
+    }
+
+    #[test]
+    fn snapshot_export_rejects_missing_sessions_and_directory_targets() {
+        let manager = SessionManager::default();
+        let destination = snapshot_path("missing.log");
+        assert!(manager.export_snapshot("missing", &destination).is_err());
+
+        let open = manager.prepare("directory-target.log".into(), 0).unwrap();
+        let directory = snapshot_path("directory");
+        std::fs::create_dir(&directory).unwrap();
+        let error = manager
+            .export_snapshot(&open.session_id, &directory)
+            .unwrap_err();
+        assert!(error.to_string().contains("is a directory"));
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]

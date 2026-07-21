@@ -41,12 +41,20 @@ import { localizeKnownError } from './i18n/errors';
 import {
   activateTab,
   closeTab,
-  emptyTabLayout,
   markEvictedSessions,
   openTab,
   resizeTabs,
   tabIds,
 } from './util/logTabs';
+import {
+  loadWorkspace,
+  mergeSourceChangePrompt,
+  removeWorkspaceTabs,
+  resolvedSourcePath,
+  saveWorkspace,
+  sourcePathForEntryKey,
+  type SourceChangePrompt,
+} from './util/workspace';
 
 function flattenNodes(nodes: readonly TreeNode[]): TreeNode[] {
   return nodes.flatMap((node) => [node, ...flattenNodes(node.children ?? [])]);
@@ -56,12 +64,18 @@ interface ConfirmationRequest {
   title: string;
   message: string;
   confirmLabel: string;
+  cancelLabel?: string;
+  showCancel?: boolean;
+  danger?: boolean;
   action: () => Promise<void>;
 }
 
 interface LogTab extends LogTabItem {
   session: OpenSessionResult | null;
+  sourcePath?: string;
   error?: string;
+  sourceRevision?: string;
+  sourceState: 'current' | 'deleted';
 }
 
 function tabTitle(entryKey: string): string {
@@ -75,6 +89,14 @@ function tabContainerPath(entryKey: string): string {
 
 function archiveForEntryKey(entryKey: string | null): string | null {
   return entryKey?.includes('::') ? entryKey.split('::')[0] : null;
+}
+
+function sourceName(sourcePath: string): string {
+  return sourcePath.split(/[/\\]/).pop() ?? sourcePath;
+}
+
+function tabSourcePath(entryKey: string, tab?: LogTab): string {
+  return resolvedSourcePath(entryKey, tab?.sourcePath ?? tab?.session?.sourcePath);
 }
 
 export function App() {
@@ -107,6 +129,7 @@ export function App() {
   const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
   const confirmationRef = useRef<ConfirmationRequest | null>(null);
   const updatePromptOpenRef = useRef(false);
+  const sourcePromptOpenRef = useRef(false);
   const dropBusy = useRef(false);
   const updateTaskRunning = useRef(false);
   const autoCheckStarted = useRef(false);
@@ -125,13 +148,35 @@ export function App() {
     path: string;
     directories: string[];
   } | null>(null);
-  const [tabs, setTabs] = useState<Record<string, LogTab>>({});
-  const tabsRef = useRef<Record<string, LogTab>>({});
-  const [tabLayout, setTabLayout] = useState(() => emptyTabLayout(4));
+  const [initialWorkspace] = useState(() => loadWorkspace(localStorage, 4));
+  const [tabs, setTabs] = useState<Record<string, LogTab>>(() =>
+    Object.fromEntries(
+      tabIds(initialWorkspace).map((id) => [
+        id,
+        {
+          id,
+          title: tabTitle(id),
+          absolutePath: id.split('::').join(' › '),
+          status: 'dormant' as const,
+          session: null,
+          sourceState: 'current' as const,
+        },
+      ]),
+    ),
+  );
+  const tabsRef = useRef<Record<string, LogTab>>(tabs);
+  const [tabLayout, setTabLayout] = useState(() => initialWorkspace);
   const tabLayoutRef = useRef(tabLayout);
   const tabOpenGeneration = useRef(new Map<string, number>());
-  const closeTabsMatchingRef = useRef<(predicate: (entryKey: string) => boolean) => void>(() => {});
+  const potentialSourceChangeRef = useRef<(path: string) => void>(() => {});
+  const deletedSourceRef = useRef<(path: string, subtree?: boolean) => void>(() => {});
+  const selfDeletedSources = useRef<Array<{ path: string; subtree: boolean }>>([]);
+  const pendingRevisionChecks = useRef(new Set<string>());
+  const restoredWorkspaceStarted = useRef(false);
+  const [sourcePrompts, setSourcePrompts] = useState<SourceChangePrompt[]>([]);
   const activeKey = tabLayout.active;
+  const activeSourcePath = activeKey ? tabSourcePath(activeKey, tabs[activeKey]) : null;
+  const activeSourceState = activeKey ? tabs[activeKey]?.sourceState : undefined;
 
   const updateTabLayout = useCallback(
     (updater: (current: typeof tabLayout) => typeof tabLayout) => {
@@ -287,6 +332,14 @@ export function App() {
   }, [tabs]);
 
   useEffect(() => {
+    saveWorkspace(
+      localStorage,
+      tabLayout,
+      (entryKey) => tabs[entryKey]?.sourceState !== 'deleted',
+    );
+  }, [tabLayout, tabs]);
+
+  useEffect(() => {
     tabLayoutRef.current = tabLayout;
   }, [tabLayout]);
 
@@ -301,6 +354,10 @@ export function App() {
   useEffect(() => {
     updatePromptOpenRef.current = updatePromptOpen;
   }, [updatePromptOpen]);
+
+  useEffect(() => {
+    sourcePromptOpenRef.current = sourcePrompts.length > 0;
+  }, [sourcePrompts.length]);
 
   // 禁用 WebView 默认右键菜单(刷新/打印/检查等,对本应用无意义)
   useEffect(() => {
@@ -338,6 +395,28 @@ export function App() {
       treeRef.current = after;
       setTree(after);
 
+      for (const change of batch.changes) {
+        if (change.type === 'upsert') {
+          potentialSourceChangeRef.current(change.node.path ?? change.node.id);
+        } else if (change.type === 'remove') {
+          deletedSourceRef.current(change.path);
+        } else if (change.type === 'rename') {
+          deletedSourceRef.current(change.oldPath);
+        } else if (change.type === 'rescan') {
+          const sources = new Set(
+            Object.entries(tabsRef.current).map(([id, tab]) => tabSourcePath(id, tab)),
+          );
+          for (const source of sources) {
+            if (
+              sameFilePath(source, batch.watchDir) ||
+              isPathInsideDirectory(source, batch.watchDir)
+            ) {
+              potentialSourceChangeRef.current(source);
+            }
+          }
+        }
+      }
+
       const removed = removedDirectoryNodes(before, after, batch.watchDir);
       if (removed.length === 0) return;
       removed.forEach((node) => {
@@ -354,15 +433,11 @@ export function App() {
       );
       const selected = selectedArchiveRef.current;
       const removedPaths = removedTree.map((node) => node.path ?? node.id);
-      closeTabsMatchingRef.current((entryKey) => {
-        const path = tabContainerPath(entryKey);
-        return removedPaths.some(
-          (removedPath) =>
-            sameFilePath(path, removedPath) || isPathInsideDirectory(path, removedPath),
-        );
-      });
+      for (const node of removedTree) {
+        deletedSourceRef.current(node.path ?? node.id, node.kind === 'dir');
+      }
       if (selected && removedPaths.some((path) => sameFilePath(path, selected))) {
-        setSelectedArchive(archiveForEntryKey(tabLayoutRef.current.active));
+        setSelectedArchive(null);
       }
     });
     return () => {
@@ -423,7 +498,7 @@ export function App() {
   );
 
   const openEntry = useCallback(
-    async (entryKey: string, unreadId?: string) => {
+    async (entryKey: string, unreadId?: string, options?: { force?: boolean }) => {
       const existing = tabsRef.current[entryKey];
       updateTabLayout((layout) => openTab(layout, entryKey));
       setSelectedArchive(archiveForEntryKey(entryKey));
@@ -433,18 +508,31 @@ export function App() {
           [entryKey]: {
             id: entryKey,
             title: tabTitle(entryKey),
-            absolutePath: entryKey.replace('::', ' › '),
+            absolutePath: entryKey.split('::').join(' › '),
             status: 'opening',
             session: null,
+            sourceState: 'current',
           },
         }));
-      } else if (existing.status === 'ready' || existing.status === 'opening') {
+      } else if (
+        !options?.force &&
+        (existing.status === 'ready' || existing.status === 'opening')
+      ) {
         if (unreadId) markSeen(unreadId);
         return;
       } else {
+        if (options?.force && existing.session) {
+          await api.closeLogSession(entryKey, existing.session.sessionId).catch(() => undefined);
+        }
         updateTabs((current) => ({
           ...current,
-          [entryKey]: { ...current[entryKey], status: 'opening', error: undefined },
+          [entryKey]: {
+            ...current[entryKey],
+            status: 'opening',
+            session: null,
+            error: undefined,
+            sourceState: 'current',
+          },
         }));
       }
 
@@ -452,6 +540,9 @@ export function App() {
       tabOpenGeneration.current.set(entryKey, generation);
       try {
         const opened = await api.openLogSession(entryKey);
+        const revision = await api
+          .fileRevision(opened.sourcePath)
+          .catch(() => ({ exists: true, revision: undefined }));
         if (unreadId) markSeen(unreadId);
         if (tabOpenGeneration.current.get(entryKey) !== generation || !tabsRef.current[entryKey]) {
           await api.closeLogSession(entryKey, opened.sessionId);
@@ -462,8 +553,11 @@ export function App() {
           next[entryKey] = {
             ...next[entryKey],
             session: opened,
+            sourcePath: opened.sourcePath,
             status: 'ready',
             error: undefined,
+            sourceRevision: revision.revision,
+            sourceState: 'current',
           };
           return next;
         });
@@ -489,6 +583,7 @@ export function App() {
       updateTabLayout((layout) => activateTab(layout, entryKey));
       setSelectedArchive(archiveForEntryKey(entryKey));
       const tab = tabsRef.current[entryKey];
+      if (tab?.sourceState === 'deleted') return;
       if (tab?.status === 'dormant' || tab?.status === 'error') void openEntry(entryKey);
     },
     [openEntry, updateTabLayout],
@@ -508,7 +603,12 @@ export function App() {
       queueMicrotask(() => {
         if (!nextActive) return;
         const tab = tabsRef.current[nextActive];
-        if (tab?.status === 'dormant' || tab?.status === 'error') void openEntry(nextActive);
+        if (
+          tab?.sourceState !== 'deleted' &&
+          (tab?.status === 'dormant' || tab?.status === 'error')
+        ) {
+          void openEntry(nextActive);
+        }
       });
     },
     [openEntry, updateTabLayout, updateTabs],
@@ -520,7 +620,197 @@ export function App() {
     },
     [closeLogTab],
   );
-  closeTabsMatchingRef.current = closeTabsMatching;
+  const enqueueSourcePrompt = useCallback((prompt: SourceChangePrompt) => {
+    setSourcePrompts((current) =>
+      mergeSourceChangePrompt(current, prompt, sameFilePath),
+    );
+  }, []);
+
+  const markSourceDeleted = useCallback(
+    (path: string, subtree = false) => {
+      const suppressedIndex = selfDeletedSources.current.findIndex((entry) =>
+        entry.subtree
+          ? sameFilePath(path, entry.path) || isPathInsideDirectory(path, entry.path)
+          : sameFilePath(path, entry.path),
+      );
+      if (suppressedIndex >= 0) {
+        return;
+      }
+      const affectedSources = new Set<string>();
+      for (const [entryKey, tab] of Object.entries(tabsRef.current)) {
+        const source = tabSourcePath(entryKey, tab);
+        if (sameFilePath(source, path) || (subtree && isPathInsideDirectory(source, path))) {
+          affectedSources.add(source);
+        }
+      }
+      if (affectedSources.size === 0) return;
+      updateTabs((current) => {
+        const next = { ...current };
+        for (const [id, tab] of Object.entries(current)) {
+          const source = tabSourcePath(id, tab);
+          if (!affectedSources.has(source)) continue;
+          next[id] = {
+            ...tab,
+            sourceState: 'deleted',
+            status: tab.session ? tab.status : 'error',
+            error: tab.session ? tab.error : t('workspace.deletedMessage', { name: sourceName(source) }),
+          };
+        }
+        return next;
+      });
+      for (const source of affectedSources) {
+        const sessionEntries = Object.entries(tabsRef.current).filter(
+          ([id, tab]) => tab.session && sameFilePath(tabSourcePath(id, tab), source),
+        );
+        const active = tabLayoutRef.current.active;
+        const entryKey = sessionEntries.find(([id]) => id === active)?.[0] ?? sessionEntries[0]?.[0];
+        enqueueSourcePrompt({ sourcePath: source, kind: 'deleted', entryKey });
+      }
+    },
+    [enqueueSourcePrompt, t, updateTabs],
+  );
+  deletedSourceRef.current = markSourceDeleted;
+
+  const checkSourceRevision = useCallback(
+    (path: string) => {
+      const source = Object.entries(tabsRef.current)
+        .map(([id, tab]) => tabSourcePath(id, tab))
+        .find((candidate) => sameFilePath(candidate, path));
+      if (!source || pendingRevisionChecks.current.has(source)) return;
+      pendingRevisionChecks.current.add(source);
+      void api
+        .fileRevision(source)
+        .then((currentRevision) => {
+          const matching = Object.entries(tabsRef.current).filter(
+            ([id, tab]) =>
+              tab.sourceState !== 'deleted' && sameFilePath(tabSourcePath(id, tab), source),
+          );
+          if (matching.length === 0) return;
+          if (!currentRevision.exists) {
+            markSourceDeleted(source);
+            return;
+          }
+          const known = matching.map(([, tab]) => tab.sourceRevision).find(Boolean);
+          if (!known) {
+            updateTabs((tabs) =>
+              Object.fromEntries(
+                Object.entries(tabs).map(([id, tab]) => [
+                  id,
+                  sameFilePath(tabSourcePath(id, tab), source)
+                    ? { ...tab, sourceRevision: currentRevision.revision }
+                    : tab,
+                ]),
+              ),
+            );
+          } else if (currentRevision.revision && currentRevision.revision !== known) {
+            enqueueSourcePrompt({
+              sourcePath: source,
+              kind: 'modified',
+              revision: currentRevision.revision,
+            });
+          }
+        })
+        .finally(() => pendingRevisionChecks.current.delete(source));
+    },
+    [enqueueSourcePrompt, markSourceDeleted, updateTabs],
+  );
+  potentialSourceChangeRef.current = checkSourceRevision;
+
+  useEffect(() => {
+    if (!activeSourcePath || activeSourceState === 'deleted') return;
+    const verifyActiveSource = () => checkSourceRevision(activeSourcePath);
+    const timer = window.setInterval(verifyActiveSource, 2_000);
+    window.addEventListener('focus', verifyActiveSource);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', verifyActiveSource);
+    };
+  }, [activeSourcePath, activeSourceState, checkSourceRevision]);
+
+  const reloadSource = useCallback(
+    async (sourcePath: string, revision?: string) => {
+      const ids = Object.keys(tabsRef.current).filter((id) =>
+        sameFilePath(tabSourcePath(id, tabsRef.current[id]), sourcePath),
+      );
+      const active = tabLayoutRef.current.active;
+      for (const id of ids) {
+        if (id === active) continue;
+        tabOpenGeneration.current.set(id, (tabOpenGeneration.current.get(id) ?? 0) + 1);
+        const session = tabsRef.current[id]?.session;
+        if (session) await api.closeLogSession(id, session.sessionId).catch(() => undefined);
+      }
+      updateTabs((current) => {
+        const next = { ...current };
+        for (const id of ids) {
+          if (id === active) continue;
+          next[id] = {
+            ...next[id],
+            session: null,
+            status: 'dormant',
+            error: undefined,
+            sourceRevision: revision,
+            sourceState: 'current',
+          };
+        }
+        return next;
+      });
+      if (active && ids.includes(active)) await openEntry(active, undefined, { force: true });
+      else {
+        updateTabs((current) =>
+          Object.fromEntries(
+            Object.entries(current).map(([id, tab]) => [
+              id,
+              ids.includes(id) ? { ...tab, sourceRevision: revision, sourceState: 'current' } : tab,
+            ]),
+          ),
+        );
+      }
+    },
+    [openEntry, updateTabs],
+  );
+
+  useEffect(() => {
+    if (restoredWorkspaceStarted.current) return;
+    restoredWorkspaceStarted.current = true;
+    const restoredIds = tabIds(initialWorkspace);
+    if (restoredIds.length === 0) return;
+    void (async () => {
+      const revisions = new Map<string, Awaited<ReturnType<typeof api.fileRevision>>>();
+      for (const source of new Set(restoredIds.map(sourcePathForEntryKey))) {
+        try {
+          revisions.set(source, await api.fileRevision(source));
+        } catch {
+          revisions.set(source, { exists: true });
+        }
+      }
+      const missingIds = new Set(
+        restoredIds.filter((id) => !revisions.get(sourcePathForEntryKey(id))?.exists),
+      );
+      let nextLayout = initialWorkspace;
+      if (missingIds.size > 0) {
+        nextLayout = removeWorkspaceTabs(initialWorkspace, missingIds);
+        updateTabLayout(() => nextLayout);
+        updateTabs((current) =>
+          Object.fromEntries(Object.entries(current).filter(([id]) => !missingIds.has(id))),
+        );
+        for (const source of new Set([...missingIds].map(sourcePathForEntryKey))) {
+          enqueueSourcePrompt({ sourcePath: source, kind: 'deletedWhileClosed' });
+        }
+      }
+      updateTabs((current) =>
+        Object.fromEntries(
+          Object.entries(current).map(([id, tab]) => [
+            id,
+            {
+              ...tab,
+              sourceRevision: revisions.get(sourcePathForEntryKey(id))?.revision,
+            },
+          ]),
+        ),
+      );
+      if (nextLayout.active && !missingIds.has(nextLayout.active)) void openEntry(nextLayout.active);
+    })();
+  }, [enqueueSourcePrompt, initialWorkspace, openEntry, updateTabLayout, updateTabs]);
 
   const revealNewItem = useCallback(
     async (item: NewLogItem, options?: { openFile?: boolean }) => {
@@ -566,7 +856,7 @@ export function App() {
         alert(t('error.dropBusy'));
         return;
       }
-      if (confirmationRef.current || updatePromptOpenRef.current) {
+      if (confirmationRef.current || updatePromptOpenRef.current || sourcePromptOpenRef.current) {
         alert(t('error.finishDialog'));
         return;
       }
@@ -638,6 +928,8 @@ export function App() {
   const renameNode = useCallback(
     async (node: TreeNode, newName: string) => {
       const path = node.path ?? node.id;
+      const mutation = { path, subtree: node.kind === 'dir' };
+      selfDeletedSources.current.push(mutation);
       try {
         if (node.kind === 'dir') await api.renameWatchDir(path, newName);
         else await api.renameFile(path, newName);
@@ -651,7 +943,12 @@ export function App() {
         });
         refreshTree();
       } catch (e) {
+        selfDeletedSources.current = selfDeletedSources.current.filter((item) => item !== mutation);
         alert(t('error.renameFailed', { error: localizedError(e) }));
+      } finally {
+        window.setTimeout(() => {
+          selfDeletedSources.current = selfDeletedSources.current.filter((item) => item !== mutation);
+        }, 10_000);
       }
     },
     [closeTabsMatching, localizedError, refreshTree, markSeen, t],
@@ -689,6 +986,8 @@ export function App() {
         message: t('confirm.deleteDirectoryMessage'),
         confirmLabel: t('confirm.deleteDirectory'),
         action: async () => {
+          const mutation = { path, subtree: true };
+          selfDeletedSources.current.push(mutation);
           try {
             await api.deleteWatchDir(path);
             closeTabsMatching((entryKey) => {
@@ -706,7 +1005,16 @@ export function App() {
             );
             refreshTree();
           } catch (e) {
+            selfDeletedSources.current = selfDeletedSources.current.filter(
+              (item) => item !== mutation,
+            );
             alert(t('error.deleteFailed', { error: localizedError(e) }));
+          } finally {
+            window.setTimeout(() => {
+              selfDeletedSources.current = selfDeletedSources.current.filter(
+                (item) => item !== mutation,
+              );
+            }, 10_000);
           }
         },
       });
@@ -722,18 +1030,73 @@ export function App() {
         message: t('confirm.deleteFileMessage'),
         confirmLabel: t('confirm.deleteFile'),
         action: async () => {
+          const mutation = { path: target, subtree: false };
+          selfDeletedSources.current.push(mutation);
           try {
             await api.deleteFile(target);
             closeTabsMatching((entryKey) => sameFilePath(tabContainerPath(entryKey), target));
             markSeen(node.id);
             refreshTree();
           } catch (e) {
+            selfDeletedSources.current = selfDeletedSources.current.filter(
+              (item) => item !== mutation,
+            );
             alert(t('error.deleteFailed', { error: localizedError(e) }));
+          } finally {
+            window.setTimeout(() => {
+              selfDeletedSources.current = selfDeletedSources.current.filter(
+                (item) => item !== mutation,
+              );
+            }, 10_000);
           }
         },
       });
     },
     [closeTabsMatching, localizedError, markSeen, refreshTree, t],
+  );
+
+  const sourcePrompt = sourcePrompts[0] ?? null;
+  const closeSourcePrompt = useCallback(() => {
+    setSourcePrompts((current) => current.slice(1));
+  }, []);
+  const keepSourceSnapshot = useCallback(() => {
+    const prompt = sourcePrompts[0];
+    if (!prompt) return;
+    if (prompt.revision) {
+      updateTabs((current) =>
+        Object.fromEntries(
+          Object.entries(current).map(([id, tab]) => [
+            id,
+            sameFilePath(tabSourcePath(id, tab), prompt.sourcePath)
+              ? { ...tab, sourceRevision: prompt.revision }
+              : tab,
+          ]),
+        ),
+      );
+    }
+    closeSourcePrompt();
+  }, [closeSourcePrompt, sourcePrompts, updateTabs]);
+  const saveDeletedSnapshot = useCallback(
+    async (prompt: SourceChangePrompt) => {
+      if (!prompt.entryKey) return;
+      try {
+        const result = await api.saveSessionSnapshot(
+          prompt.entryKey,
+          tabTitle(prompt.entryKey),
+          t('workspace.saveDialogTitle'),
+        );
+        if (!result) return;
+        alert(t(result.complete ? 'workspace.snapshotSaved' : 'workspace.partialSnapshotSaved'));
+      } catch (error) {
+        alert(t('workspace.snapshotSaveFailed', { error: localizedError(error) }));
+      }
+    },
+    [localizedError, t],
+  );
+  const sourcePromptCanSave = Boolean(
+    sourcePrompt?.kind === 'deleted' &&
+      sourcePrompt.entryKey &&
+      tabs[sourcePrompt.entryKey]?.session,
   );
 
   const hasDirs = tree.length > 0;
@@ -767,11 +1130,14 @@ export function App() {
         />
       )}
 
-      {confirmation && (
+      {confirmation ? (
         <ConfirmDialog
           title={confirmation.title}
           message={confirmation.message}
           confirmLabel={confirmation.confirmLabel}
+          cancelLabel={confirmation.cancelLabel}
+          showCancel={confirmation.showCancel}
+          danger={confirmation.danger}
           onCancel={() => setConfirmation(null)}
           onConfirm={() => {
             const action = confirmation.action;
@@ -779,7 +1145,49 @@ export function App() {
             void action();
           }}
         />
-      )}
+      ) : sourcePrompt ? (
+        <ConfirmDialog
+          title={t(
+            sourcePrompt.kind === 'modified'
+              ? 'workspace.modifiedTitle'
+              : 'workspace.deletedTitle',
+          )}
+          message={t(
+            sourcePrompt.kind === 'modified'
+              ? 'workspace.modifiedMessage'
+              : sourcePrompt.kind === 'deletedWhileClosed'
+                ? 'workspace.deletedWhileClosed'
+                : sourcePromptCanSave
+                  ? 'workspace.deletedSaveMessage'
+                  : 'workspace.deletedMessage',
+            { name: sourceName(sourcePrompt.sourcePath) },
+          )}
+          confirmLabel={
+            sourcePrompt.kind === 'modified'
+              ? t('workspace.reload')
+              : sourcePromptCanSave
+                ? t('workspace.saveSnapshot')
+                : t('common.ok')
+          }
+          cancelLabel={
+            sourcePrompt.kind === 'modified'
+              ? t('workspace.keepSnapshot')
+              : t('workspace.doNotSave')
+          }
+          showCancel={sourcePrompt.kind === 'modified' || sourcePromptCanSave}
+          danger={false}
+          onCancel={sourcePrompt.kind === 'modified' ? keepSourceSnapshot : closeSourcePrompt}
+          onConfirm={() => {
+            const prompt = sourcePrompt;
+            closeSourcePrompt();
+            if (prompt.kind === 'modified') {
+              void reloadSource(prompt.sourcePath, prompt.revision);
+            } else if (prompt.kind === 'deleted' && sourcePromptCanSave) {
+              void saveDeletedSnapshot(prompt);
+            }
+          }}
+        />
+      ) : null}
 
       <div className="cols">
         <DirTree

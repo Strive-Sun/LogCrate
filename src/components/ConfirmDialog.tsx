@@ -1,26 +1,30 @@
-import { useEffect } from 'react';
 import { useI18n } from '../i18n/I18nProvider';
 
 interface Props {
   title: string;
   message: string;
   confirmLabel: string;
+  cancelLabel?: string;
+  showCancel?: boolean;
+  danger?: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }
 
-export function ConfirmDialog({ title, message, confirmLabel, onCancel, onConfirm }: Props) {
+export function ConfirmDialog({
+  title,
+  message,
+  confirmLabel,
+  cancelLabel,
+  showCancel = true,
+  danger = true,
+  onCancel,
+  onConfirm,
+}: Props) {
   const { t } = useI18n();
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onCancel();
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [onCancel]);
 
   return (
-    <div className="update-modal-backdrop" onMouseDown={onCancel}>
+    <div className="update-modal-backdrop">
       <div
         className="update-modal confirm-modal"
         role="alertdialog"
@@ -32,10 +36,16 @@ export function ConfirmDialog({ title, message, confirmLabel, onCancel, onConfir
         <h2 id="confirm-title">{title}</h2>
         <p className="confirm-modal-message">{message}</p>
         <div className="update-modal-actions">
-          <button className="settings-button secondary" onClick={onCancel} autoFocus>
-            {t('common.cancel')}
-          </button>
-          <button className="settings-button danger" onClick={onConfirm}>
+          {showCancel && (
+            <button className="settings-button secondary" onClick={onCancel} autoFocus>
+              {cancelLabel ?? t('common.cancel')}
+            </button>
+          )}
+          <button
+            className={'settings-button' + (danger ? ' danger' : '')}
+            onClick={onConfirm}
+            autoFocus={!showCancel}
+          >
             {confirmLabel}
           </button>
         </div>

@@ -5,7 +5,7 @@ mod performance;
 mod watcher;
 
 use archive::{open_archive, resolve_archive_chain, ArchiveEntry};
-use index::{IndexProgress, LogLine, OpenResult, SessionManager};
+use index::{IndexProgress, LogLine, OpenResult, SessionManager, SnapshotExportResult};
 use serde::Serialize;
 use std::io::SeekFrom;
 use std::path::PathBuf;
@@ -69,6 +69,49 @@ struct AppState {
     watch: Arc<WatchState>,
     sessions: Arc<SessionManager>,
     archive_cache: PathBuf,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileRevision {
+    exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
+}
+
+#[tauri::command]
+fn file_revision(path: String) -> Result<FileRevision, String> {
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+            let revision = modified
+                .map(|value| {
+                    format!(
+                        "{}:{}:{}",
+                        metadata.len(),
+                        value.as_secs(),
+                        value.subsec_nanos()
+                    )
+                })
+                .unwrap_or_else(|| format!("{}:unknown", metadata.len()));
+            Ok(FileRevision {
+                exists: true,
+                revision: Some(revision),
+            })
+        }
+        Ok(_) => Ok(FileRevision {
+            exists: false,
+            revision: None,
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(FileRevision {
+            exists: false,
+            revision: None,
+        }),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 struct TrayMenuItems {
@@ -454,6 +497,18 @@ fn line_count(state: State<AppState>, session_id: String) -> u64 {
 }
 
 #[tauri::command]
+fn export_session_snapshot(
+    state: State<AppState>,
+    session_id: String,
+    destination: String,
+) -> Result<SnapshotExportResult, String> {
+    state
+        .sessions
+        .export_snapshot(&session_id, std::path::Path::new(&destination))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn set_session_encoding(
     state: State<AppState>,
     app: tauri::AppHandle,
@@ -635,10 +690,12 @@ pub fn run() {
             open_path,
             rename_watch_dir,
             delete_watch_dir,
+            file_revision,
             list_archive_entries,
             open_log_session,
             read_lines,
             line_count,
+            export_session_snapshot,
             set_session_encoding,
             close_log_session,
             set_app_locale
@@ -650,6 +707,23 @@ pub fn run() {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+
+    #[test]
+    fn file_revision_reports_changes_and_missing_sources() {
+        let path =
+            std::env::temp_dir().join(format!("logcrate-revision-test-{}.log", std::process::id()));
+        std::fs::write(&path, b"first").unwrap();
+        let first = file_revision(path.to_string_lossy().into_owned()).unwrap();
+        assert!(first.exists);
+        std::fs::write(&path, b"second version").unwrap();
+        let second = file_revision(path.to_string_lossy().into_owned()).unwrap();
+        assert!(second.exists);
+        assert_ne!(first.revision, second.revision);
+        std::fs::remove_file(&path).unwrap();
+        let missing = file_revision(path.to_string_lossy().into_owned()).unwrap();
+        assert!(!missing.exists);
+        assert!(missing.revision.is_none());
+    }
 
     #[test]
     fn main_window_close_hides_only_the_main_window() {
