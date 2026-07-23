@@ -1,5 +1,6 @@
 mod archive;
 mod index;
+mod macos_file_access;
 #[cfg(windows)]
 pub mod ntfs;
 #[cfg(all(test, windows))]
@@ -212,6 +213,7 @@ struct TreeDir {
     kind: String,
     path: String,
     children: Vec<TreeChild>,
+    access_status: macos_file_access::WatchAccessStatus,
 }
 
 #[derive(Serialize)]
@@ -264,6 +266,7 @@ async fn list_watch_dirs(state: State<'_, AppState>) -> Result<Vec<TreeDir>, Str
                 id: d.clone(),
                 name,
                 kind: "dir".into(),
+                access_status: state.watch.access_status(&d),
                 path: d,
                 children,
             }
@@ -276,13 +279,79 @@ async fn add_watch_dir(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     path: String,
+    user_selected: Option<bool>,
 ) -> Result<(), String> {
     let state = state.ready().await;
-    let added = state.watch.add_dir(&path).map_err(|e| e.to_string())?;
+    let added = if user_selected.unwrap_or(false) {
+        state.watch.add_user_selected_dir(&path)
+    } else {
+        state.watch.add_dir(&path)
+    }
+    .map_err(|e| e.to_string())?;
     if added {
         spawn_watch(&state.watch, &app, &path)
     } else {
         Ok(())
+    }
+}
+
+#[tauri::command]
+async fn reauthorize_watch_dir(
+    state: State<'_, AppState>,
+    existing_path: String,
+    selected_path: String,
+) -> Result<(), String> {
+    let state = state.ready().await;
+    state
+        .watch
+        .reauthorize_dir(&existing_path, &selected_path)
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MacOsFileAccessCapabilities {
+    supported: bool,
+    onboarding_version: u32,
+    sandboxed: bool,
+}
+
+#[tauri::command]
+fn macos_file_access_capabilities() -> MacOsFileAccessCapabilities {
+    MacOsFileAccessCapabilities {
+        supported: cfg!(target_os = "macos"),
+        onboarding_version: 1,
+        // No App Sandbox entitlement is configured in the current distribution.
+        sandboxed: false,
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MacOsSystemSettingsResult {
+    used_fallback: bool,
+}
+
+#[tauri::command]
+fn open_macos_full_disk_access_settings(
+    app: tauri::AppHandle,
+) -> Result<MacOsSystemSettingsResult, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        app.run_on_main_thread(move || {
+            let _ = sender.send(macos_file_access::open_full_disk_access_settings());
+        })
+        .map_err(|error| error.to_string())?;
+        let used_fallback = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| "SYSTEM_SETTINGS_OPEN_FAILED:打开系统设置超时".to_string())??;
+        Ok(MacOsSystemSettingsResult { used_fallback })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("MACOS_ONLY:完全磁盘访问权限设置仅适用于 macOS".into())
     }
 }
 
@@ -963,6 +1032,9 @@ pub fn run() {
             expand_directory,
             collapse_directory,
             add_watch_dir,
+            reauthorize_watch_dir,
+            macos_file_access_capabilities,
+            open_macos_full_disk_access_settings,
             inspect_dropped_file,
             file_search_status,
             file_search_config,

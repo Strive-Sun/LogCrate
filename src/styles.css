@@ -1208,6 +1208,45 @@ body.resizing {
 .settings-button.secondary {
   color: var(--fg-dim);
 }
+.macos-access-modal {
+  width: min(480px, calc(100vw - 32px));
+  text-align: left;
+}
+.macos-access-modal h2 {
+  text-align: center;
+}
+.macos-access-modal p,
+.macos-access-modal li {
+  color: var(--fg-dim);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.macos-access-modal ol {
+  margin: 12px 0;
+  padding-left: 24px;
+}
+.macos-access-icon {
+  text-align: center;
+  font-size: 36px;
+}
+.macos-access-note {
+  padding: 9px 10px;
+  border-radius: 6px;
+  background: var(--bg-panel);
+}
+.access-warning {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: #d97706;
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+}
 .update-section {
   padding-top: 4px;
   padding-bottom: 12px;

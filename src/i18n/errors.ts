@@ -3,6 +3,11 @@ import type { MessageKey } from './messages';
 type Translator = (key: MessageKey, params?: Record<string, string | number>) => string;
 
 export function localizeKnownError(message: string, t: Translator): string {
+  if (message.includes('FILE_ACCESS_DENIED:')) return t('error.fileAccessDenied');
+  if (message.includes('VOLUME_UNAVAILABLE:')) return t('error.volumeUnavailable');
+  if (message.includes('BOOKMARK_IDENTITY_MISMATCH:')) return t('error.authorizationMismatch');
+  if (message.includes('BOOKMARK_')) return t('error.authorizationInvalid');
+  if (message.includes('SYSTEM_SETTINGS_OPEN_FAILED:')) return t('error.systemSettingsFailed');
   const exact: Record<string, MessageKey> = {
     文件不存在: 'error.fileMissing',
     路径不存在: 'error.pathMissing',

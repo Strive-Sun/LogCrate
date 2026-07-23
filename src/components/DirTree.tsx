@@ -39,6 +39,8 @@ interface Props {
   onRemoveWatch: (node: TreeNode) => void;
   /** 删除监控目录(整个文件夹移入回收站) */
   onDeleteDir: (node: TreeNode) => void;
+  /** 通过系统目录选择器重新确认 macOS 监控根授权。 */
+  onReauthorizeWatch: (node: TreeNode) => void;
 }
 
 // 让深层 TreeItem 能触发右键菜单与重命名,而无需逐层透传
@@ -117,6 +119,14 @@ export function DirTree(props: Props) {
           items={
             menu.node.kind === 'dir' && menu.node.watchRoot
               ? [
+                  ...(menu.node.accessStatus === 'needsAuthorization'
+                    ? [
+                        {
+                          label: t('tree.reauthorize'),
+                          onClick: () => props.onReauthorizeWatch(menu.node),
+                        },
+                      ]
+                    : []),
                   { label: t('tree.openInManager'), onClick: () => props.onOpenPath(menu.node) },
                   { label: t('tree.rename'), onClick: () => ctx.startRename(menu.node) },
                   { label: t('tree.removeWatch'), onClick: () => props.onRemoveWatch(menu.node) },
@@ -241,6 +251,11 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
           <span className="twisty">{open ? '▾' : '▸'}</span>
           <span className="ico">📁</span>
           {renderLabel()}
+          {node.watchRoot && node.accessStatus === 'needsAuthorization' && !renaming && (
+            <span className="access-warning" title={t('tree.authorizationRequired')}>
+              !
+            </span>
+          )}
         </div>
         {open &&
           node.children

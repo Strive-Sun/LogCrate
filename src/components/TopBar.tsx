@@ -22,6 +22,8 @@ interface Props {
   onCheckForUpdates: () => void;
   onSkipUpdate: () => void;
   onDownloadUpdate: () => void;
+  macOsFileAccessSupported: boolean;
+  onOpenMacOsFileAccessSettings: () => void;
 }
 
 export function TopBar(props: Props) {
@@ -143,6 +145,8 @@ export function TopBar(props: Props) {
             onSkip={props.onSkipUpdate}
             onDownload={props.onDownloadUpdate}
             onClose={() => setSettingsOpen(false)}
+            macOsFileAccessSupported={props.macOsFileAccessSupported}
+            onOpenMacOsFileAccessSettings={props.onOpenMacOsFileAccessSettings}
           />
         </>
       )}

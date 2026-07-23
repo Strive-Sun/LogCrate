@@ -42,10 +42,22 @@ export interface TreeNode {
   watchDir?: string;
   /** 是否为用户配置的监控根目录；普通子目录为 false。 */
   watchRoot?: boolean;
+  /** macOS 持久文件访问状态；其它平台通常为 available。 */
+  accessStatus?: 'available' | 'needsAuthorization' | 'unavailable';
   /** 是否为未读的新到达项 */
   unread?: boolean;
   /** 子节点;archive 节点在展开时惰性填充 */
   children?: TreeNode[];
+}
+
+export interface MacOsFileAccessCapabilities {
+  supported: boolean;
+  onboardingVersion: number;
+  sandboxed: boolean;
+}
+
+export interface MacOsSystemSettingsResult {
+  usedFallback: boolean;
 }
 
 /** 新日志提示项 */

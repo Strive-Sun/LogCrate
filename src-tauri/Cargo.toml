@@ -77,6 +77,12 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_System_Services",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+base64 = "0.22.1"
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSData", "NSError", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWorkspace"] }
+
 # Full-disk search is CPU-bound even in `tauri dev`. Optimize only the application
 # and Orange tokenization/index packages so development builds exercise realistic
 # indexing performance without turning every Tauri dependency into a release build.

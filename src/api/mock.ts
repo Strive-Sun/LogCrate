@@ -16,6 +16,8 @@ import type {
   EncodingProgress,
   IndexProgress,
   LogLine,
+  MacOsFileAccessCapabilities,
+  MacOsSystemSettingsResult,
   NewLogItem,
   OpenSessionResult,
   TreeNode,
@@ -433,6 +435,18 @@ export const mockApi = {
   },
 
   async addWatchDir(_title?: string): Promise<boolean> {
+    throw new Error('mock.selectDirectory');
+  },
+
+  async macOsFileAccessCapabilities(): Promise<MacOsFileAccessCapabilities> {
+    return { supported: false, onboardingVersion: 1, sandboxed: false };
+  },
+
+  async openMacOsFullDiskAccessSettings(): Promise<MacOsSystemSettingsResult> {
+    throw new Error('MACOS_ONLY');
+  },
+
+  async reauthorizeWatchDir(_existingPath: string, _title?: string): Promise<boolean> {
     throw new Error('mock.selectDirectory');
   },
 

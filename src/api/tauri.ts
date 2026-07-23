@@ -25,6 +25,8 @@ import type {
   EncodingProgress,
   IndexProgress,
   LogLine,
+  MacOsFileAccessCapabilities,
+  MacOsSystemSettingsResult,
   NewLogItem,
   OpenSessionResult,
   SnapshotExportResult,
@@ -77,6 +79,7 @@ interface RawDir {
   kind: 'dir';
   path: string;
   children: RawChild[];
+  accessStatus: 'available' | 'needsAuthorization' | 'unavailable';
 }
 
 type RawDirectoryChange =
@@ -193,6 +196,7 @@ export const tauriApi = {
       kind: 'dir' as const,
       path: d.path,
       watchRoot: true,
+      accessStatus: d.accessStatus,
       children: d.children.map((c) => ({ ...treeNode(c), watchDir: d.name })),
     }));
   },
@@ -364,7 +368,27 @@ export const tauriApi = {
   async addWatchDir(title?: string): Promise<boolean> {
     const dir = await openDialog({ directory: true, multiple: false, title });
     if (!dir || typeof dir !== 'string') return false;
-    await invoke('add_watch_dir', { path: dir });
+    await invoke('add_watch_dir', { path: dir, userSelected: true });
+    return true;
+  },
+
+  macOsFileAccessCapabilities(): Promise<MacOsFileAccessCapabilities> {
+    return invoke<MacOsFileAccessCapabilities>('macos_file_access_capabilities');
+  },
+
+  openMacOsFullDiskAccessSettings(): Promise<MacOsSystemSettingsResult> {
+    return invoke<MacOsSystemSettingsResult>('open_macos_full_disk_access_settings');
+  },
+
+  async reauthorizeWatchDir(existingPath: string, title?: string): Promise<boolean> {
+    const selectedPath = await openDialog({
+      directory: true,
+      multiple: false,
+      defaultPath: existingPath,
+      title,
+    });
+    if (!selectedPath || typeof selectedPath !== 'string') return false;
+    await invoke('reauthorize_watch_dir', { existingPath, selectedPath });
     return true;
   },
 
@@ -430,7 +454,7 @@ export const tauriApi = {
   },
 
   async addWatchPath(path: string): Promise<void> {
-    await invoke('add_watch_dir', { path });
+    await invoke('add_watch_dir', { path, userSelected: true });
   },
 
   async removeWatchDir(dirPath: string): Promise<void> {

@@ -6,12 +6,14 @@ import type {
   AppUpdateProgress,
   DroppedFileInfo,
   FileSearchResult,
+  MacOsFileAccessCapabilities,
   NewLogItem,
   OpenSessionResult,
   TreeNode,
 } from './api';
 import { TopBar } from './components/TopBar';
 import { UpdateDialog } from './components/UpdateDialog';
+import { MacOsFileAccessDialog } from './components/MacOsFileAccessDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { DirTree } from './components/DirTree';
 import { LogContent } from './components/LogContent';
@@ -57,6 +59,10 @@ import {
   sourcePathForEntryKey,
   type SourceChangePrompt,
 } from './util/workspace';
+import {
+  markMacOsFileAccessOnboardingSeen,
+  shouldShowMacOsFileAccessOnboarding,
+} from './util/macOsFileAccess';
 
 function flattenNodes(nodes: readonly TreeNode[]): TreeNode[] {
   return nodes.flatMap((node) => [node, ...flattenNodes(node.children ?? [])]);
@@ -125,6 +131,8 @@ export function App() {
   const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updatePromptOpen, setUpdatePromptOpen] = useState(false);
+  const [macOsFileAccess, setMacOsFileAccess] = useState<MacOsFileAccessCapabilities | null>(null);
+  const [macOsFileAccessPromptOpen, setMacOsFileAccessPromptOpen] = useState(false);
   const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
   const confirmationRef = useRef<ConfirmationRequest | null>(null);
   const updatePromptOpenRef = useRef(false);
@@ -313,6 +321,42 @@ export function App() {
   }, [t]);
 
   useEffect(() => {
+    api
+      .macOsFileAccessCapabilities()
+      .then((capabilities) => {
+        setMacOsFileAccess(capabilities);
+        if (
+          capabilities.supported &&
+          shouldShowMacOsFileAccessOnboarding(localStorage, capabilities.onboardingVersion)
+        ) {
+          setMacOsFileAccessPromptOpen(true);
+        }
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const finishMacOsFileAccessOnboarding = useCallback(() => {
+    if (macOsFileAccess) {
+      markMacOsFileAccessOnboardingSeen(localStorage, macOsFileAccess.onboardingVersion);
+    }
+    setMacOsFileAccessPromptOpen(false);
+  }, [macOsFileAccess]);
+
+  const openMacOsFileAccessSettings = useCallback(async () => {
+    try {
+      const result = await api.openMacOsFullDiskAccessSettings();
+      if (result.usedFallback) alert(t('macosAccess.fallback'));
+    } catch (error) {
+      alert(t('common.openFailed', { error: localizedError(error) }));
+    }
+  }, [localizedError, t]);
+
+  const openMacOsFileAccessSettingsFromOnboarding = useCallback(() => {
+    finishMacOsFileAccessOnboarding();
+    void openMacOsFileAccessSettings();
+  }, [finishMacOsFileAccessOnboarding, openMacOsFileAccessSettings]);
+
+  useEffect(() => {
     if (autoCheckStarted.current) return;
     autoCheckStarted.current = true;
     if (autoCheckUpdates) void checkForUpdates(true);
@@ -465,6 +509,21 @@ export function App() {
       alert(t('common.openFailed', { error: localizedError(error) }));
     }
   }, [localizedError, refreshTree, t]);
+
+  const reauthorizeWatch = useCallback(
+    async (node: TreeNode) => {
+      try {
+        const changed = await api.reauthorizeWatchDir(
+          node.path ?? node.id,
+          t('dialog.reauthorizeWatch'),
+        );
+        if (changed) await refreshTree();
+      } catch (error) {
+        alert(t('common.openFailed', { error: localizedError(error) }));
+      }
+    },
+    [localizedError, refreshTree, t],
+  );
 
   const loadDirectory = useCallback(async (path: string) => {
     const children = await api.expandDirectory(path);
@@ -1137,9 +1196,18 @@ export function App() {
         onCheckForUpdates={() => void checkForUpdates(false)}
         onSkipUpdate={skipUpdate}
         onDownloadUpdate={() => void downloadUpdate()}
+        macOsFileAccessSupported={macOsFileAccess?.supported ?? false}
+        onOpenMacOsFileAccessSettings={() => void openMacOsFileAccessSettings()}
       />
 
-      {updatePromptOpen && updateInfo && (
+      {macOsFileAccessPromptOpen && (
+        <MacOsFileAccessDialog
+          onLater={finishMacOsFileAccessOnboarding}
+          onOpenSettings={openMacOsFileAccessSettingsFromOnboarding}
+        />
+      )}
+
+      {!macOsFileAccessPromptOpen && updatePromptOpen && updateInfo && (
         <UpdateDialog
           update={updateInfo}
           onSkip={skipUpdate}
@@ -1260,6 +1328,7 @@ export function App() {
           onOpenPath={openPath}
           onRemoveWatch={removeWatch}
           onDeleteDir={deleteDir}
+          onReauthorizeWatch={reauthorizeWatch}
         />
         <div className="col-resizer" onMouseDown={startResize} />
 

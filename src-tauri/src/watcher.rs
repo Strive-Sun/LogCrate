@@ -1,6 +1,7 @@
 //! 目录监控:多目录 notify + 大小稳定检测 + 类型判定 + 配置持久化。
 
 use crate::archive::{is_archive, is_archive_name, is_log_name};
+use crate::macos_file_access::{MacOsFileAccess, WatchAccessStatus};
 use notify::event::{ModifyKind, RenameMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
@@ -70,8 +71,12 @@ pub struct DirectoryChangeBatch {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WatchConfig {
+    #[serde(default = "default_config_version")]
+    pub version: u32,
     #[serde(default)]
     pub dirs: Vec<String>,
+    #[serde(default)]
+    pub macos_bookmarks: BTreeMap<String, String>,
     #[serde(default = "default_suffixes")]
     pub suffixes: Vec<String>,
     #[serde(default)]
@@ -83,11 +88,17 @@ pub struct WatchConfig {
 impl Default for WatchConfig {
     fn default() -> Self {
         Self {
+            version: default_config_version(),
             dirs: Vec::new(),
+            macos_bookmarks: BTreeMap::new(),
             suffixes: default_suffixes(),
             show_all: false,
         }
     }
+}
+
+fn default_config_version() -> u32 {
+    2
 }
 
 fn default_suffixes() -> Vec<String> {
@@ -100,6 +111,7 @@ pub struct WatchState {
     watchers: Mutex<HashMap<String, WatchRegistration>>,
     arrival_watchers: Mutex<HashMap<String, WatchRegistration>>,
     stable_scheduler: Mutex<Option<Arc<StableScheduler>>>,
+    file_access: MacOsFileAccess,
 }
 
 struct WatchRegistration {
@@ -569,21 +581,64 @@ impl WatchState {
             .into_iter()
             .map(|root| root.to_string_lossy().into_owned())
             .collect();
+        config.version = default_config_version();
+        config
+            .macos_bookmarks
+            .retain(|path, _| config.dirs.iter().any(|dir| dir == path));
         let state = Arc::new(Self {
             config_path,
             config: Arc::new(Mutex::new(config)),
             watchers: Mutex::new(HashMap::new()),
             arrival_watchers: Mutex::new(HashMap::new()),
             stable_scheduler: Mutex::new(None),
+            file_access: MacOsFileAccess::new(),
         });
+        state.restore_persisted_access();
         if state.list_dirs() != original_dirs {
             state.persist();
         }
         state
     }
 
+    fn restore_persisted_access(&self) {
+        let bookmarks = self.config.lock().unwrap().macos_bookmarks.clone();
+        let mut refreshed = Vec::new();
+        for (path, bookmark) in bookmarks {
+            match self
+                .file_access
+                .restore_bookmark(Path::new(&path), &bookmark)
+            {
+                Ok(restored) => {
+                    if let Some(value) = restored.refreshed_bookmark {
+                        refreshed.push((path, value));
+                    }
+                }
+                Err(_) => self.file_access.mark_needs_authorization(Path::new(&path)),
+            }
+        }
+        if refreshed.is_empty() {
+            return;
+        }
+        let mut config = self.config.lock().unwrap();
+        for (path, bookmark) in refreshed {
+            config.macos_bookmarks.insert(path, bookmark);
+        }
+        drop(config);
+        self.persist();
+    }
+
     pub fn list_dirs(&self) -> Vec<String> {
         self.config.lock().unwrap().dirs.clone()
+    }
+
+    pub fn access_status(&self, dir: &str) -> WatchAccessStatus {
+        let has_bookmark = self
+            .config
+            .lock()
+            .unwrap()
+            .macos_bookmarks
+            .contains_key(dir);
+        self.file_access.status(Path::new(dir), has_bookmark)
     }
 
     pub fn is_watched_path(&self, path: &Path) -> bool {
@@ -690,19 +745,53 @@ impl WatchState {
     fn persist(&self) {
         let cfg = self.config.lock().unwrap().clone();
         if let Ok(json) = serde_json::to_string_pretty(&cfg) {
+            #[cfg(target_os = "macos")]
+            {
+                let temporary = self.config_path.with_extension(format!(
+                    "json.tmp-{}-{}",
+                    std::process::id(),
+                    cfg.version
+                ));
+                if std::fs::write(&temporary, json.as_bytes()).is_ok() {
+                    if std::fs::rename(&temporary, &self.config_path).is_ok() {
+                        return;
+                    }
+                    let _ = std::fs::remove_file(temporary);
+                }
+            }
             let _ = std::fs::write(&self.config_path, json);
         }
     }
 
     /// 添加监控目录:校验存在性 → 持久化 →(调用方负责 emit 初次扫描)
     pub fn add_dir(&self, dir: &str) -> anyhow::Result<bool> {
-        let canonical =
-            std::fs::canonicalize(dir).map_err(|_| anyhow::anyhow!("目录不存在或不可读: {dir}"))?;
+        self.add_dir_with_bookmark(dir, None)
+    }
+
+    pub fn add_user_selected_dir(&self, dir: &str) -> anyhow::Result<bool> {
+        let canonical = std::fs::canonicalize(dir)
+            .map_err(|error| anyhow::anyhow!(crate::macos_file_access::command_error(&error)))?;
+        let bookmark = if cfg!(target_os = "macos") {
+            Some(
+                self.file_access
+                    .create_bookmark(&canonical)
+                    .map_err(anyhow::Error::msg)?,
+            )
+        } else {
+            None
+        };
+        self.add_dir_with_bookmark(canonical.to_string_lossy().as_ref(), bookmark)
+    }
+
+    fn add_dir_with_bookmark(&self, dir: &str, bookmark: Option<String>) -> anyhow::Result<bool> {
+        let canonical = std::fs::canonicalize(dir)
+            .map_err(|error| anyhow::anyhow!(crate::macos_file_access::command_error(&error)))?;
         if !canonical.is_dir() {
             anyhow::bail!("目录不存在或不可读: {dir}");
         }
         let normalized = user_facing_path(&canonical).to_string_lossy().into_owned();
         let mut removed = Vec::new();
+        let mut exact_existing = false;
         {
             let mut cfg = self.config.lock().unwrap();
             if cfg
@@ -711,30 +800,81 @@ impl WatchState {
                 .map(|root| canonical_or_original(Path::new(root)))
                 .any(|root| path_is_within(&canonical, &root))
             {
-                return Ok(false);
-            }
-            cfg.dirs.retain(|root| {
-                let redundant = path_is_within(&canonical_or_original(Path::new(root)), &canonical);
-                if redundant {
-                    removed.push(root.clone());
+                exact_existing = cfg
+                    .dirs
+                    .iter()
+                    .any(|root| canonical_or_original(Path::new(root)) == canonical);
+                if exact_existing {
+                    if let Some(value) = bookmark.clone() {
+                        cfg.macos_bookmarks.insert(normalized.clone(), value);
+                    }
+                } else {
+                    return Ok(false);
                 }
-                !redundant
-            });
-            cfg.dirs.push(normalized);
+            } else {
+                cfg.dirs.retain(|root| {
+                    let redundant =
+                        path_is_within(&canonical_or_original(Path::new(root)), &canonical);
+                    if redundant {
+                        removed.push(root.clone());
+                    }
+                    !redundant
+                });
+                for root in &removed {
+                    cfg.macos_bookmarks.remove(root);
+                }
+                cfg.dirs.push(normalized.clone());
+                if let Some(value) = bookmark.clone() {
+                    cfg.macos_bookmarks.insert(normalized.clone(), value);
+                }
+            }
         }
         for root in removed {
             self.stop_watch_tree(&root);
+            self.file_access.release(Path::new(&root));
+        }
+        if let Some(value) = bookmark {
+            self.file_access.release(&canonical);
+            match self.file_access.restore_bookmark(&canonical, &value) {
+                Ok(restored) => {
+                    if let Some(refreshed) = restored.refreshed_bookmark {
+                        self.config
+                            .lock()
+                            .unwrap()
+                            .macos_bookmarks
+                            .insert(normalized.clone(), refreshed);
+                    }
+                }
+                Err(_) => self.file_access.mark_needs_authorization(&canonical),
+            }
         }
         self.persist();
-        Ok(true)
+        Ok(!exact_existing)
+    }
+
+    pub fn reauthorize_dir(&self, existing: &str, selected: &str) -> anyhow::Result<()> {
+        let existing_path = canonical_or_original(Path::new(existing));
+        let selected_path = std::fs::canonicalize(selected)
+            .map_err(|error| anyhow::anyhow!(crate::macos_file_access::command_error(&error)))?;
+        if existing_path != selected_path {
+            anyhow::bail!("BOOKMARK_IDENTITY_MISMATCH:请选择原监控目录");
+        }
+        let bookmark = self
+            .file_access
+            .create_bookmark(&selected_path)
+            .map_err(anyhow::Error::msg)?;
+        self.add_dir_with_bookmark(selected, Some(bookmark))?;
+        Ok(())
     }
 
     pub fn remove_dir(&self, dir: &str) {
         {
             let mut cfg = self.config.lock().unwrap();
             cfg.dirs.retain(|d| d != dir);
+            cfg.macos_bookmarks.remove(dir);
         }
         self.stop_watch_tree(dir);
+        self.file_access.release(Path::new(dir));
         let _ = self.rebuild_arrival_watchers();
         self.persist();
     }
@@ -762,6 +902,10 @@ impl WatchState {
         }
         std::fs::rename(src, &dst)?;
         let dst_str = dst.to_string_lossy().into_owned();
+        let bookmark = {
+            let mut cfg = self.config.lock().unwrap();
+            cfg.macos_bookmarks.remove(old)
+        };
         {
             let mut cfg = self.config.lock().unwrap();
             for d in cfg.dirs.iter_mut() {
@@ -769,6 +913,13 @@ impl WatchState {
                     *d = dst_str.clone();
                 }
             }
+            if let Some(value) = bookmark.clone() {
+                cfg.macos_bookmarks.insert(dst_str.clone(), value);
+            }
+        }
+        self.file_access.release(Path::new(old));
+        if let Some(value) = bookmark {
+            let _ = self.file_access.restore_bookmark(&dst, &value);
         }
         self.stop_watch_tree(old);
         let _ = self.rebuild_arrival_watchers();
@@ -1518,6 +1669,42 @@ mod tests {
         let persisted: WatchConfig =
             serde_json::from_slice(&std::fs::read(config_path).unwrap()).unwrap();
         assert_eq!(persisted.dirs, state.list_dirs());
+    }
+
+    #[test]
+    fn legacy_path_only_config_migrates_without_losing_roots() {
+        let fixture = FixtureDir::new();
+        let config_path = fixture.path.join("legacy-config.json");
+        let legacy = serde_json::json!({
+            "dirs": [fixture.path.to_string_lossy()],
+            "suffixes": [".log"],
+            "showAll": false
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let state = WatchState::new(config_path.clone());
+        assert_eq!(state.list_dirs(), vec![fixture.path.to_string_lossy()]);
+        let persisted: WatchConfig =
+            serde_json::from_slice(&std::fs::read(config_path).unwrap()).unwrap();
+        assert_eq!(persisted.version, 2);
+        assert!(persisted.macos_bookmarks.is_empty());
+    }
+
+    #[test]
+    fn removing_a_root_also_removes_its_persisted_bookmark() {
+        let fixture = FixtureDir::new();
+        let state = WatchState::new(fixture.path.join("config.json"));
+        let root = fixture.path.to_string_lossy().into_owned();
+        state.add_dir(&root).unwrap();
+        state
+            .config
+            .lock()
+            .unwrap()
+            .macos_bookmarks
+            .insert(root.clone(), "opaque".into());
+
+        state.remove_dir(&root);
+        assert!(!state.config().macos_bookmarks.contains_key(&root));
     }
 
     #[test]

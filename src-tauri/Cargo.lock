@@ -2253,6 +2253,7 @@ name = "logpeek"
 version = "1.0.13"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bzip2",
  "convert_case",
  "encoding_rs",
@@ -2260,6 +2261,9 @@ dependencies = [
  "jieba-rs",
  "notify",
  "notify-debouncer-full",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "pinyin",
  "rusqlite",
  "serde",

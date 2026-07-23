@@ -9,6 +9,7 @@ import type {
   FileSearchStatus,
 } from '../api';
 import { useI18n } from '../i18n/I18nProvider';
+import { localizeKnownError } from '../i18n/errors';
 import { fmtNum, fmtSize } from '../util/format';
 import {
   mergeSearchResults,
@@ -94,6 +95,7 @@ export function FileSearchPanel({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [clearArmed, setClearArmed] = useState(false);
   const [repairingService, setRepairingService] = useState(false);
+  const [macOsFileAccessSupported, setMacOsFileAccessSupported] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number; item: FileSearchResult } | null>(null);
   const [archive, setArchive] = useState<ArchiveView | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -109,6 +111,13 @@ export function FileSearchPanel({
     initialRect: { width: 900, height: 600 },
     overscan: 12,
   });
+
+  useEffect(() => {
+    void api
+      .macOsFileAccessCapabilities()
+      .then((capabilities) => setMacOsFileAccessSupported(capabilities.supported))
+      .catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -396,6 +405,20 @@ export function FileSearchPanel({
 
       <div className={'file-search-status ' + status.phase} role="status">
         <span>{statusText}</span>
+        {macOsFileAccessSupported && status.skippedDirectories > 0 && (
+          <button
+            onClick={() =>
+              void api
+                .openMacOsFullDiskAccessSettings()
+                .then((result) => {
+                  if (result.usedFallback) setError(t('macosAccess.fallback'));
+                })
+                .catch((reason) => setError(localizeKnownError(String(reason), t)))
+            }
+          >
+            {t('search.reviewFileAccess')}
+          </button>
+        )}
         {status.phase === 'scanning' && (
           <button onClick={() => void api.pauseFileSearchIndex()}>{t('search.pause')}</button>
         )}

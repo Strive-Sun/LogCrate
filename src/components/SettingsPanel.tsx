@@ -14,6 +14,8 @@ interface Props {
   onSkip: () => void;
   onDownload: () => void;
   onClose: () => void;
+  macOsFileAccessSupported: boolean;
+  onOpenMacOsFileAccessSettings: () => void;
 }
 
 const busyStatuses: UpdateStatus[] = ['checking', 'downloading', 'installing'];
@@ -73,6 +75,20 @@ export function SettingsPanel(props: Props) {
           />
         </label>
       </div>
+
+      {props.macOsFileAccessSupported && (
+        <div className="settings-section">
+          <div className="settings-row">
+            <div>
+              <div className="settings-label">{t('macosAccess.settingsLabel')}</div>
+              <div className="settings-hint">{t('macosAccess.settingsHint')}</div>
+            </div>
+            <button className="settings-button" onClick={props.onOpenMacOsFileAccessSettings}>
+              {t('macosAccess.openSettings')}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="settings-section update-section" aria-live="polite">
         <div className="update-row">
