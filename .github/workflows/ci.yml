@@ -80,6 +80,11 @@ jobs:
         run: cargo check --all-targets
         working-directory: src-tauri
 
+      - name: Windows 索引服务编译检查
+        if: matrix.os == 'windows-latest'
+        run: cargo check --bin logcrate_index_service --features windows-index-service
+        working-directory: src-tauri
+
       - name: 单元测试(test)
         run: cargo test
         working-directory: src-tauri

@@ -1,0 +1,5 @@
+{
+  "build": {
+    "features": ["windows-index-service"]
+  }
+}

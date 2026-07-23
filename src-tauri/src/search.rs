@@ -8,7 +8,9 @@ use crate::search_index::{SearchIndex, SearchIndexEntry};
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+#[cfg(windows)]
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,6 +23,7 @@ use tauri::Emitter;
 
 const SCHEMA_VERSION: i64 = 8;
 const SCAN_WRITE_BATCH: usize = 8_192;
+#[cfg(any(windows, test))]
 const NTFS_RESOLVE_BATCH: usize = 2_048;
 const EVENT_BATCH: usize = 512;
 const EVENT_QUEUE_CAPACITY: usize = 4096;
@@ -2029,6 +2032,7 @@ fn prepare_bulk_index(path: &Path, rebuild: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn mark_query_snapshot_complete(path: &Path) -> anyhow::Result<()> {
     let connection = open_database(path)?;
     connection.execute(
@@ -2072,6 +2076,7 @@ fn write_batch(connection: &mut Connection, files: &[IndexedFile]) -> anyhow::Re
     write_files(connection, files, true)
 }
 
+#[cfg(any(windows, test))]
 fn insert_batch(connection: &mut Connection, files: &[IndexedFile]) -> anyhow::Result<()> {
     write_files(connection, files, false)
 }
@@ -2605,7 +2610,7 @@ fn is_reparse_point(_entry: &fs::DirEntry) -> bool {
     false
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn unix_device(path: &Path) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
     fs::metadata(path).ok().map(|metadata| metadata.dev())
