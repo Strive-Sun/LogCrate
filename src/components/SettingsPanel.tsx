@@ -1,4 +1,4 @@
-import type { AppUpdateInfo, AppUpdateProgress } from '../api';
+import type { AppUpdateInfo, AppUpdateProgress, FileSearchFeatureState } from '../api';
 import { formatBytes, type UpdateStatus } from '../util/update';
 import { useI18n } from '../i18n/I18nProvider';
 
@@ -16,6 +16,9 @@ interface Props {
   onClose: () => void;
   macOsFileAccessSupported: boolean;
   onOpenMacOsFileAccessSettings: () => void;
+  searchFeature: FileSearchFeatureState | null;
+  searchPreferenceSaving: boolean;
+  onSearchEnabledChange: (enabled: boolean) => void;
 }
 
 const busyStatuses: UpdateStatus[] = ['checking', 'downloading', 'installing'];
@@ -72,6 +75,30 @@ export function SettingsPanel(props: Props) {
             type="checkbox"
             checked={props.autoCheck}
             onChange={(event) => props.onAutoCheckChange(event.target.checked)}
+          />
+        </label>
+
+        <label className="settings-row settings-toggle-row">
+          <div>
+            <div className="settings-label">{t('settings.searchEnabled')}</div>
+            <div className="settings-hint">{t('settings.searchEnabledHint')}</div>
+            {props.searchFeature &&
+              props.searchFeature.currentEnabled !== props.searchFeature.nextLaunchEnabled && (
+                <div className="settings-hint">
+                  {t(
+                    props.searchFeature.nextLaunchEnabled
+                      ? 'settings.searchPendingEnable'
+                      : 'settings.searchPendingDisable',
+                  )}
+                </div>
+              )}
+          </div>
+          <input
+            type="checkbox"
+            aria-label={t('settings.searchEnabled')}
+            checked={props.searchFeature?.nextLaunchEnabled ?? false}
+            disabled={!props.searchFeature || props.searchPreferenceSaving}
+            onChange={(event) => props.onSearchEnabledChange(event.target.checked)}
           />
         </label>
       </div>

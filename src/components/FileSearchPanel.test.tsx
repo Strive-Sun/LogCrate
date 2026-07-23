@@ -138,7 +138,12 @@ async function renderPanel(overrides?: {
     addSearchResultParent: api.addSearchResultParent,
   };
   api.fileSearchStatus = async () => status;
-  api.fileSearchConfig = async () => ({ enabled: true, roots: status.roots, exclusions: [] });
+  api.fileSearchConfig = async () => ({
+    version: 1,
+    enabled: true,
+    roots: status.roots,
+    exclusions: [],
+  });
   api.subscribeFileSearchStatus = () => () => {};
   api.searchFiles = async () => {
     searchCalls += 1;

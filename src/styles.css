@@ -165,11 +165,19 @@ button {
   cursor: pointer;
   background: var(--bg);
 }
-.topbar .search:hover,
-.topbar .search:focus-visible {
+.topbar .search-entry {
+  display: inline-flex;
+}
+.topbar .search:not(:disabled):hover,
+.topbar .search:focus-visible,
+.topbar .search.active {
   color: var(--fg);
   border-color: var(--accent);
   background: var(--hover);
+}
+.topbar .search:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 .topbar .spacer {
   flex: 1;

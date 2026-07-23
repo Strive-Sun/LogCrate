@@ -105,19 +105,33 @@ const CREATE_FTS_TABLE: &str = "CREATE VIRTUAL TABLE files_fts USING fts5(
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchConfig {
+    #[serde(default = "search_config_version")]
+    pub version: u32,
     pub enabled: bool,
     pub roots: Vec<String>,
     pub exclusions: Vec<String>,
 }
 
+const fn search_config_version() -> u32 {
+    1
+}
+
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
+            version: search_config_version(),
             enabled: false,
             roots: local_fixed_roots(),
             exclusions: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchFeatureState {
+    pub current_enabled: bool,
+    pub next_launch_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -291,6 +305,25 @@ impl FileSearchManager {
         self.config.lock().unwrap().clone()
     }
 
+    pub fn feature_state(&self, current_enabled: bool) -> SearchFeatureState {
+        SearchFeatureState {
+            current_enabled,
+            next_launch_enabled: self.config.lock().unwrap().enabled,
+        }
+    }
+
+    pub fn set_enabled_preference(&self, enabled: bool) -> anyhow::Result<()> {
+        let mut config = self.config.lock().unwrap();
+        let previous = config.enabled;
+        config.enabled = enabled;
+        config.version = search_config_version();
+        if let Err(error) = write_config(&self.config_path, &config) {
+            config.enabled = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn runtime_config(&self) -> SearchConfig {
         let mut config = self.config();
         if let Some(data_dir) = self.db_path.parent() {
@@ -316,7 +349,6 @@ impl FileSearchManager {
             if config.roots.is_empty() {
                 config.roots = local_fixed_roots();
             }
-            config.enabled = true;
             write_config(&self.config_path, &config)?;
             let mut status = self.status.lock().unwrap();
             status.phase = "scanning".into();
@@ -538,8 +570,7 @@ impl FileSearchManager {
         clear_rows(&self.db_path)?;
         self.clear_query_index()?;
         {
-            let mut config = self.config.lock().unwrap();
-            config.enabled = false;
+            let config = self.config.lock().unwrap();
             write_config(&self.config_path, &config)?;
             *self.status.lock().unwrap() = SearchStatus::disabled(&config);
         }
@@ -2437,6 +2468,7 @@ fn path_key(path: &str) -> Option<String> {
 fn read_config(path: &Path) -> Option<SearchConfig> {
     let bytes = fs::read(path).ok()?;
     let mut config = serde_json::from_slice::<SearchConfig>(&bytes).ok()?;
+    config.version = search_config_version();
     config.roots = normalize_unique_paths(config.roots);
     config.exclusions = normalize_unique_paths(config.exclusions);
     Some(config)
@@ -2448,11 +2480,48 @@ fn write_config(path: &Path, config: &SearchConfig) -> anyhow::Result<()> {
     }
     let temporary = path.with_extension("json.tmp");
     fs::write(&temporary, serde_json::to_vec_pretty(config)?)?;
-    if path.exists() {
-        let _ = fs::remove_file(path);
+    if let Err(error) = replace_file(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
     }
-    fs::rename(temporary, path)?;
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::iter::once;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn database_size(path: &Path) -> u64 {
@@ -2634,6 +2703,75 @@ mod tests {
     }
 
     #[test]
+    fn search_feature_defaults_to_disabled() {
+        let config = SearchConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.version, search_config_version());
+    }
+
+    #[test]
+    fn invalid_search_config_safely_falls_back_to_disabled() {
+        let directory = test_directory("invalid-config");
+        fs::write(directory.join("file-search.json"), b"not-json").unwrap();
+        let manager = FileSearchManager::new(directory.clone());
+        assert_eq!(
+            manager.feature_state(false),
+            SearchFeatureState {
+                current_enabled: false,
+                next_launch_enabled: false,
+            }
+        );
+        drop(manager);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn legacy_search_config_is_migrated_without_enabling_search() {
+        let directory = test_directory("legacy-config");
+        let path = directory.join("file-search.json");
+        fs::write(
+            &path,
+            br#"{"enabled":false,"roots":["D:\\"],"exclusions":[]}"#,
+        )
+        .unwrap();
+        let config = read_config(&path).unwrap();
+        assert_eq!(config.version, search_config_version());
+        assert!(!config.enabled);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn enabled_preference_is_separate_from_current_process_state() {
+        let directory = test_directory("feature-state");
+        let manager = FileSearchManager::new(directory.clone());
+        manager.set_enabled_preference(true).unwrap();
+        assert_eq!(
+            manager.feature_state(false),
+            SearchFeatureState {
+                current_enabled: false,
+                next_launch_enabled: true,
+            }
+        );
+        assert_eq!(manager.generation.load(Ordering::Relaxed), 0);
+        assert!(manager.watcher.lock().unwrap().is_none());
+        drop(manager);
+        let persisted = read_config(&directory.join("file-search.json")).unwrap();
+        assert!(persisted.enabled);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn failed_preference_write_restores_previous_value() {
+        let directory = test_directory("preference-write-failure");
+        let manager = FileSearchManager::new(directory.clone());
+        fs::create_dir(&manager.config_path).unwrap();
+        assert!(manager.set_enabled_preference(true).is_err());
+        assert!(!manager.feature_state(false).next_launch_enabled);
+        drop(manager);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn visible_metadata_is_enriched_without_reading_file_contents() {
         let directory = test_directory("visible-metadata");
         let path = directory.join("service.log");
@@ -2772,6 +2910,7 @@ mod tests {
 
         fs::remove_file(&file_path).unwrap();
         let config = SearchConfig {
+            version: search_config_version(),
             enabled: true,
             roots: vec![root],
             exclusions: Vec::new(),
@@ -3037,6 +3176,7 @@ mod tests {
         let original = incoming.join("server.log");
         fs::write(&original, b"one").unwrap();
         let config = SearchConfig {
+            version: search_config_version(),
             enabled: true,
             roots: vec![root.to_string_lossy().into_owned()],
             exclusions: Vec::new(),

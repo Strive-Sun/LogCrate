@@ -5,6 +5,7 @@ import type {
   AppUpdateInfo,
   AppUpdateProgress,
   DroppedFileInfo,
+  FileSearchFeatureState,
   FileSearchResult,
   MacOsFileAccessCapabilities,
   NewLogItem,
@@ -39,6 +40,7 @@ import {
   sameFilePath,
 } from './util/directoryTree';
 import { planFileDrop, singleDroppedPath } from './util/fileDrop';
+import { nextSearchOpen, searchRestartNoticeKey } from './util/searchFeature';
 import { installAutoHideScrollbars } from './util/autoHideScrollbars';
 import { useI18n } from './i18n/I18nProvider';
 import { localizeKnownError } from './i18n/errors';
@@ -123,6 +125,8 @@ export function App() {
   );
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
+  const [searchFeature, setSearchFeature] = useState<FileSearchFeatureState | null>(null);
+  const [searchPreferenceSaving, setSearchPreferenceSaving] = useState(false);
   const [appVersion, setAppVersion] = useState('…');
   const [autoCheckUpdates, setAutoCheckUpdates] = useState(() => loadAutoCheck(localStorage));
   const [skippedVersion, setSkippedVersion] = useState(() => loadSkippedVersion(localStorage));
@@ -412,14 +416,42 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    void api
+      .fileSearchFeatureState()
+      .then(setSearchFeature)
+      .catch(() => undefined);
+  }, []);
+
+  const openFileSearch = useCallback(() => {
+    setFileSearchOpen((current) => nextSearchOpen(current, searchFeature));
+  }, [searchFeature]);
+
+  const changeSearchEnabled = useCallback(
+    async (enabled: boolean) => {
+      if (searchPreferenceSaving) return;
+      setSearchPreferenceSaving(true);
+      try {
+        const feature = await api.setFileSearchEnabled(enabled);
+        setSearchFeature(feature);
+        alert(t(searchRestartNoticeKey(enabled)));
+      } catch (error) {
+        alert(t('settings.searchSaveFailed', { error: localizedError(error) }));
+      } finally {
+        setSearchPreferenceSaving(false);
+      }
+    },
+    [localizedError, searchPreferenceSaving, t],
+  );
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.key.toLocaleLowerCase() !== 'f') return;
       event.preventDefault();
-      setFileSearchOpen(true);
+      openFileSearch();
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [openFileSearch]);
 
   const refreshTree = useCallback(async () => {
     const nodes = await api.listWatchDirs();
@@ -1179,7 +1211,11 @@ export function App() {
   return (
     <div className="app">
       <TopBar
-        onOpenSearch={() => setFileSearchOpen(true)}
+        onOpenSearch={openFileSearch}
+        searchOpen={fileSearchOpen}
+        searchFeature={searchFeature}
+        searchPreferenceSaving={searchPreferenceSaving}
+        onSearchEnabledChange={(enabled) => void changeSearchEnabled(enabled)}
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
         count={count}

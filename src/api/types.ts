@@ -139,9 +139,15 @@ export interface DroppedFileInfo {
 }
 
 export interface FileSearchConfig {
+  version: number;
   enabled: boolean;
   roots: string[];
   exclusions: string[];
+}
+
+export interface FileSearchFeatureState {
+  currentEnabled: boolean;
+  nextLaunchEnabled: boolean;
 }
 
 export type FileSearchPhase = 'disabled' | 'scanning' | 'finalizing' | 'ready' | 'paused' | 'error';

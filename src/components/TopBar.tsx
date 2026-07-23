@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AppUpdateInfo, AppUpdateProgress, NewLogItem } from '../api';
+import type { AppUpdateInfo, AppUpdateProgress, FileSearchFeatureState, NewLogItem } from '../api';
 import type { UpdateStatus } from '../util/update';
 import { SettingsPanel } from './SettingsPanel';
 import { useI18n } from '../i18n/I18nProvider';
 
 interface Props {
   onOpenSearch: () => void;
+  searchOpen: boolean;
+  searchFeature: FileSearchFeatureState | null;
+  searchPreferenceSaving: boolean;
+  onSearchEnabledChange: (enabled: boolean) => void;
   theme: 'dark' | 'light';
   onToggleTheme: () => void;
   count: number;
@@ -33,6 +37,7 @@ export function TopBar(props: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [ring, setRing] = useState(false);
   const prevCount = useRef(count);
+  const searchEnabled = props.searchFeature?.currentEnabled === true;
 
   // 计数增加时铃铛抖动
   useEffect(() => {
@@ -58,9 +63,22 @@ export function TopBar(props: Props) {
   return (
     <div className="topbar">
       <span className="brand">LogCrate</span>
-      <button className="search" title={t('top.searchShortcut')} onClick={props.onOpenSearch}>
-        🔍 {t('top.search')}
-      </button>
+      <span className="search-entry" title={searchEnabled ? undefined : t('search.disabledPrompt')}>
+        <button
+          className={'search' + (props.searchOpen ? ' active' : '')}
+          title={
+            searchEnabled
+              ? props.searchOpen
+                ? t('search.backToMonitoring')
+                : t('top.searchShortcut')
+              : undefined
+          }
+          disabled={!searchEnabled}
+          onClick={props.onOpenSearch}
+        >
+          🔍 {t('top.search')}
+        </button>
+      </span>
       <span className="spacer" />
 
       <button className="icon-btn" onClick={props.onToggleTheme} title={t('top.toggleTheme')}>
@@ -147,6 +165,9 @@ export function TopBar(props: Props) {
             onClose={() => setSettingsOpen(false)}
             macOsFileAccessSupported={props.macOsFileAccessSupported}
             onOpenMacOsFileAccessSettings={props.onOpenMacOsFileAccessSettings}
+            searchFeature={props.searchFeature}
+            searchPreferenceSaving={props.searchPreferenceSaving}
+            onSearchEnabledChange={props.onSearchEnabledChange}
           />
         </>
       )}

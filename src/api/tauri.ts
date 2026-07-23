@@ -18,6 +18,7 @@ import type {
   DirectoryChangeBatch,
   FileRevision,
   FileSearchConfig,
+  FileSearchFeatureState,
   FileSearchFilter,
   FileSearchPage,
   FileSearchStatus,
@@ -402,6 +403,14 @@ export const tauriApi = {
 
   fileSearchConfig(): Promise<FileSearchConfig> {
     return invoke<FileSearchConfig>('file_search_config');
+  },
+
+  fileSearchFeatureState(): Promise<FileSearchFeatureState> {
+    return invoke<FileSearchFeatureState>('file_search_feature_state');
+  },
+
+  setFileSearchEnabled(enabled: boolean): Promise<FileSearchFeatureState> {
+    return invoke<FileSearchFeatureState>('set_file_search_enabled', { enabled });
   },
 
   async startFileSearchIndex(rebuild = false): Promise<void> {

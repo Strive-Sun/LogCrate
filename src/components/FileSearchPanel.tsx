@@ -131,11 +131,7 @@ export function FileSearchPanel({
       .catch((reason) => active && setError(String(reason)));
     const unsubscribe = api.subscribeFileSearchStatus((next) => {
       setStatus(next);
-      setConfig((current) =>
-        current
-          ? { ...current, enabled: next.phase !== 'disabled', exclusions: next.exclusions }
-          : current,
-      );
+      setConfig((current) => (current ? { ...current, exclusions: next.exclusions } : current));
     });
     window.setTimeout(() => inputRef.current?.focus(), 0);
     return () => {

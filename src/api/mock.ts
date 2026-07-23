@@ -8,6 +8,7 @@ import type {
   DirectoryChangeBatch,
   FileRevision,
   FileSearchConfig,
+  FileSearchFeatureState,
   FileSearchFilter,
   FileSearchPage,
   FileSearchResult,
@@ -80,6 +81,10 @@ let mockSearchStatus: FileSearchStatus = {
     { root: 'C:\\', provider: 'windowsNtfs', phase: 'ready' },
     { root: 'D:\\', provider: 'folderScan', phase: 'ready' },
   ],
+};
+let mockSearchFeatureState: FileSearchFeatureState = {
+  currentEnabled: false,
+  nextLaunchEnabled: false,
 };
 const mockSearchSubscribers = new Set<(status: FileSearchStatus) => void>();
 
@@ -460,10 +465,20 @@ export const mockApi = {
 
   async fileSearchConfig(): Promise<FileSearchConfig> {
     return {
+      version: 1,
       enabled: mockSearchStatus.phase !== 'disabled',
       roots: mockSearchStatus.roots,
       exclusions: mockSearchStatus.exclusions,
     };
+  },
+
+  async fileSearchFeatureState(): Promise<FileSearchFeatureState> {
+    return mockSearchFeatureState;
+  },
+
+  async setFileSearchEnabled(enabled: boolean): Promise<FileSearchFeatureState> {
+    mockSearchFeatureState = { ...mockSearchFeatureState, nextLaunchEnabled: enabled };
+    return mockSearchFeatureState;
   },
 
   async startFileSearchIndex(_rebuild = false): Promise<void> {
