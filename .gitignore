@@ -8,6 +8,7 @@
 node_modules/
 dist/
 dist-ssr/
+.tauri-dev-dist/
 binaries/*.exe
 *.local
 .vite/

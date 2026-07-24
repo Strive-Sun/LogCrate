@@ -50,6 +50,48 @@
 
 继续在 WebView 可用前显示原生进度画面，不通过隐藏主窗口制造“快速启动”。交接由前端 `interactive-frame` 握手驱动；握手前保留原生画面，握手后一次性停止绘制并显示已完成首帧的 WebView，避免白屏和双重加载层长时间叠加。
 
+## Root Cause Analysis
+
+### 启动时间必须拆成三个互不等价的阶段
+
+开发环境中看到的“启动慢”可能来自三个不同阶段，必须分别判断：
+
+1. `cargo` 编译或链接：发生在 `Running target/debug/logcrate.exe` 之前。配置或嵌入资源变化后的一次性重编译不属于应用进程启动，但会增加开发命令的总等待时间。
+2. 原生应用启动：从 `process-start` 到 WebView 创建完成。本次实测通常低于 1 秒，原生首帧约 50–130 ms，因此 Rust 初始化、窗口创建和原生进度渲染不是二十多秒延迟的来源。
+3. WebView 页面导航：从 `navigation-started` 到 `navigation-finished`。异常样本中该阶段独占约 24–25 秒，React 挂载和 `interactive-frame` 只在导航结束后增加约 200 ms。
+
+只有第三阶段与本次稳定复现的二十多秒问题对应。watcher、搜索、托盘和缓存维护均由 `interactive-frame` 门控，在主页面可交互后才调度，因此它们也不是该问题的原因。
+
+### 根因是 Vite 开发模式的冷转换与多模块请求链
+
+普通 `vite` 开发服务器直接向 WebView 提供未打包的 ES 模块。首次加载时，WebView 必须按依赖顺序请求入口、Vite 客户端、React 组件、工具模块和预构建依赖；Vite 同时进行按需转换和依赖优化。在问题机器上，这条冷启动链存在极大的阶段性延迟。
+
+临时加入 Vite 逐请求计时后，在同一环境稳定复现了以下数据：
+
+| 请求或阶段 | 耗时/到达时间 |
+| --- | ---: |
+| `/index.html` 响应 | 3686.5 ms |
+| `/@vite/client` 响应 | 1904.9 ms |
+| `/src/main.tsx` 响应 | 10079.6 ms |
+| 后续依赖开始集中返回 | 启动后约 28 秒 |
+| `navigation-finished` | 29269.7 ms |
+| `interactive-frame` | 29481.0 ms |
+
+运行一段时间后用 `curl` 测得的 1–6 ms 响应属于已转换、已缓存状态，不能代表 WebView 首次导航的冷路径；早期据此把问题归因于代理或 WebView2 环境是不充分的。固定 `127.0.0.1`、让 WebView 从创建开始保持可见、绕过代理以及禁止 WebView2 后台组件请求可以减少环境波动，但都不能稳定消除 Vite 冷转换链，因此不是最终根因修复。
+
+### 最终方案：默认开发启动加载预构建静态 bundle
+
+默认 `npm run tauri:dev` 使用以下路径：
+
+1. `vite build --outDir .tauri-dev-dist` 将前端构建为少量静态资源；
+2. `vite preview` 在 `127.0.0.1:1420` 提供该目录；
+3. Tauri 等待静态服务就绪后启动 Rust 应用；
+4. WebView 只加载 HTML、单一 JavaScript bundle 和 CSS，不再执行几十个 ES 模块的冷请求瀑布。
+
+`.tauri-dev-dist` 与正式发布使用的 `dist` 隔离，并同时加入 Git 和 ESLint 忽略列表。这样每次开发前端构建不会改变 Tauri 的正式嵌入资源，也就不会无故触发 Rust 重新链接。需要前端热更新时仍可显式运行 `npm run tauri:dev:hmr`，接受 Vite 冷转换可能较慢的取舍。
+
+最终日常增量启动实测为：前端静态 bundle 构建 1.02 秒、Cargo 增量检查 1.11 秒、应用进程到主页面可交互 874.2 ms，命令执行到主页面合计约 3 秒；其中页面导航仅 45.0 ms。配置首次变化导致的一次性 Rust 重编译应单独记录，不能与稳定增量启动混为一谈。
+
 ## Risks / Trade-offs
 
 - 三秒目标受 WebView 运行时、杀毒软件和设备性能影响 → 固定发布构建、参考设备和十次样本规则，同时保留五秒退化上限与冷启动记录。

@@ -7,7 +7,7 @@ const typedFiles = ['src/**/*.{ts,tsx}', 'vite.config.ts'];
 
 export default [
   {
-    ignores: ['dist/**', 'node_modules/**', 'src-tauri/**', 'openspec/**'],
+    ignores: ['dist/**', '.tauri-dev-dist/**', 'node_modules/**', 'src-tauri/**', 'openspec/**'],
   },
   {
     ...js.configs.recommended,

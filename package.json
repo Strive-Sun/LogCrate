@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:static": "vite build --outDir .tauri-dev-dist && vite preview --host 127.0.0.1 --port 1420 --strictPort --outDir .tauri-dev-dist",
     "build": "tsc && vite build",
     "test": "tsx --test src/util/*.test.ts src/components/*.test.tsx",
     "lint": "eslint . --max-warnings 0",
@@ -14,7 +15,8 @@
     "startup:bench": "node scripts/startup-benchmark.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev",
+    "tauri:dev": "tauri dev --config src-tauri/tauri.dev-static.conf.json",
+    "tauri:dev:hmr": "tauri dev",
     "tauri:build": "tauri build"
   },
   "dependencies": {

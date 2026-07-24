@@ -1134,11 +1134,16 @@ pub fn run() {
                             let _ = window.set_resizable(true);
                         },
                     );
-                    let result = webview_window.add_child(
-                        webview_builder,
-                        PhysicalPosition::new(-1, -1),
-                        PhysicalSize::new(1, 1),
-                    );
+                    #[cfg(windows)]
+                    let webview_builder = webview_builder.transparent(true);
+                    #[cfg(windows)]
+                    let (position, size) = match webview_window.inner_size() {
+                        Ok(size) => (PhysicalPosition::new(0, 0), size),
+                        Err(_) => (PhysicalPosition::new(0, 0), PhysicalSize::new(1200, 760)),
+                    };
+                    #[cfg(not(windows))]
+                    let (position, size) = (PhysicalPosition::new(-1, -1), PhysicalSize::new(1, 1));
+                    let result = webview_window.add_child(webview_builder, position, size);
                     webview_trace.mark(if result.is_ok() {
                         "webview-created"
                     } else {

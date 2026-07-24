@@ -5,7 +5,7 @@
   "identifier": "com.logcrate.app",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://127.0.0.1:1420",
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
   },
@@ -18,7 +18,8 @@
         "width": 1200,
         "height": 760,
         "minWidth": 800,
-        "minHeight": 500
+        "minHeight": 500,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --no-proxy-server --disable-background-networking --disable-component-update"
       }
     ],
     "security": {

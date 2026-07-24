@@ -12,24 +12,32 @@
         position: fixed;
         inset: 0;
         z-index: 9999;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 18px;
         background: #ffffff;
-        font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
         transition: opacity 0.12s ease;
       }
       #boot-loader .boot-brand {
-        font-size: 20px;
-        font-weight: 600;
-        letter-spacing: 0.5px;
+        position: absolute;
+        top: calc(50% - 40px);
+        left: 50%;
+        width: 141px;
+        height: 21px;
+        transform: translateX(-50%);
         color: #1c1c20;
       }
+      #boot-loader .boot-brand svg {
+        display: block;
+        width: 100%;
+        height: 100%;
+        fill: currentColor;
+        shape-rendering: crispEdges;
+      }
       #boot-loader .boot-track {
+        position: absolute;
+        top: calc(50% + 20px);
+        left: 50%;
         width: 220px;
         height: 4px;
+        transform: translateX(-50%);
         border-radius: 2px;
         background: #e6e6ea;
         overflow: hidden;
@@ -72,7 +80,14 @@
     <div id="root"></div>
     <!-- 置于 #root 外:React 挂载(清空 #root)不会移除它,由 main.tsx 显式控制完成动画与移除 -->
     <div id="boot-loader" role="status" aria-label="Loading">
-      <div class="boot-brand">LogCrate</div>
+      <!-- 与原生启动页共用同一套 5×7 点阵字形，避免 WebView 接管时字体跳变。 -->
+      <div class="boot-brand" aria-hidden="true">
+        <svg viewBox="0 0 47 7" preserveAspectRatio="none">
+          <path
+            d="M0 0h1v1H0zM0 1h1v1H0zM0 2h1v1H0zM0 3h1v1H0zM0 4h1v1H0zM0 5h1v1H0zM0 6h1v1H0zM1 6h1v1H1zM2 6h1v1H2zM3 6h1v1H3zM4 6h1v1H4zM7 1h1v1H7zM8 1h1v1H8zM9 1h1v1H9zM6 2h1v1H6zM10 2h1v1h-1zM6 3h1v1H6zM10 3h1v1h-1zM6 4h1v1H6zM10 4h1v1h-1zM6 5h1v1H6zM10 5h1v1h-1zM7 6h1v1H7zM8 6h1v1H8zM9 6h1v1H9zM13 1h1v1h-1zM14 1h1v1h-1zM15 1h1v1h-1zM12 2h1v1h-1zM16 2h1v1h-1zM13 3h1v1h-1zM14 3h1v1h-1zM15 3h1v1h-1zM16 3h1v1h-1zM16 4h1v1h-1zM12 5h1v1h-1zM16 5h1v1h-1zM13 6h1v1h-1zM14 6h1v1h-1zM15 6h1v1h-1zM19 0h1v1h-1zM20 0h1v1h-1zM21 0h1v1h-1zM22 0h1v1h-1zM18 1h1v1h-1zM18 2h1v1h-1zM18 3h1v1h-1zM18 4h1v1h-1zM18 5h1v1h-1zM19 6h1v1h-1zM20 6h1v1h-1zM21 6h1v1h-1zM22 6h1v1h-1zM24 1h1v1h-1zM26 1h1v1h-1zM27 1h1v1h-1zM24 2h1v1h-1zM25 2h1v1h-1zM28 2h1v1h-1zM24 3h1v1h-1zM24 4h1v1h-1zM24 5h1v1h-1zM24 6h1v1h-1zM31 1h1v1h-1zM32 1h1v1h-1zM33 1h1v1h-1zM34 2h1v1h-1zM31 3h1v1h-1zM32 3h1v1h-1zM33 3h1v1h-1zM34 3h1v1h-1zM30 4h1v1h-1zM34 4h1v1h-1zM30 5h1v1h-1zM33 5h1v1h-1zM34 5h1v1h-1zM31 6h1v1h-1zM32 6h1v1h-1zM34 6h1v1h-1zM38 0h1v1h-1zM38 1h1v1h-1zM36 2h1v1h-1zM37 2h1v1h-1zM38 2h1v1h-1zM39 2h1v1h-1zM40 2h1v1h-1zM38 3h1v1h-1zM38 4h1v1h-1zM38 5h1v1h-1zM39 6h1v1h-1zM40 6h1v1h-1zM43 1h1v1h-1zM44 1h1v1h-1zM45 1h1v1h-1zM42 2h1v1h-1zM46 2h1v1h-1zM42 3h1v1h-1zM43 3h1v1h-1zM44 3h1v1h-1zM45 3h1v1h-1zM46 3h1v1h-1zM42 4h1v1h-1zM42 5h1v1h-1zM43 6h1v1h-1zM44 6h1v1h-1zM45 6h1v1h-1zM46 6h1v1h-1z"
+          />
+        </svg>
+      </div>
       <div class="boot-track"><div class="boot-bar"></div></div>
     </div>
     <script type="module" src="/src/main.tsx"></script>
