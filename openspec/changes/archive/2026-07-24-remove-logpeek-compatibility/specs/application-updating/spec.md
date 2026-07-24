@@ -2,7 +2,7 @@
 
 ### Requirement: 正式版本与签名发布
 
-系统 SHALL 仅通过固定的官方 LogCrate GitHub Releases updater endpoint 获取最新正式版本。新构建 MUST 使用 `Strive-Sun/LogCrate` 规范路径。Release 流程 MUST 为 Windows 与 macOS 更新包生成签名和更新清单，且签名私钥 MUST NOT 存储在仓库或应用包内。
+系统 SHALL 仅通过固定的官方 LogCrate GitHub Releases updater endpoint 获取最新正式版本。新构建 MUST 使用 `Strive-Sun/LogCrate` 规范路径，且 MUST NOT 为未发布的旧品牌客户端保留 updater endpoint 兼容要求。Release 流程 MUST 为 Windows 与 macOS 更新包生成签名和更新清单，且签名私钥 MUST NOT 存储在仓库或应用包内。
 
 #### Scenario: 正式版本可更新
 

@@ -31,16 +31,16 @@ TBD - created by archiving change rename-product-to-logcrate. Update Purpose aft
 - **WHEN** 系统在任务栏、托盘或文件列表以 16px–32px 显示图标
 - **THEN** 图标仍能辨认出箱体和内容线，不出现无法区分的细碎文字或模糊元素
 
-### Requirement: 改名升级兼容
+### Requirement: 开发阶段品牌标识统一
 
-系统 MUST 在品牌与仓库改名时保留已有 bundle identifier、用户配置与本地存储键、updater 签名信任和正式更新源，使已安装 LogPeek/LogCrate 旧版本的用户能够原位升级。新构建 SHALL 使用 `Strive-Sun/LogCrate` 作为规范仓库地址；旧仓库路径仅用于已发布客户端的重定向兼容。迁移 MUST NOT 清空监控目录、筛选、语言、布局或其它持久化设置。
+系统 SHALL 在首次正式发布前统一使用 LogCrate 品牌标识。Tauri bundle identifier MUST 为 `com.logcrate.app`，Cargo package、Rust library、npm package、缓存目录、本地存储键、内部 ID 及运行时临时文件前缀 MUST 使用 `logcrate`，且新构建 MUST NOT 为未发布的 LogPeek 开发版本保留配置迁移逻辑。
 
-#### Scenario: 从旧品牌升级
+#### Scenario: 编译应用
 
-- **WHEN** 已安装 LogPeek 或使用旧仓库 endpoint 的 LogCrate 用户通过内置 updater 安装新版本
-- **THEN** 系统将现有应用原位升级，仅保留一个应用实例，并继续使用原监控配置和用户设置
+- **WHEN** 开发者编译桌面应用或索引服务
+- **THEN** Cargo 和 npm 构建输出使用 `logcrate`，不再显示 `logpeek`
 
-#### Scenario: 新品牌继续检查更新
+#### Scenario: 首次启动开发版本
 
-- **WHEN** 新构建的 LogCrate 启动自动检查或用户手动检查更新
-- **THEN** 系统继续信任原 updater 公钥并直接从 `Strive-Sun/LogCrate` 的正式 Release endpoint 获取签名更新
+- **WHEN** 用户启动尚未正式发布的 LogCrate 构建
+- **THEN** 应用使用 `com.logcrate.app`、`logcrate-cache` 和 `logcrate` 本地存储键创建全新的开发期数据
