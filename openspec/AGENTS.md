@@ -47,14 +47,17 @@ Skip proposal for:
 4. Run `openspec validate <id> --strict` and resolve any issues before sharing the proposal.
 
 ### Stage 2: Implementing Changes
-Track these steps as TODOs and complete them one by one.
-1. **Read proposal.md** - Understand what's being built
-2. **Read design.md** (if exists) - Review technical decisions
-3. **Read tasks.md** - Get implementation checklist
-4. **Implement tasks sequentially** - Complete in order
-5. **Confirm completion** - Ensure every item in `tasks.md` is finished before updating statuses
-6. **Update checklist** - After all work is done, set every task to `- [x]` so the list reflects reality
-7. **Approval gate** - Do not start implementation until the proposal is reviewed and approved
+For LogCrate, `规则手册/Step-3/执行规则.md` and `规则手册/Step-4/验证规则.md` define the authoritative task lifecycle. Track these steps as TODOs and complete them one smallest numbered leaf task at a time.
+
+1. **Approval gate** - Do not start implementation until the proposal is reviewed and approved
+2. **Read proposal.md** - Understand what's being built
+3. **Read design.md** (if exists) - Review technical decisions
+4. **Read tasks.md** - Identify the smallest numbered leaf task whose dependencies are complete
+5. **Implement one task** - Implement only that task; do not start or mix in later tasks
+6. **Validate and hand off** - Complete the task-specific tests, validation, evidence, and handoff required by Step-4; a failure leaves the task incomplete
+7. **Update one checklist item** - Mark only the validated current task as `- [x]`; do not defer checklist updates or batch-check tasks at the end
+8. **Commit one task** - Create the precise, independent local commit required by Step-3 and verify its scope
+9. **Continue sequentially** - Start the next task only after the current task's commit succeeds
 
 ### Stage 3: Archiving Changes
 After deployment, create separate PR to:
