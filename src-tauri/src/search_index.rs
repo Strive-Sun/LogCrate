@@ -72,7 +72,10 @@ impl SearchIndex {
         let writer = index.writer_with_num_threads(2, 140_000_000)?;
         let reader = index
             .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            // Every write path calls `commit`, which reloads this reader synchronously.
+            // A delayed watcher can otherwise start a second reload after a large staging
+            // commit and keep Windows mmap handles alive while the directory is activated.
+            .reload_policy(ReloadPolicy::Manual)
             .try_into()?;
         let mut query_parser = QueryParser::for_index(&index, vec![name_field]);
         query_parser.set_field_boost(name_field, 4.0);
@@ -604,6 +607,33 @@ mod tests {
         assert_eq!(index.num_docs(), 4);
         drop(index);
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn committed_index_releases_directory_for_snapshot_switch() {
+        let staging = test_dir();
+        let active = staging.with_extension("active");
+        let mut index = SearchIndex::open(&staging).unwrap();
+        index
+            .add_batch(&[SearchIndexEntry {
+                path: "C:\\logs\\ready.log".into(),
+                name: "ready.log".into(),
+                is_log: true,
+                is_archive: false,
+            }])
+            .unwrap();
+        index.commit().unwrap();
+        assert_eq!(index.search(&["ready".into()], "log", 0, 10).unwrap().1, 1);
+
+        drop(index);
+        fs::rename(&staging, &active).unwrap();
+        let reopened = SearchIndex::open(&active).unwrap();
+        assert_eq!(
+            reopened.search(&["ready".into()], "log", 0, 10).unwrap().1,
+            1
+        );
+        drop(reopened);
+        fs::remove_dir_all(active).unwrap();
     }
 
     #[test]
