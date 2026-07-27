@@ -2,6 +2,10 @@
 
 Instructions for AI coding assistants using OpenSpec for spec-driven development.
 
+## Scope
+
+These instructions apply only after `规则手册/Step-0/OPENSPEC.md` determines that a LogCrate task requires OpenSpec. OpenSpec is primarily for authoring or implementing requirement and change documents, new capabilities, public behavior changes, breaking or architectural changes, significant performance/security work, and broad cross-module fixes. Ordinary questions, read-only investigations, routine documentation edits, and localized simple fixes do not load this file or other OpenSpec context; they continue directly with the remaining LogCrate rule-manual steps.
+
 ## TL;DR Quick Checklist
 
 - Search existing work: `openspec spec list --long`, `openspec list` (use `rg` only for full-text search)
@@ -66,7 +70,7 @@ After deployment, create separate PR to:
 - Use `openspec archive <change-id> --skip-specs --yes` for tooling-only changes (always pass the change ID explicitly)
 - Run `openspec validate --all --strict` to confirm the archived change passes checks
 
-## Before Any Task
+## Before Any OpenSpec Task
 
 **Context Checklist:**
 - [ ] Read relevant specs in `specs/[capability]/spec.md`
