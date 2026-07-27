@@ -19,6 +19,8 @@ These instructions apply only after `规则手册/Step-0/OPENSPEC.md` determines
 ## Three-Stage Workflow
 
 ### Stage 1: Creating Changes
+Loading OpenSpec context and creating a proposal are separate decisions. A broad fix that restores current spec behavior reads the relevant specs and pending changes to confirm scope and conflicts, but it does not require a new proposal unless the intended behavior or another proposal trigger changes.
+
 Create proposal when you need to:
 - Add features or functionality
 - Make breaking changes (API, schema)
@@ -38,11 +40,12 @@ Loose matching guidance:
 - With one of: `create`, `plan`, `make`, `start`, `help`
 
 Skip proposal for:
-- Bug fixes (restore intended behavior)
+- Bug fixes that restore intended behavior; localized fixes proceed directly, while broad fixes first review relevant OpenSpec context
 - Typos, formatting, comments
-- Dependency updates (non-breaking)
-- Configuration changes
+- Non-breaking dependency or configuration changes only when they do not alter public behavior or compatibility, APIs or schemas, security/privacy/permission boundaries, persistent data or migration/recovery semantics, architecture, cross-platform behavior, or build/install/update/release artifacts
 - Tests for existing behavior
+
+Do not use the changed file type as an exemption. A dependency or configuration change that affects any boundary above, or introduces a new capability, public behavior, architecture, significant performance, or security decision, requires a proposal.
 
 **Workflow**
 1. Review `openspec/project.md`, `openspec list`, and `openspec list --specs` to understand current context.
