@@ -77,16 +77,16 @@ Do not use the changed file type as an exemption. A dependency or configuration 
 - Implementation code, additional tests, validation evidence, and task checkbox updates do not require reapproval unless they change the approved semantics or scope.
 
 ### Stage 2: Implementing Changes
-For LogCrate, `规则手册/Step-3/执行规则.md` and `规则手册/Step-4/验证规则.md` define the authoritative task lifecycle. Track these steps as TODOs and complete them one smallest numbered leaf task at a time.
+For LogCrate, `规则手册/Step-2/工作约束.md`, `规则手册/Step-4/执行规则.md`, and `规则手册/Step-5/验证规则.md` define the authoritative work-state and task lifecycle. Track these steps as TODOs and complete them one smallest numbered leaf task at a time.
 
 1. **Approval gate** - Verify `approval.md` is `approved`, names a maintainer source, and references the current reviewed proposal revision; otherwise do not implement
 2. **Read proposal.md** - Understand what's being built
 3. **Read design.md** (if exists) - Review technical decisions
 4. **Read tasks.md** - Identify the smallest numbered leaf task whose dependencies are complete
 5. **Implement one task** - Implement only that task; do not start or mix in later tasks
-6. **Validate and hand off** - Complete the task-specific tests, validation, evidence, and handoff required by Step-4; a failure leaves the task incomplete
+6. **Validate and hand off** - Complete the task-specific tests, validation, evidence, and handoff required by Step-5; a failure leaves the task incomplete
 7. **Update one checklist item** - Mark only the validated current task as `- [x]`; do not defer checklist updates or batch-check tasks at the end
-8. **Commit one task** - Create the precise, independent local commit required by Step-3 and verify its scope
+8. **Commit one task** - Create the precise, independent local commit required by Step-4 and verify its scope
 9. **Continue sequentially** - Start the next task only after the current task's commit succeeds
 
 ### Stage 3: Archiving Changes

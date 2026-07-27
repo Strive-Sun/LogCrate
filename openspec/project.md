@@ -63,7 +63,7 @@ LogCrate 是一款免解压的跨平台归档日志阅读器，面向"下载日�
 - 主分支: `main`
 - 功能分支: `feat/`、`fix/`、`refactor/` 前缀
 - OpenSpec 驱动: 新能力先创建 change 提案并通过审批，再实施
-- 提交前运行 `cargo fmt` + `cargo clippy` + 前端 lint
+- 提交前验证唯一以 `规则手册/Step-5/验证规则.md` 为准；本文件中的命令和技术栈约定只是工具入口，不构成每次提交的全量门禁。文档、前端、Rust 单侧或跨边界改动分别按实际影响选择对应等级与检查。
 
 ## Domain Context
 

@@ -4,9 +4,10 @@ Before starting or continuing any task, AI assistants MUST read these documents 
 
 0. `@/规则手册/Step-0/OPENSPEC.md` — determine whether the request requires the OpenSpec workflow.
 1. `@/规则手册/Step-1/项目配置.md` — establish LogCrate architecture, design context, commands, and repository map.
-2. `@/规则手册/Step-2/工作状态.md` — check unfinished work, repository state, and recovery context.
-3. `@/规则手册/Step-3/执行规则.md` — apply LogCrate task sequencing, implementation, and recovery rules.
-4. `@/规则手册/Step-4/验证规则.md` — apply testing, boundary, gate, failure-handling, and evidence rules.
+2. `@/规则手册/Step-2/工作约束.md` — determine when work state must be persisted and how it closes with validation and Git.
+3. `@/规则手册/Step-3/工作状态.md` — check unfinished work, repository state, and recovery context.
+4. `@/规则手册/Step-4/执行规则.md` — apply LogCrate task sequencing, implementation, and recovery rules.
+5. `@/规则手册/Step-5/验证规则.md` — apply testing, boundary, gate, failure-handling, and evidence rules.
 
 All files in `@/规则手册/` are specific to LogCrate. If these instructions conflict with repository facts or cannot be reconciled, stop and ask the maintainer before implementation.
 
