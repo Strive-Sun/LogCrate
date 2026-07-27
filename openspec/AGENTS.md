@@ -61,7 +61,7 @@ After deployment, create separate PR to:
 - Move `changes/[name]/` → `changes/archive/YYYY-MM-DD-[name]/`
 - Update `specs/` if capabilities changed
 - Use `openspec archive <change-id> --skip-specs --yes` for tooling-only changes (always pass the change ID explicitly)
-- Run `openspec validate --strict` to confirm the archived change passes checks
+- Run `openspec validate --all --strict` to confirm the archived change passes checks
 
 ## Before Any Task
 
@@ -449,7 +449,7 @@ Only add complexity with:
 ```bash
 openspec list              # What's in progress?
 openspec show [item]       # View details
-openspec validate --strict # Is it correct?
+openspec validate --all --strict # Is everything valid?
 openspec archive <change-id> [--yes|-y]  # Mark complete (add --yes for automation)
 ```
 
