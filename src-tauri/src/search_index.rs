@@ -262,6 +262,13 @@ impl SearchIndex {
         Ok(())
     }
 
+    pub fn close(self) -> anyhow::Result<()> {
+        let Self { reader, writer, .. } = self;
+        drop(reader);
+        writer.wait_merging_threads()?;
+        Ok(())
+    }
+
     pub fn search(
         &self,
         terms: &[String],
@@ -610,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_index_releases_directory_for_snapshot_switch() {
+    fn closed_index_releases_directory_for_snapshot_switch() {
         let staging = test_dir();
         let active = staging.with_extension("active");
         let mut index = SearchIndex::open(&staging).unwrap();
@@ -625,7 +632,7 @@ mod tests {
         index.commit().unwrap();
         assert_eq!(index.search(&["ready".into()], "log", 0, 10).unwrap().1, 1);
 
-        drop(index);
+        index.close().unwrap();
         fs::rename(&staging, &active).unwrap();
         let reopened = SearchIndex::open(&active).unwrap();
         assert_eq!(
@@ -633,6 +640,43 @@ mod tests {
             1
         );
         drop(reopened);
+        fs::remove_dir_all(active).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires LOGCRATE_RUNTIME_SEARCH_SWITCH_INDEX pointing to a disposable index clone"]
+    fn runtime_large_index_waits_for_merges_before_snapshot_switch() {
+        let staging = std::env::var_os("LOGCRATE_RUNTIME_SEARCH_SWITCH_INDEX")
+            .map(std::path::PathBuf::from)
+            .expect("LOGCRATE_RUNTIME_SEARCH_SWITCH_INDEX is required");
+        let active = staging.with_extension("active");
+        assert!(staging.is_dir());
+        assert!(!active.exists());
+
+        let mut index = SearchIndex::open(&staging).unwrap();
+        let documents_before = index.num_docs();
+        index
+            .upsert_batch(&[SearchIndexEntry {
+                path: "C:\\__logcrate_switch_probe__\\ready.log".into(),
+                name: "ready.log".into(),
+                is_log: true,
+                is_archive: false,
+            }])
+            .unwrap();
+        index.commit().unwrap();
+        index.close().unwrap();
+
+        fs::rename(&staging, &active).unwrap();
+        let reopened = SearchIndex::open(&active).unwrap();
+        assert!(reopened.num_docs() >= documents_before);
+        assert_eq!(
+            reopened
+                .search(&["__logcrate_switch_probe__".into()], "log", 0, 10)
+                .unwrap()
+                .1,
+            1
+        );
+        reopened.close().unwrap();
         fs::remove_dir_all(active).unwrap();
     }
 

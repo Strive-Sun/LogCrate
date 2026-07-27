@@ -1038,7 +1038,7 @@ impl FileSearchManager {
         if self.query_index_staged.load(Ordering::Acquire) {
             if let Some(mut staging) = self.staged_query_index.lock().unwrap().take() {
                 staging.finish_bulk()?;
-                drop(staging);
+                staging.close()?;
             }
             self.activate_staged_query_index()?;
         } else if let Some(index) = self.query_index.lock().unwrap().as_mut() {
@@ -1081,7 +1081,16 @@ impl FileSearchManager {
     fn activate_staged_query_index(&self) -> anyhow::Result<()> {
         let staging = query_index_staging_path(&self.query_index_path);
         let previous = query_index_previous_path(&self.query_index_path);
-        self.query_index.lock().unwrap().take();
+        let active_index = self.query_index.lock().unwrap().take();
+        if let Some(index) = active_index {
+            if let Err(error) = index.close() {
+                *self.query_index.lock().unwrap() = SearchIndex::open(&self.query_index_path).ok();
+                return Err(anyhow::anyhow!(
+                    "query-index stage=close-active-before-switch source={} target=<none>: {error}",
+                    self.query_index_path.display()
+                ));
+            }
+        }
         if previous.exists() {
             retry_query_index_fs("switch-remove-previous", &previous, None, || {
                 fs::remove_dir_all(&previous)
