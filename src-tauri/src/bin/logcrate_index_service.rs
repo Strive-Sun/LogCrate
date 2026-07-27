@@ -162,6 +162,24 @@ mod service {
             | ServiceAccess::from_bits_truncate(0x0004_0000);
         let service = match manager.open_service(SERVICE_NAME, access) {
             Ok(service) => {
+                let state = service.query_status()?.current_state;
+                if state != ServiceState::Stopped {
+                    if state != ServiceState::StopPending {
+                        service.stop()?;
+                    }
+                    for _ in 0..100 {
+                        if service.query_status()?.current_state == ServiceState::Stopped {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    if service.query_status()?.current_state != ServiceState::Stopped {
+                        return Err(windows_service::Error::Winapi(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "等待旧版 LogCrate Index Service 停止超时",
+                        )));
+                    }
+                }
                 service.change_config(&info)?;
                 service
             }
@@ -171,9 +189,7 @@ mod service {
             "为 LogCrate 只读枚举本机 NTFS MFT/USN 文件名元数据；不读取文件内容。",
         )?;
         set_service_dacl(&service)?;
-        if service.query_status()?.current_state == ServiceState::Stopped {
-            service.start::<&str>(&[])?;
-        }
+        service.start::<&str>(&[])?;
         Ok(())
     }
 

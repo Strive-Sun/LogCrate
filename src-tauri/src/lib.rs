@@ -535,7 +535,10 @@ async fn pause_file_search_index(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let state = state.ready().await;
-    ready_search(state).await?.pause(&app);
+    let search = ready_search(state).await?;
+    tauri::async_runtime::spawn_blocking(move || search.pause(&app))
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 

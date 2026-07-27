@@ -20,7 +20,6 @@ use tantivy::schema::{
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 use zhconv::{zhconv, Variant};
 
-const BULK_COMMIT_INTERVAL: Duration = Duration::from_secs(5);
 const INCREMENTAL_COMMIT_INTERVAL: Duration = Duration::from_secs(2);
 const COMMIT_DOCUMENTS: usize = 100_000;
 const MAX_QUERY_CANDIDATES: usize = 10_000;
@@ -114,8 +113,59 @@ impl SearchIndex {
     }
 
     pub fn add_batch(&mut self, entries: &[SearchIndexEntry]) -> anyhow::Result<()> {
-        for entry in entries {
-            self.add_entry(entry)?;
+        if self.bulk_indexing && entries.len() >= 1_000 {
+            let worker_count = std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1)
+                .min(4);
+            let chunk_size = entries.len().saturating_add(worker_count - 1) / worker_count;
+            let writer = &self.writer;
+            let name_field = self.name_field;
+            let original_name_field = self.original_name_field;
+            let path_key_field = self.path_key_field;
+            let path_field = self.path_field;
+            let is_log_field = self.is_log_field;
+            let is_archive_field = self.is_archive_field;
+            let ext_field = self.ext_field;
+            std::thread::scope(|scope| -> anyhow::Result<()> {
+                let handles = entries
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        scope.spawn(move || -> anyhow::Result<()> {
+                            for entry in chunk.iter().filter(|entry| entry.name.is_ascii()) {
+                                add_document(
+                                    writer,
+                                    SearchFields {
+                                        name: name_field,
+                                        original_name: original_name_field,
+                                        path_key: path_key_field,
+                                        path: path_field,
+                                        is_log: is_log_field,
+                                        is_archive: is_archive_field,
+                                        ext: ext_field,
+                                    },
+                                    entry,
+                                    ascii_entry_tokens(entry),
+                                )?;
+                            }
+                            Ok(())
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                for handle in handles {
+                    handle
+                        .join()
+                        .map_err(|_| anyhow::anyhow!("search document worker panicked"))??;
+                }
+                Ok(())
+            })?;
+            for entry in entries.iter().filter(|entry| !entry.name.is_ascii()) {
+                self.add_entry(entry)?;
+            }
+        } else {
+            for entry in entries {
+                self.add_entry(entry)?;
+            }
         }
         self.after_documents(entries.len())
     }
@@ -157,22 +207,24 @@ impl SearchIndex {
     }
 
     fn add_entry(&mut self, entry: &SearchIndexEntry) -> anyhow::Result<()> {
-        let tokenized_name = self.tokenize(&entry.name);
-        let extension = Path::new(&entry.name)
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or_default()
-            .to_lowercase();
-        self.writer.add_document(doc!(
-            self.name_field => tokenized_name,
-            self.original_name_field => entry.name.clone(),
-            self.path_key_field => path_key(&entry.path).into_bytes(),
-            self.path_field => entry.path.as_bytes().to_vec(),
-            self.is_log_field => bool_bytes(entry.is_log).to_vec(),
-            self.is_archive_field => bool_bytes(entry.is_archive).to_vec(),
-            self.ext_field => extension,
-        ))?;
-        Ok(())
+        add_document(
+            &self.writer,
+            SearchFields {
+                name: self.name_field,
+                original_name: self.original_name_field,
+                path_key: self.path_key_field,
+                path: self.path_field,
+                is_log: self.is_log_field,
+                is_archive: self.is_archive_field,
+                ext: self.ext_field,
+            },
+            entry,
+            format!(
+                "{} {}",
+                self.tokenize(&entry.name),
+                self.tokenize(&normalize_search_text(&entry.path))
+            ),
+        )
     }
 
     fn delete_path(&mut self, path: &str) {
@@ -184,12 +236,16 @@ impl SearchIndex {
 
     fn after_documents(&mut self, documents: usize) -> anyhow::Result<()> {
         self.pending_documents = self.pending_documents.saturating_add(documents);
-        let interval = if self.bulk_indexing {
-            BULK_COMMIT_INTERVAL
-        } else {
-            INCREMENTAL_COMMIT_INTERVAL
-        };
-        if self.pending_documents >= COMMIT_DOCUMENTS || self.last_commit.elapsed() >= interval {
+        // A bulk rebuild is written into an isolated staging index and cannot
+        // become queryable before finish_bulk swaps it into place. Committing
+        // every batch only creates many small segments and repeatedly merges
+        // them while providing no partial-result benefit.
+        if self.bulk_indexing {
+            return Ok(());
+        }
+        if self.pending_documents >= COMMIT_DOCUMENTS
+            || self.last_commit.elapsed() >= INCREMENTAL_COMMIT_INTERVAL
+        {
             self.commit()?;
         }
         Ok(())
@@ -309,9 +365,13 @@ impl SearchIndex {
     }
 
     fn search_tokenize(&self, value: &str) -> String {
-        let value = value.replace(['-', '+', ',', '.', ':', '/', '\\', '_'], " ");
+        let value = normalize_search_text(value);
         if value.is_ascii() {
-            return ascii_tokenize(&value);
+            return value
+                .split_whitespace()
+                .map(ascii_tokenize)
+                .collect::<Vec<_>>()
+                .join(" ");
         }
         let simplified = zhconv(&value, Variant::ZhHans);
         let mut tokens = self
@@ -352,6 +412,52 @@ impl SearchIndex {
         tokens.insert(simplified);
         tokens.into_iter().collect::<Vec<_>>().join(" ")
     }
+}
+
+fn normalize_search_text(value: &str) -> String {
+    value.replace(['-', '+', ',', '.', ':', '/', '\\', '_'], " ")
+}
+
+fn ascii_entry_tokens(entry: &SearchIndexEntry) -> String {
+    format!(
+        "{} {}",
+        ascii_tokenize(&entry.name),
+        ascii_tokenize(&normalize_search_text(&entry.path))
+    )
+}
+
+#[derive(Clone, Copy)]
+struct SearchFields {
+    name: Field,
+    original_name: Field,
+    path_key: Field,
+    path: Field,
+    is_log: Field,
+    is_archive: Field,
+    ext: Field,
+}
+
+fn add_document(
+    writer: &IndexWriter,
+    fields: SearchFields,
+    entry: &SearchIndexEntry,
+    tokenized_name: String,
+) -> anyhow::Result<()> {
+    let extension = Path::new(&entry.name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    writer.add_document(doc!(
+        fields.name => tokenized_name,
+        fields.original_name => entry.name.clone(),
+        fields.path_key => path_key(&entry.path).into_bytes(),
+        fields.path => entry.path.as_bytes().to_vec(),
+        fields.is_log => bool_bytes(entry.is_log).to_vec(),
+        fields.is_archive => bool_bytes(entry.is_archive).to_vec(),
+        fields.ext => extension,
+    ))?;
+    Ok(())
 }
 
 fn ascii_tokenize(value: &str) -> String {
@@ -465,6 +571,19 @@ mod tests {
         let (items, _) = index.search(&["debug.log".into()], "", 0, 20).unwrap();
         assert_eq!(items[0].path, "C:\\logs\\debug.log");
         assert!(items.iter().all(|item| item.name != "log.h"));
+        for query in [
+            "work",
+            "datapatchcontroller",
+            "D:\\work\\DataPatchController.log",
+        ] {
+            let (items, _) = index.search(&[query.into()], "log", 0, 20).unwrap();
+            assert!(!items.is_empty(), "path query returned no results: {query}");
+            assert_eq!(items[0].path, "D:\\work\\DataPatchController.log");
+        }
+        let (items, _) = index.search(&["d".into()], "log", 0, 20).unwrap();
+        assert!(items
+            .iter()
+            .any(|item| item.path == "D:\\work\\DataPatchController.log"));
 
         index
             .upsert_batch(&[SearchIndexEntry {
@@ -475,11 +594,10 @@ mod tests {
             }])
             .unwrap();
         index.commit().unwrap();
-        assert!(index
+        let (items, _) = index
             .search(&["datapatchcontroller".into()], "", 0, 20)
-            .unwrap()
-            .0
-            .is_empty());
+            .unwrap();
+        assert_eq!(items[0].name, "renamed.log");
         index
             .delete_paths(&["D:\\work\\DataPatchController.log".into()])
             .unwrap();
@@ -490,27 +608,27 @@ mod tests {
 
     #[test]
     #[ignore = "requires LOGCRATE_RUNTIME_SEARCH_INDEX pointing to a completed local index"]
-    fn runtime_index_returns_cross_volume_debug_log_results() {
+    fn runtime_index_returns_results_from_each_expected_volume() {
         let directory = std::env::var_os("LOGCRATE_RUNTIME_SEARCH_INDEX")
             .map(std::path::PathBuf::from)
             .expect("LOGCRATE_RUNTIME_SEARCH_INDEX is required");
         let index = SearchIndex::open(&directory).unwrap();
-        let (items, _) = index.search(&["debug.log".into()], "", 0, 200).unwrap();
-        let c_drive = items
-            .iter()
-            .filter(|item| item.path.starts_with("C:\\"))
-            .count();
-        let d_drive = items
-            .iter()
-            .filter(|item| item.path.starts_with("D:\\"))
-            .count();
-        let exact = items
-            .iter()
-            .filter(|item| item.name.eq_ignore_ascii_case("debug.log"))
-            .count();
-        eprintln!("RUNTIME_DEBUG_LOG c={c_drive} d={d_drive} exact={exact}");
-        assert!(c_drive > 0, "C drive should contribute debug/log matches");
-        assert!(d_drive > 0, "D drive should contribute debug/log matches");
-        assert!(exact > 0, "the runtime index should contain debug.log");
+        let c_term = std::env::var("LOGCRATE_RUNTIME_SEARCH_C_TERM")
+            .unwrap_or_else(|_| "notepad.exe".into());
+        let d_term = std::env::var("LOGCRATE_RUNTIME_SEARCH_D_TERM")
+            .unwrap_or_else(|_| "tauri.dev-static.conf.json".into());
+        for (root, term) in [("C:\\", c_term), ("D:\\", d_term)] {
+            let (items, total) = index
+                .search(std::slice::from_ref(&term), "", 0, 200)
+                .unwrap();
+            let matches = items
+                .iter()
+                .filter(|item| item.path.starts_with(root))
+                .count();
+            eprintln!(
+                "RUNTIME_VOLUME_RESULT root={root} term={term:?} matches={matches} total={total}"
+            );
+            assert!(matches > 0, "{root} should contribute results for {term:?}");
+        }
     }
 }

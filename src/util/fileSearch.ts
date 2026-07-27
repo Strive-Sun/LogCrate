@@ -1,4 +1,9 @@
-import type { DroppedFileInfo, FileSearchResult, FileSearchStatus } from '../api';
+import type {
+  DroppedFileInfo,
+  FileSearchProviderStatus,
+  FileSearchResult,
+  FileSearchStatus,
+} from '../api';
 
 export type SearchOpenAction = 'archive' | 'log' | 'reveal';
 
@@ -17,6 +22,38 @@ export function searchProgressRefreshKey(status: FileSearchStatus | null): strin
   const indexedBucket = Math.floor(status.indexedFiles / 100_000);
   const providers = status.providers.map((item) => `${item.root}:${item.phase}`).join('|');
   return `${status.phase}:${indexedBucket}:${providers}`;
+}
+
+export function providerElapsedSeconds(provider: FileSearchProviderStatus): {
+  total: string;
+  stage: string;
+} {
+  return {
+    total: ((provider.elapsedMs ?? 0) / 1000).toFixed(1),
+    stage: ((provider.stageElapsedMs ?? 0) / 1000).toFixed(1),
+  };
+}
+
+export function searchPreparation(status: FileSearchStatus):
+  | {
+      roots: string;
+      stage: string;
+    }
+  | undefined {
+  if (status.phase !== 'scanning') return undefined;
+  const active = status.providers.filter((provider) =>
+    ['scanning', 'merging'].includes(provider.phase),
+  );
+  const discovered = active.reduce(
+    (total, provider) => total + (provider.discoveredRecords ?? 0),
+    0,
+  );
+  if (active.length === 0 || discovered > 0) return undefined;
+  const stages = [...new Set(active.map((provider) => provider.stage ?? provider.phase))];
+  return {
+    roots: active.map((provider) => provider.root).join('、'),
+    stage: stages.length === 1 ? stages[0] : 'multiple',
+  };
 }
 
 export function mergeSearchResults(

@@ -328,7 +328,10 @@ fn connect() -> anyhow::Result<File> {
     }
     start_installed_service()?;
     let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(5) {
+    // Older development services exposed one pipe instance. Waiting here keeps a second
+    // volume queued instead of incorrectly degrading it to a recursive folder scan; current
+    // services accept up to MAX_CONCURRENT_CLIENTS immediately.
+    while started.elapsed() < Duration::from_secs(60) {
         match open_pipe() {
             Ok(pipe) => return Ok(pipe),
             Err(_) => sleep(Duration::from_millis(50)),

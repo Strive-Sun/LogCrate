@@ -435,6 +435,9 @@ button {
   grid-column: 1 / -1;
   color: var(--danger);
 }
+.file-search-provider .file-search-provider-metrics {
+  color: var(--muted);
+}
 .file-search-root-list code,
 .file-search-path-list code {
   overflow: hidden;

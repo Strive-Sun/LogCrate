@@ -14,7 +14,9 @@ import { fmtNum, fmtSize } from '../util/format';
 import {
   mergeSearchResults,
   planSearchOpen,
+  searchPreparation,
   searchProgressRefreshKey,
+  providerElapsedSeconds,
   shouldApplySearchResponse,
 } from '../util/fileSearch';
 import { ContextMenu } from './ContextMenu';
@@ -268,11 +270,20 @@ export function FileSearchPanel({
 
   const statusText = useMemo(() => {
     if (!status) return t('search.querying');
-    if (status.phase === 'scanning')
+    if (status.phase === 'scanning') {
+      const preparation = searchPreparation(status);
+      if (preparation) {
+        return t('search.preparing', {
+          roots: preparation.roots,
+          stage: t(`search.stage.${preparation.stage}` as 'search.stage.connecting'),
+          searchable: fmtNum(status.indexedFiles),
+        });
+      }
       return t('search.scanning', {
         discovered: fmtNum(status.scannedFiles),
         searchable: fmtNum(status.indexedFiles),
       });
+    }
     if (status.phase === 'finalizing') return t('search.finalizing');
     if (status.phase === 'paused')
       return t('search.paused', { count: fmtNum(status.scannedFiles) });
@@ -451,7 +462,21 @@ export function FileSearchPanel({
                 <span>
                   {t(`search.provider.${provider.provider}` as 'search.provider.windowsNtfs')}
                 </span>
-                <span>{provider.phase}</span>
+                <span>
+                  {t(
+                    `search.stage.${provider.stage ?? provider.phase}` as 'search.stage.connecting',
+                  )}
+                </span>
+                {(provider.discoveredRecords ?? 0) > 0 || (provider.searchableFiles ?? 0) > 0 ? (
+                  <small className="file-search-provider-metrics">
+                    {t('search.provider.progress', {
+                      discovered: fmtNum(provider.discoveredRecords ?? 0),
+                      searchable: fmtNum(provider.searchableFiles ?? 0),
+                      elapsed: providerElapsedSeconds(provider).total,
+                      stageElapsed: providerElapsedSeconds(provider).stage,
+                    })}
+                  </small>
+                ) : null}
                 {provider.fallbackReason && (
                   <small>
                     {t('search.provider.fallback', { reason: provider.fallbackReason })}

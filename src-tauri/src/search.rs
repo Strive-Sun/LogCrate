@@ -3,14 +3,15 @@ use crate::archive::{is_archive_name, is_log_name};
 use crate::ntfs::{
     ipc::{enumerate_mft_via_service, query_usn_via_service, read_usn_via_service},
     resolve_mft_files_in_batches, resolve_mft_files_in_batches_retain, MftRecord, UsnJournalInfo,
+    FILE_ATTRIBUTE_DIRECTORY,
 };
 use crate::search_index::{SearchIndex, SearchIndexEntry};
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-#[cfg(windows)]
-use std::collections::HashMap;
 use std::collections::HashSet;
+#[cfg(windows)]
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,16 +22,29 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 const SCAN_WRITE_BATCH: usize = 8_192;
 #[cfg(windows)]
 const NTFS_RESOLVE_BATCH: usize = 2_048;
 const EVENT_BATCH: usize = 512;
 const EVENT_QUEUE_CAPACITY: usize = 4096;
+const EVENT_HANDOFF_MAX_BATCHES: usize = 4;
+const EVENT_HANDOFF_MAX_DURATION: Duration = Duration::from_millis(500);
 const QUERY_LIMIT_MAX: u32 = 500;
 const METADATA_WORKERS_MAX: usize = 4;
+const QUERY_INDEX_FS_RETRIES: usize = 20;
+const QUERY_INDEX_FS_RETRY_DELAY: Duration = Duration::from_millis(50);
 #[cfg(windows)]
 const MAX_USN_REPLAY_RECORDS: usize = 1_000_000;
+#[cfg(windows)]
+const PERSISTENCE_USN_REPLAY_MAX_DURATION: Duration = Duration::from_secs(30);
+#[cfg(windows)]
+// A synchronous named-pipe read has no client-side cancellation before its first batch.
+// During a full rebuild the watcher already owns reconciliation, so only a strictly
+// unchanged journal can be finalized without risking an unbounded persistence tail.
+const PERSISTENCE_USN_REPLAY_MAX_RANGE: i64 = 0;
+#[cfg(windows)]
+const NTFS_VOLUME_WORKERS_MAX: usize = 4;
 
 fn query_index_staging_path(active: &Path) -> PathBuf {
     let mut value = active.as_os_str().to_os_string();
@@ -49,18 +63,61 @@ fn recover_query_index_directories(active: &Path) -> anyhow::Result<()> {
     let previous = query_index_previous_path(active);
     if !active.exists() {
         if previous.exists() {
-            fs::rename(&previous, active)?;
+            retry_query_index_fs("recover-previous", &previous, Some(active), || {
+                fs::rename(&previous, active)
+            })?;
         } else if staging.exists() {
-            fs::rename(&staging, active)?;
+            retry_query_index_fs("recover-staging", &staging, Some(active), || {
+                fs::rename(&staging, active)
+            })?;
         }
     }
     if active.exists() && previous.exists() {
-        fs::remove_dir_all(previous)?;
+        retry_query_index_fs("remove-recovered-previous", &previous, None, || {
+            fs::remove_dir_all(&previous)
+        })?;
     }
     if active.exists() && staging.exists() {
-        fs::remove_dir_all(staging)?;
+        retry_query_index_fs("remove-interrupted-staging", &staging, None, || {
+            fs::remove_dir_all(&staging)
+        })?;
     }
     Ok(())
+}
+
+fn retry_query_index_fs<T, F>(
+    stage: &str,
+    source: &Path,
+    destination: Option<&Path>,
+    mut operation: F,
+) -> anyhow::Result<T>
+where
+    F: FnMut() -> std::io::Result<T>,
+{
+    let mut attempts = 0;
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let retryable = cfg!(windows)
+                    && matches!(error.raw_os_error(), Some(5 | 32 | 33))
+                    && attempts < QUERY_INDEX_FS_RETRIES;
+                if retryable {
+                    attempts += 1;
+                    std::thread::sleep(QUERY_INDEX_FS_RETRY_DELAY);
+                    continue;
+                }
+                let target = destination
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<none>".into());
+                return Err(anyhow::anyhow!(
+                    "query-index stage={stage} source={} target={target} attempts={}: {error}",
+                    source.display(),
+                    attempts + 1
+                ));
+            }
+        }
+    }
 }
 
 const CREATE_FTS_TRIGGERS: &str =
@@ -194,7 +251,42 @@ pub struct SearchProviderStatus {
     pub root: String,
     pub provider: String,
     pub phase: String,
+    #[serde(default)]
+    pub stage: String,
+    #[serde(default)]
+    pub discovered_records: u64,
+    #[serde(default)]
+    pub searchable_files: u64,
+    #[serde(default)]
+    pub started_ms: Option<u64>,
+    #[serde(default)]
+    pub elapsed_ms: u64,
+    #[serde(default)]
+    pub stage_started_ms: Option<u64>,
+    #[serde(default)]
+    pub stage_elapsed_ms: u64,
+    #[serde(default)]
+    pub completed_ms: Option<u64>,
     pub fallback_reason: Option<String>,
+}
+
+pub(crate) trait SearchStatusSink: Clone + Send + Sync + 'static {
+    fn emit_search_status(&self, status: SearchStatus);
+}
+
+impl<R: tauri::Runtime> SearchStatusSink for tauri::AppHandle<R> {
+    fn emit_search_status(&self, status: SearchStatus) {
+        let _ = self.emit("file-search-status", status);
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct NoopSearchStatusSink;
+
+#[cfg(test)]
+impl SearchStatusSink for NoopSearchStatusSink {
+    fn emit_search_status(&self, _status: SearchStatus) {}
 }
 
 impl SearchStatus {
@@ -267,6 +359,7 @@ pub struct FileSearchManager {
     query_index_bulk: AtomicBool,
     query_index_staged: AtomicBool,
     persistence_recovery: AtomicBool,
+    operation: Mutex<()>,
 }
 
 impl FileSearchManager {
@@ -316,6 +409,7 @@ impl FileSearchManager {
             query_index_bulk: AtomicBool::new(false),
             query_index_staged: AtomicBool::new(false),
             persistence_recovery: AtomicBool::new(false),
+            operation: Mutex::new(()),
         });
         match database_state {
             Err(error) => manager.status.lock().unwrap().error = Some(error.to_string()),
@@ -368,10 +462,16 @@ impl FileSearchManager {
 
     pub fn status(&self) -> SearchStatus {
         self.refresh_counts();
-        self.status.lock().unwrap().clone()
+        let mut status = self.status.lock().unwrap();
+        refresh_provider_elapsed(&mut status);
+        status.clone()
     }
 
-    pub fn start(self: &Arc<Self>, app: tauri::AppHandle, rebuild: bool) -> anyhow::Result<()> {
+    pub fn start<S: SearchStatusSink>(
+        self: &Arc<Self>,
+        app: S,
+        rebuild: bool,
+    ) -> anyhow::Result<()> {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.cancel.store(false, Ordering::SeqCst);
         self.stop_watcher();
@@ -398,6 +498,14 @@ impl FileSearchManager {
 
         let manager = Arc::clone(self);
         std::thread::spawn(move || {
+            let operation_started = std::time::Instant::now();
+            let _operation = manager
+                .operation
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if manager.is_cancelled(generation) {
+                return;
+            }
             let receiver = match manager.install_watcher(&config) {
                 Ok(receiver) => receiver,
                 Err(error) => {
@@ -419,41 +527,108 @@ impl FileSearchManager {
                 manager.query_index_ready.store(true, Ordering::Release);
             }
             match scan_with_providers(&manager, &app, generation, &config) {
-                Ok(()) if !manager.is_cancelled(generation) => {
+                Ok(outcome) if !manager.is_cancelled(generation) => {
                     if let Err(error) = manager.finish_query_index_bulk() {
                         manager.stop_watcher();
                         manager.finish_with_error(&app, generation, error);
                         return;
+                    }
+                    #[cfg(windows)]
+                    if let Err(error) = mark_query_snapshot_complete(&manager.db_path) {
+                        manager.stop_watcher();
+                        manager.finish_with_error(&app, generation, error);
+                        return;
+                    }
+                    let has_deferred_persistence = outcome.has_deferred_persistence();
+                    manager
+                        .persistence_recovery
+                        .store(has_deferred_persistence, Ordering::Release);
+                    #[cfg(windows)]
+                    for job in &outcome.ntfs_finalize_jobs {
+                        set_provider_stage(
+                            &manager,
+                            &app,
+                            &job.root,
+                            "windowsNtfs",
+                            "ready",
+                            "persisting",
+                            None,
+                        );
+                    }
+                    {
+                        let mut status = manager.status.lock().unwrap();
+                        status.phase = "ready".into();
+                        status.error = None;
+                    }
+                    manager.emit_status(&app);
+                    eprintln!(
+                        "[search-index] generation={generation} query-ready elapsed_ms={}",
+                        operation_started.elapsed().as_millis()
+                    );
+                    #[cfg(windows)]
+                    if !outcome.ntfs_finalize_jobs.is_empty() {
+                        if let Err(error) = begin_ntfs_nodes_bulk(&manager.db_path) {
+                            manager.stop_watcher();
+                            manager.finish_with_error(&app, generation, error);
+                            return;
+                        }
+                    }
+                    #[cfg(windows)]
+                    let mut persisted_ntfs_roots = Vec::new();
+                    #[cfg(windows)]
+                    for job in outcome.ntfs_finalize_jobs {
+                        let root = job.root.clone();
+                        if let Err(error) =
+                            persist_and_finalize_ntfs_volume(&manager.db_path, job, false)
+                        {
+                            let _ = finish_ntfs_nodes_bulk(&manager.db_path);
+                            set_provider_stage(
+                                &manager,
+                                &app,
+                                &root,
+                                "windowsNtfs",
+                                "error",
+                                "error",
+                                Some(error.to_string()),
+                            );
+                            manager.stop_watcher();
+                            manager.finish_with_error(&app, generation, error);
+                            return;
+                        }
+                        persisted_ntfs_roots.push(root);
+                    }
+                    #[cfg(windows)]
+                    if let Err(error) = finish_ntfs_nodes_bulk(&manager.db_path) {
+                        manager.stop_watcher();
+                        manager.finish_with_error(&app, generation, error);
+                        return;
+                    }
+                    #[cfg(windows)]
+                    for root in persisted_ntfs_roots {
+                        set_provider_status(&manager, &app, &root, "windowsNtfs", "ready", None);
                     }
                     if let Err(error) = finish_bulk_index(&manager.db_path) {
                         manager.stop_watcher();
                         manager.finish_with_error(&app, generation, error);
                         return;
                     }
+                    manager.persistence_recovery.store(false, Ordering::Release);
                     if manager.is_cancelled(generation) {
                         manager.stop_watcher();
                         return;
                     }
-                    if let Err(error) = drain_event_paths(&manager.db_path, &config, &receiver) {
-                        manager.stop_watcher();
-                        manager.finish_with_error(&app, generation, error);
-                        return;
-                    }
-                    if let Err(error) = manager.drain_query_index_changes() {
-                        manager.stop_watcher();
-                        manager.finish_with_error(&app, generation, error);
-                        return;
-                    }
-                    manager.spawn_event_worker(app.clone(), config, receiver);
-                    {
-                        let mut status = manager.status.lock().unwrap();
-                        status.phase = "ready".into();
-                        status.error = None;
-                    }
+                    let handoff_paths = collect_event_paths_bounded(&receiver);
+                    manager.spawn_event_worker(
+                        app.clone(),
+                        generation,
+                        config,
+                        receiver,
+                        handoff_paths,
+                    );
                     manager.refresh_counts();
                     manager.emit_status(&app);
                 }
-                Ok(()) => manager.stop_watcher(),
+                Ok(_) => manager.stop_watcher(),
                 Err(error) => {
                     manager.stop_watcher();
                     manager.finish_with_error(&app, generation, error);
@@ -463,7 +638,7 @@ impl FileSearchManager {
         Ok(())
     }
 
-    pub fn resume_or_watch(self: &Arc<Self>, app: tauri::AppHandle) -> anyhow::Result<()> {
+    pub fn resume_or_watch<S: SearchStatusSink>(self: &Arc<Self>, app: S) -> anyhow::Result<()> {
         let config = self.runtime_config();
         let has_persisted_files = self.status.lock().unwrap().indexed_files > 0;
         let has_search_snapshot = self.query_index_ready.load(Ordering::Acquire);
@@ -474,89 +649,200 @@ impl FileSearchManager {
                 let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
                 self.cancel.store(false, Ordering::SeqCst);
                 let recover_persistence = self.persistence_recovery.load(Ordering::Acquire);
-                self.status.lock().unwrap().phase = if recover_persistence {
-                    "ready".into()
-                } else {
-                    "scanning".into()
-                };
+                self.status.lock().unwrap().phase = "scanning".into();
                 let manager = Arc::clone(self);
                 std::thread::spawn(move || {
+                    let _operation = manager
+                        .operation
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    if manager.is_cancelled(generation) {
+                        return;
+                    }
                     if let Err(error) = manager.ensure_query_index_matches_database() {
                         manager.finish_with_error(&app, generation, error);
                         return;
                     }
-                    for root in &config.roots {
-                        let Some(volume) = ntfs_volume_letter(root) else {
-                            continue;
-                        };
-                        set_provider_status(&manager, &app, root, "windowsNtfs", "scanning", None);
+                    let ntfs_roots = config
+                        .roots
+                        .iter()
+                        .filter_map(|root| {
+                            ntfs_volume_letter(root).map(|volume| (root.clone(), volume))
+                        })
+                        .collect::<Vec<_>>();
+                    let work = |root: String, volume| {
+                        set_provider_stage(
+                            &manager,
+                            &app,
+                            &root,
+                            "windowsNtfs",
+                            "scanning",
+                            "connecting",
+                            None,
+                        );
                         if recover_persistence {
-                            let snapshot = enumerate_ntfs_volume_snapshot(
-                                &manager, &app, generation, &config, root, volume,
+                            enumerate_ntfs_volume_snapshot(
+                                &manager, &app, generation, &config, &root, volume,
+                            )
+                            .map(NtfsResumeJob::Rebuild)
+                        } else {
+                            set_provider_stage(
+                                &manager,
+                                &app,
+                                &root,
+                                "windowsNtfs",
+                                "scanning",
+                                "readingUsn",
+                                None,
                             );
-                            match snapshot.and_then(|job| {
-                                persist_and_finalize_ntfs_volume(&manager.db_path, job)
-                            }) {
-                                Ok(()) => {
-                                    set_provider_status(
+                            prepare_ntfs_catch_up(
+                                &manager.db_path,
+                                &root,
+                                volume,
+                                &config.exclusions,
+                            )
+                            .map(NtfsResumeJob::CatchUp)
+                            .or_else(|error| {
+                                eprintln!(
+                                    "[search-index] root={root} strategy=full-rebuild reason={error}"
+                                );
+                                enumerate_ntfs_volume_snapshot(
+                                    &manager, &app, generation, &config, &root, volume,
+                                )
+                                .map(NtfsResumeJob::Rebuild)
+                            })
+                        }
+                    };
+                    let mut all_succeeded = true;
+                    let mut fallback_roots = Vec::new();
+                    let resume_result = run_ntfs_volume_tasks(
+                        ntfs_roots,
+                        &work,
+                        &|| manager.is_cancelled(generation),
+                        |root, result| {
+                            let applied = match result {
+                                Ok(NtfsResumeJob::CatchUp(job)) => {
+                                    set_provider_stage(
                                         &manager,
                                         &app,
-                                        root,
+                                        &root,
                                         "windowsNtfs",
-                                        "ready",
+                                        "merging",
+                                        "merging",
                                         None,
                                     );
+                                    apply_ntfs_catch_up(&manager.db_path, job)
                                 }
-                                Err(error) => {
-                                    manager.finish_with_error(&app, generation, error);
-                                    return;
+                                Ok(NtfsResumeJob::Rebuild(snapshot)) => {
+                                    set_provider_stage(
+                                        &manager,
+                                        &app,
+                                        &root,
+                                        "windowsNtfs",
+                                        "merging",
+                                        "resolvingPaths",
+                                        None,
+                                    );
+                                    index_ntfs_volume_paths(&manager, &app, generation, snapshot)
+                                        .and_then(|job| {
+                                            set_provider_stage(
+                                                &manager,
+                                                &app,
+                                                &root,
+                                                "windowsNtfs",
+                                                "merging",
+                                                "persisting",
+                                                None,
+                                            );
+                                            persist_and_finalize_ntfs_volume(
+                                                &manager.db_path,
+                                                job,
+                                                true,
+                                            )
+                                        })
                                 }
-                            }
-                            continue;
-                        }
-                        let catch_up = catch_up_ntfs_volume(
-                            &manager.db_path,
-                            root,
-                            volume,
-                            &config.exclusions,
-                        );
-                        if catch_up.is_err() {
-                            if let Err(error) =
-                                scan_ntfs_volume(&manager, &app, generation, &config, root, volume)
-                            {
+                                Err(error) => Err(error),
+                            };
+                            if let Err(error) = applied {
+                                all_succeeded = false;
                                 set_provider_status(
                                     &manager,
                                     &app,
-                                    root,
+                                    &root,
                                     "folderScan",
                                     "fallback",
                                     Some(error.to_string()),
                                 );
-                                continue;
+                                fallback_roots.push(root);
+                                return Ok(());
                             }
-                        }
-                        if let Err(error) = manager.drain_query_index_changes() {
+                            if !recover_persistence {
+                                manager.drain_query_index_changes()?;
+                            }
+                            set_provider_searchable_files(
+                                &manager,
+                                &app,
+                                &root,
+                                indexed_root_count(&manager.db_path, &root),
+                            );
+                            set_provider_status(
+                                &manager,
+                                &app,
+                                &root,
+                                "windowsNtfs",
+                                "ready",
+                                None,
+                            );
+                            Ok(())
+                        },
+                    );
+                    let completed = match resume_result {
+                        Ok(completed) => completed,
+                        Err(error) => {
                             manager.finish_with_error(&app, generation, error);
                             return;
                         }
-                        set_provider_status(&manager, &app, root, "windowsNtfs", "ready", None);
+                    };
+                    if !completed {
+                        manager.stop_watcher();
+                        return;
                     }
-                    if recover_persistence {
+                    if !fallback_roots.is_empty() {
+                        if let Err(error) = replace_roots_with_folder_scan(
+                            &manager,
+                            &app,
+                            generation,
+                            &config,
+                            &fallback_roots,
+                        ) {
+                            manager.finish_with_error(&app, generation, error);
+                            return;
+                        }
+                        all_succeeded = true;
+                    }
+                    if manager.is_cancelled(generation) {
+                        manager.stop_watcher();
+                        return;
+                    }
+                    if recover_persistence && all_succeeded {
                         if let Err(error) = finish_bulk_index(&manager.db_path) {
                             manager.finish_with_error(&app, generation, error);
                             return;
                         }
                         manager.persistence_recovery.store(false, Ordering::Release);
                     }
-                    if let Err(error) = drain_event_paths(&manager.db_path, &config, &receiver) {
-                        manager.finish_with_error(&app, generation, error);
+                    let handoff_paths = collect_event_paths_bounded(&receiver);
+                    if manager.is_cancelled(generation) {
+                        manager.stop_watcher();
                         return;
                     }
-                    if let Err(error) = manager.drain_query_index_changes() {
-                        manager.finish_with_error(&app, generation, error);
-                        return;
-                    }
-                    manager.spawn_event_worker(app.clone(), config, receiver);
+                    manager.spawn_event_worker(
+                        app.clone(),
+                        generation,
+                        config,
+                        receiver,
+                        handoff_paths,
+                    );
                     manager.status.lock().unwrap().phase = "ready".into();
                     manager.refresh_counts();
                     manager.emit_status(&app);
@@ -570,11 +856,28 @@ impl FileSearchManager {
                 self.status.lock().unwrap().phase = "scanning".into();
                 let manager = Arc::clone(self);
                 std::thread::spawn(move || {
+                    let _operation = manager
+                        .operation
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    if manager.is_cancelled(generation) {
+                        return;
+                    }
                     if let Err(error) = manager.ensure_query_index_matches_database() {
                         manager.finish_with_error(&app, generation, error);
                         return;
                     }
-                    manager.spawn_event_worker(app.clone(), config, receiver);
+                    if manager.is_cancelled(generation) {
+                        manager.stop_watcher();
+                        return;
+                    }
+                    manager.spawn_event_worker(
+                        app.clone(),
+                        generation,
+                        config,
+                        receiver,
+                        Vec::new(),
+                    );
                     manager.status.lock().unwrap().phase = "ready".into();
                     manager.emit_status(&app);
                 });
@@ -585,16 +888,28 @@ impl FileSearchManager {
         }
     }
 
-    pub fn pause(&self, app: &tauri::AppHandle) {
-        self.cancel.store(true, Ordering::SeqCst);
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        self.stop_watcher();
+    pub fn pause<S: SearchStatusSink>(&self, app: &S) {
+        self.cancel_and_wait();
         self.status.lock().unwrap().phase = "paused".into();
         self.emit_status(app);
     }
 
-    pub fn clear(&self, app: &tauri::AppHandle) -> anyhow::Result<()> {
+    fn cancel_and_wait(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.stop_watcher();
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+    }
+
+    pub fn clear<S: SearchStatusSink>(&self, app: &S) -> anyhow::Result<()> {
         self.pause(app);
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         clear_rows(&self.db_path)?;
         self.clear_query_index()?;
         {
@@ -606,9 +921,9 @@ impl FileSearchManager {
         Ok(())
     }
 
-    pub fn set_exclusions(
+    pub fn set_exclusions<S: SearchStatusSink>(
         self: &Arc<Self>,
-        app: tauri::AppHandle,
+        app: S,
         exclusions: Vec<String>,
     ) -> anyhow::Result<()> {
         let normalized = normalize_unique_paths(exclusions);
@@ -642,23 +957,18 @@ impl FileSearchManager {
             });
         }
         let limit = limit.clamp(1, QUERY_LIMIT_MAX);
-        let connection = open_database(&self.db_path)?;
         let phase = self.status.lock().unwrap().phase.clone();
         let filter_sql = match filter {
             "log" => " AND f.is_log = 1 AND f.is_archive = 0",
             "archive" => " AND f.is_archive = 1",
             _ => "",
         };
-        let can_use_tantivy = !terms
-            .iter()
-            .any(|term| term.chars().any(|character| "\\/:".contains(character)));
-        let (mut items, total) = if can_use_tantivy {
-            match self.query_tantivy(&terms, filter, offset, limit)? {
-                Some(result) => result,
-                None => query_like(&connection, &terms, filter_sql, offset, limit)?,
+        let (mut items, total) = match self.query_tantivy(&terms, filter, offset, limit)? {
+            Some(result) => result,
+            None => {
+                let connection = open_database(&self.db_path)?;
+                query_like(&connection, &terms, filter_sql, offset, limit)?
             }
-        } else {
-            query_like(&connection, &terms, filter_sql, offset, limit)?
         };
         enrich_visible_metadata(&mut items);
         Ok(SearchPage {
@@ -701,7 +1011,9 @@ impl FileSearchManager {
         self.staged_query_index.lock().unwrap().take();
         let staging_path = query_index_staging_path(&self.query_index_path);
         if staging_path.exists() {
-            fs::remove_dir_all(&staging_path)?;
+            retry_query_index_fs("prepare-remove-staging", &staging_path, None, || {
+                fs::remove_dir_all(&staging_path)
+            })?;
         }
         let has_complete_snapshot = self
             .query_index
@@ -743,7 +1055,9 @@ impl FileSearchManager {
         self.query_index_staged.store(false, Ordering::Release);
         let staging_path = query_index_staging_path(&self.query_index_path);
         if staging_path.exists() {
-            fs::remove_dir_all(staging_path)?;
+            retry_query_index_fs("clear-remove-staging", &staging_path, None, || {
+                fs::remove_dir_all(&staging_path)
+            })?;
         }
         if let Some(index) = self.query_index.lock().unwrap().as_mut() {
             index.clear()?;
@@ -769,31 +1083,60 @@ impl FileSearchManager {
         let previous = query_index_previous_path(&self.query_index_path);
         self.query_index.lock().unwrap().take();
         if previous.exists() {
-            fs::remove_dir_all(&previous)?;
+            retry_query_index_fs("switch-remove-previous", &previous, None, || {
+                fs::remove_dir_all(&previous)
+            })?;
         }
         if self.query_index_path.exists() {
-            fs::rename(&self.query_index_path, &previous)?;
+            retry_query_index_fs(
+                "switch-active-to-previous",
+                &self.query_index_path,
+                Some(&previous),
+                || fs::rename(&self.query_index_path, &previous),
+            )?;
         }
-        if let Err(error) = fs::rename(&staging, &self.query_index_path) {
+        if let Err(error) = retry_query_index_fs(
+            "switch-staging-to-active",
+            &staging,
+            Some(&self.query_index_path),
+            || fs::rename(&staging, &self.query_index_path),
+        ) {
             if previous.exists() && !self.query_index_path.exists() {
-                let _ = fs::rename(&previous, &self.query_index_path);
+                let _ = retry_query_index_fs(
+                    "rollback-previous-to-active",
+                    &previous,
+                    Some(&self.query_index_path),
+                    || fs::rename(&previous, &self.query_index_path),
+                );
             }
             *self.query_index.lock().unwrap() = SearchIndex::open(&self.query_index_path).ok();
-            return Err(error.into());
+            return Err(error);
         }
         match SearchIndex::open(&self.query_index_path) {
             Ok(index) => {
                 *self.query_index.lock().unwrap() = Some(index);
                 if previous.exists() {
-                    fs::remove_dir_all(previous)?;
+                    retry_query_index_fs("switch-remove-old-active", &previous, None, || {
+                        fs::remove_dir_all(&previous)
+                    })?;
                 }
                 Ok(())
             }
             Err(error) => {
                 let failed = query_index_staging_path(&self.query_index_path);
-                let _ = fs::rename(&self.query_index_path, &failed);
+                let _ = retry_query_index_fs(
+                    "rollback-failed-active-to-staging",
+                    &self.query_index_path,
+                    Some(&failed),
+                    || fs::rename(&self.query_index_path, &failed),
+                );
                 if previous.exists() {
-                    let _ = fs::rename(&previous, &self.query_index_path);
+                    let _ = retry_query_index_fs(
+                        "rollback-previous-to-active",
+                        &previous,
+                        Some(&self.query_index_path),
+                        || fs::rename(&previous, &self.query_index_path),
+                    );
                 }
                 *self.query_index.lock().unwrap() = SearchIndex::open(&self.query_index_path).ok();
                 Err(error)
@@ -811,45 +1154,29 @@ impl FileSearchManager {
         if !self.query_index_ready.load(Ordering::Acquire) {
             return Ok(None);
         }
+        let scanning = self.status.lock().unwrap().phase == "scanning";
+        if scanning && self.query_index_staged.load(Ordering::Acquire) {
+            let guard = self.staged_query_index.lock().unwrap();
+            if let Some(index) = guard.as_ref().filter(|index| index.num_docs() > 0) {
+                return search_query_index(index, terms, filter, offset, limit).map(Some);
+            }
+        }
         let guard = self.query_index.lock().unwrap();
         let Some(index) = guard.as_ref().filter(|index| index.num_docs() > 0) else {
             return Ok(None);
         };
-        let (entries, total) = index.search(terms, filter, offset, limit)?;
-        let items = entries
-            .into_iter()
-            .map(|entry| {
-                let content_type = content_type_for_name(&entry.name).into();
-                SearchResultItem {
-                    parent: Path::new(&entry.path)
-                        .parent()
-                        .map(|parent| parent.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    path: entry.path,
-                    name: entry.name,
-                    kind: if entry.is_archive {
-                        "archive".into()
-                    } else if entry.is_log {
-                        "log".into()
-                    } else {
-                        "file".into()
-                    },
-                    size: 0,
-                    modified_ms: None,
-                    readable: false,
-                    content_type,
-                    is_log: entry.is_log,
-                    is_archive: entry.is_archive,
-                }
-            })
-            .collect();
-        Ok(Some((items, total)))
+        search_query_index(index, terms, filter, offset, limit).map(Some)
     }
 
     fn ensure_query_index_matches_database(&self) -> anyhow::Result<()> {
         if self.query_index_ready.load(Ordering::Acquire) {
             return Ok(());
         }
+        self.rebuild_query_index_from_database()
+    }
+
+    fn rebuild_query_index_from_database(&self) -> anyhow::Result<()> {
+        self.query_index_ready.store(false, Ordering::Release);
         let mut guard = self.query_index.lock().unwrap();
         let Some(index) = guard.as_mut() else {
             return Ok(());
@@ -949,7 +1276,12 @@ impl FileSearchManager {
         self.cancel.load(Ordering::Relaxed) || self.generation.load(Ordering::Relaxed) != generation
     }
 
-    fn finish_with_error(&self, app: &tauri::AppHandle, generation: u64, error: anyhow::Error) {
+    fn finish_with_error<S: SearchStatusSink>(
+        &self,
+        app: &S,
+        generation: u64,
+        error: anyhow::Error,
+    ) {
         if self.is_cancelled(generation) {
             return;
         }
@@ -960,31 +1292,80 @@ impl FileSearchManager {
         self.emit_status(app);
     }
 
-    fn emit_status(&self, app: &tauri::AppHandle) {
-        let _ = app.emit("file-search-status", self.status.lock().unwrap().clone());
+    fn emit_status<S: SearchStatusSink>(&self, app: &S) {
+        let snapshot = {
+            let mut status = self.status.lock().unwrap();
+            refresh_provider_elapsed(&mut status);
+            status.clone()
+        };
+        app.emit_search_status(snapshot);
     }
 
     fn refresh_counts(&self) {
         let Ok(connection) = open_database(&self.db_path) else {
             return;
         };
-        let indexed_files = if self.query_index_bulk.load(Ordering::Acquire)
+        let root_counts = if self.query_index_bulk.load(Ordering::Acquire)
             || self.persistence_recovery.load(Ordering::Acquire)
         {
             None
         } else {
+            let roots = self
+                .status
+                .lock()
+                .unwrap()
+                .providers
+                .iter()
+                .map(|item| item.root.clone())
+                .collect::<Vec<_>>();
             Some(
-                connection
-                    .query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, u64>(0))
-                    .unwrap_or(0),
+                roots
+                    .into_iter()
+                    .map(|root| {
+                        let count = connection
+                            .query_row(
+                                "SELECT COUNT(*) FROM files WHERE root = ?1",
+                                params![&root],
+                                |row| row.get::<_, u64>(0),
+                            )
+                            .unwrap_or(0);
+                        (root, count)
+                    })
+                    .collect::<Vec<_>>(),
             )
         };
         let index_bytes = database_size(&self.db_path);
+        let database_indexed_files = root_counts
+            .as_ref()
+            .map(|counts| counts.iter().map(|(_, count)| *count).sum::<u64>());
+        let query_indexed_files = self
+            .query_index
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(SearchIndex::num_docs);
         let mut status = self.status.lock().unwrap();
-        if let Some(indexed_files) = indexed_files {
-            status.indexed_files = indexed_files;
+        if status.phase == "ready"
+            && database_indexed_files.is_some()
+            && database_indexed_files != query_indexed_files
+        {
+            eprintln!(
+                "[search-index] count-mismatch database={} query={}",
+                database_indexed_files.unwrap_or(0),
+                query_indexed_files.unwrap_or(0)
+            );
+        }
+        if let Some(root_counts) = root_counts {
+            for provider in &mut status.providers {
+                provider.searchable_files = root_counts
+                    .iter()
+                    .find(|(root, _)| root == &provider.root)
+                    .map(|(_, count)| *count)
+                    .unwrap_or(0);
+            }
         }
         status.index_bytes = index_bytes;
+        refresh_provider_totals(&mut status);
     }
 
     fn stop_watcher(&self) {
@@ -1000,16 +1381,22 @@ impl FileSearchManager {
         let dirty = Arc::clone(&self.event_dirty);
         let event_roots = config.roots.clone();
         let event_exclusions = config.exclusions.clone();
+        let event_internal_root = self.db_path.parent().map(Path::to_path_buf);
         let mut watcher = RecommendedWatcher::new(
             move |result: notify::Result<Event>| {
                 let Ok(mut event) = result else {
                     dirty.store(true, Ordering::Relaxed);
                     return;
                 };
+                let event_kind = event.kind;
                 event.paths.retain(|path| {
                     containing_root(path, &event_roots).is_some()
                         && !is_excluded(path, &event_exclusions)
+                        && !event_internal_root
+                            .as_deref()
+                            .is_some_and(|internal| path_is_within(path, internal))
                         && !is_platform_skipped_directory(path)
+                        && event_path_requires_reconcile(&event_kind, path)
                 });
                 if event.paths.is_empty() {
                     return;
@@ -1030,29 +1417,38 @@ impl FileSearchManager {
         Ok(receiver)
     }
 
-    fn spawn_event_worker(
+    fn spawn_event_worker<S: SearchStatusSink>(
         self: &Arc<Self>,
-        app: tauri::AppHandle,
+        app: S,
+        generation: u64,
         config: SearchConfig,
         receiver: Receiver<Event>,
+        mut pending_paths: Vec<PathBuf>,
     ) {
         let manager = Arc::clone(self);
         std::thread::spawn(move || loop {
-            let first = match receiver.recv_timeout(Duration::from_millis(500)) {
-                Ok(event) => event,
-                Err(RecvTimeoutError::Timeout) => {
-                    if manager.event_sender.lock().unwrap().is_none() {
-                        break;
+            if manager.is_cancelled(generation) {
+                break;
+            }
+            let mut paths = if pending_paths.is_empty() {
+                let first = match receiver.recv_timeout(Duration::from_millis(500)) {
+                    Ok(event) => event,
+                    Err(RecvTimeoutError::Timeout) => {
+                        if manager.event_sender.lock().unwrap().is_none() {
+                            break;
+                        }
+                        if manager.event_dirty.swap(false, Ordering::SeqCst) {
+                            let _ = manager.start(app.clone(), true);
+                            break;
+                        }
+                        continue;
                     }
-                    if manager.event_dirty.swap(false, Ordering::SeqCst) {
-                        let _ = manager.start(app.clone(), true);
-                        break;
-                    }
-                    continue;
-                }
-                Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                };
+                first.paths
+            } else {
+                std::mem::take(&mut pending_paths)
             };
-            let mut paths = first.paths;
             while let Ok(event) = receiver.try_recv() {
                 paths.extend(event.paths);
                 if paths.len() >= EVENT_BATCH {
@@ -1061,6 +1457,13 @@ impl FileSearchManager {
             }
             paths.sort();
             paths.dedup();
+            let _operation = manager
+                .operation
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if manager.is_cancelled(generation) {
+                break;
+            }
             if let Err(error) = apply_event_paths(&manager.db_path, &config, &paths)
                 .and_then(|_| manager.drain_query_index_changes())
             {
@@ -1071,6 +1474,55 @@ impl FileSearchManager {
                 manager.emit_status(&app);
             }
         });
+    }
+}
+
+fn search_query_index(
+    index: &SearchIndex,
+    terms: &[String],
+    filter: &str,
+    offset: u32,
+    limit: u32,
+) -> anyhow::Result<(Vec<SearchResultItem>, u64)> {
+    let (entries, total) = index.search(terms, filter, offset, limit)?;
+    let items = entries
+        .into_iter()
+        .map(|entry| {
+            let content_type = content_type_for_name(&entry.name).into();
+            SearchResultItem {
+                parent: Path::new(&entry.path)
+                    .parent()
+                    .map(|parent| parent.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                path: entry.path,
+                name: entry.name,
+                kind: if entry.is_archive {
+                    "archive".into()
+                } else if entry.is_log {
+                    "log".into()
+                } else {
+                    "file".into()
+                },
+                size: 0,
+                modified_ms: None,
+                readable: false,
+                content_type,
+                is_log: entry.is_log,
+                is_archive: entry.is_archive,
+            }
+        })
+        .collect();
+    Ok((items, total))
+}
+
+fn event_path_requires_reconcile(kind: &notify::EventKind, path: &Path) -> bool {
+    use notify::event::ModifyKind;
+    use notify::EventKind;
+
+    match kind {
+        EventKind::Access(_) => false,
+        EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_)) => !path.is_dir(),
+        _ => true,
     }
 }
 
@@ -1089,12 +1541,32 @@ fn enqueue_event(sender: &SyncSender<Event>, dirty: &AtomicBool, event: Event) {
     }
 }
 
-fn scan_with_providers(
+#[derive(Default)]
+struct ScanOutcome {
+    #[cfg(windows)]
+    ntfs_finalize_jobs: Vec<NtfsFinalizeJob>,
+}
+
+impl ScanOutcome {
+    fn has_deferred_persistence(&self) -> bool {
+        #[cfg(windows)]
+        {
+            !self.ntfs_finalize_jobs.is_empty()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+}
+
+fn scan_with_providers<S: SearchStatusSink>(
     manager: &Arc<FileSearchManager>,
-    app: &tauri::AppHandle,
+    app: &S,
     generation: u64,
     config: &SearchConfig,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ScanOutcome> {
+    let scan_started = std::time::Instant::now();
     #[cfg(windows)]
     {
         let mut folder_roots = Vec::new();
@@ -1102,70 +1574,82 @@ fn scan_with_providers(
         let mut finalize_jobs = Vec::new();
         for root in &config.roots {
             if manager.is_cancelled(generation) {
-                return Ok(());
+                return Ok(ScanOutcome::default());
             }
             let Some(volume) = ntfs_volume_letter(root) else {
                 folder_roots.push(root.clone());
-                set_provider_status(manager, app, root, "folderScan", "scanning", None);
                 continue;
             };
-            set_provider_status(manager, app, root, "windowsNtfs", "scanning", None);
             ntfs_roots.push((root.clone(), volume));
         }
-        let system_volume = system_volume_letter();
-        ntfs_roots.sort_by_key(|(_, volume)| ntfs_scan_priority(*volume, 0, system_volume));
-        let mut snapshots = Vec::with_capacity(ntfs_roots.len());
-        for (root, volume) in ntfs_roots {
-            match enumerate_ntfs_volume_snapshot(manager, app, generation, config, &root, volume) {
-                Ok(job) => snapshots.push(job),
-                Err(error) if !manager.is_cancelled(generation) => {
-                    let reason = error.to_string();
-                    set_provider_status(
+        let work = |root: String, volume| {
+            set_provider_stage(
+                manager,
+                app,
+                &root,
+                "windowsNtfs",
+                "scanning",
+                "connecting",
+                None,
+            );
+            enumerate_ntfs_volume_snapshot(manager, app, generation, config, &root, volume)
+        };
+        let completed = run_ntfs_volume_tasks(
+            ntfs_roots,
+            &work,
+            &|| manager.is_cancelled(generation),
+            |root, snapshot| {
+                match snapshot.and_then(|snapshot| {
+                    set_provider_stage(
                         manager,
                         app,
                         &root,
-                        "folderScan",
-                        "fallback",
-                        Some(reason),
+                        "windowsNtfs",
+                        "merging",
+                        "resolvingPaths",
+                        None,
                     );
-                    folder_roots.push(root);
+                    index_ntfs_volume_paths(manager, app, generation, snapshot)
+                }) {
+                    Ok(job) => {
+                        set_provider_stage(
+                            manager,
+                            app,
+                            &root,
+                            "windowsNtfs",
+                            "merging",
+                            "persisting",
+                            None,
+                        );
+                        finalize_jobs.push(job);
+                    }
+                    Err(error) if !manager.is_cancelled(generation) => {
+                        set_provider_status(
+                            manager,
+                            app,
+                            &root,
+                            "folderScan",
+                            "fallback",
+                            Some(error.to_string()),
+                        );
+                        folder_roots.push(root);
+                    }
+                    Err(_) => {}
                 }
-                Err(_) => return Ok(()),
-            }
-        }
-        snapshots
-            .sort_by_key(|job| ntfs_scan_priority(job.volume, job.records.len(), system_volume));
-        for snapshot in snapshots {
-            let root = snapshot.root.clone();
-            match index_ntfs_volume_paths(manager, app, generation, snapshot) {
-                Ok(job) => {
-                    finalize_jobs.push(job);
-                    set_provider_status(manager, app, &root, "windowsNtfs", "ready", None);
-                }
-                Err(error) if !manager.is_cancelled(generation) => {
-                    let reason = error.to_string();
-                    set_provider_status(
-                        manager,
-                        app,
-                        &root,
-                        "folderScan",
-                        "fallback",
-                        Some(reason),
-                    );
-                    folder_roots.push(root);
-                }
-                Err(_) => return Ok(()),
-            }
+                Ok(())
+            },
+        )?;
+        if !completed {
+            return Ok(ScanOutcome::default());
         }
         scan_folder_roots(manager, app, generation, config, &folder_roots)?;
-        mark_query_snapshot_complete(&manager.db_path)?;
-        manager.status.lock().unwrap().phase = "ready".into();
-        manager.refresh_counts();
-        manager.emit_status(app);
-        for job in finalize_jobs {
-            persist_and_finalize_ntfs_volume(&manager.db_path, job)?;
-        }
-        Ok(())
+        eprintln!(
+            "[search-index] generation={generation} all-volumes-query-ready elapsed_ms={}",
+            scan_started.elapsed().as_millis()
+        );
+        Ok(ScanOutcome {
+            ntfs_finalize_jobs: finalize_jobs,
+        })
     }
     #[cfg(not(windows))]
     {
@@ -1173,29 +1657,193 @@ fn scan_with_providers(
             set_provider_status(manager, app, root, "folderScan", "scanning", None);
         }
         scan_folder_roots(manager, app, generation, config, &config.roots)?;
-        manager.status.lock().unwrap().phase = "ready".into();
+        manager.status.lock().unwrap().phase = "finalizing".into();
         manager.refresh_counts();
         manager.emit_status(app);
-        Ok(())
+        eprintln!(
+            "[search-index] generation={generation} folder-scan-complete elapsed_ms={}",
+            scan_started.elapsed().as_millis()
+        );
+        Ok(ScanOutcome::default())
     }
 }
 
-fn set_provider_status(
+fn set_provider_status<S: SearchStatusSink>(
     manager: &FileSearchManager,
-    app: &tauri::AppHandle,
+    app: &S,
     root: &str,
     provider: &str,
     phase: &str,
     fallback_reason: Option<String>,
 ) {
+    set_provider_stage(manager, app, root, provider, phase, phase, fallback_reason);
+}
+
+fn set_provider_stage<S: SearchStatusSink>(
+    manager: &FileSearchManager,
+    app: &S,
+    root: &str,
+    provider: &str,
+    phase: &str,
+    stage: &str,
+    fallback_reason: Option<String>,
+) {
+    let now = system_time_ms(SystemTime::now()).unwrap_or(0);
     let mut status = manager.status.lock().unwrap();
-    if let Some(item) = status.providers.iter_mut().find(|item| item.root == root) {
-        item.provider = provider.into();
-        item.phase = phase.into();
-        item.fallback_reason = fallback_reason;
-    }
+    update_provider_stage_at(
+        &mut status,
+        root,
+        provider,
+        phase,
+        stage,
+        fallback_reason,
+        now,
+    );
     drop(status);
     manager.emit_status(app);
+}
+
+fn add_provider_progress<S: SearchStatusSink>(
+    manager: &FileSearchManager,
+    app: &S,
+    root: &str,
+    stage: &str,
+    discovered: u64,
+    searchable: u64,
+) {
+    let now = system_time_ms(SystemTime::now()).unwrap_or(0);
+    let mut status = manager.status.lock().unwrap();
+    let mut first_searchable = None;
+    if let Some(item) = status.providers.iter_mut().find(|item| item.root == root) {
+        if item.stage != stage {
+            item.stage = stage.into();
+            item.stage_started_ms = Some(now);
+            item.stage_elapsed_ms = 0;
+        }
+        if item.started_ms.is_none() {
+            item.started_ms = Some(now);
+        }
+        item.discovered_records = item.discovered_records.saturating_add(discovered);
+        let is_first_searchable = searchable > 0 && item.searchable_files == 0;
+        item.searchable_files = item.searchable_files.saturating_add(searchable);
+        item.elapsed_ms = item
+            .started_ms
+            .map(|started| now.saturating_sub(started))
+            .unwrap_or(0);
+        item.stage_elapsed_ms = item
+            .stage_started_ms
+            .map(|started| now.saturating_sub(started))
+            .unwrap_or(0);
+        if is_first_searchable {
+            first_searchable = Some(item.elapsed_ms);
+        }
+    }
+    refresh_provider_totals(&mut status);
+    drop(status);
+    if let Some(elapsed_ms) = first_searchable {
+        eprintln!("[search-index] root={root} first-searchable-batch elapsed_ms={elapsed_ms}");
+    }
+    manager.emit_status(app);
+}
+
+fn set_provider_searchable_files<S: SearchStatusSink>(
+    manager: &FileSearchManager,
+    app: &S,
+    root: &str,
+    searchable: u64,
+) {
+    let mut status = manager.status.lock().unwrap();
+    if let Some(item) = status.providers.iter_mut().find(|item| item.root == root) {
+        item.searchable_files = searchable;
+    }
+    refresh_provider_totals(&mut status);
+    drop(status);
+    manager.emit_status(app);
+}
+
+fn indexed_root_count(db_path: &Path, root: &str) -> u64 {
+    open_database(db_path)
+        .and_then(|connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM files WHERE root = ?1",
+                    params![root],
+                    |row| row.get::<_, u64>(0),
+                )
+                .map_err(Into::into)
+        })
+        .unwrap_or(0)
+}
+
+fn refresh_provider_elapsed(status: &mut SearchStatus) {
+    let now = system_time_ms(SystemTime::now()).unwrap_or(0);
+    for item in &mut status.providers {
+        if let Some(started) = item.started_ms {
+            if item.completed_ms.is_none() {
+                item.elapsed_ms = now.saturating_sub(started);
+            }
+        }
+        if let Some(stage_started) = item.stage_started_ms {
+            if item.completed_ms.is_none() {
+                item.stage_elapsed_ms = now.saturating_sub(stage_started);
+            }
+        }
+    }
+    refresh_provider_totals(status);
+}
+
+fn update_provider_stage_at(
+    status: &mut SearchStatus,
+    root: &str,
+    provider: &str,
+    phase: &str,
+    stage: &str,
+    fallback_reason: Option<String>,
+    now: u64,
+) {
+    if let Some(item) = status.providers.iter_mut().find(|item| item.root == root) {
+        let stage_changed = item.stage != stage;
+        item.provider = provider.into();
+        item.phase = phase.into();
+        if phase != "pending" && item.started_ms.is_none() {
+            item.started_ms = Some(now);
+        }
+        if stage_changed || item.stage_started_ms.is_none() {
+            item.stage = stage.into();
+            item.stage_started_ms = Some(now);
+            item.stage_elapsed_ms = 0;
+        }
+        item.elapsed_ms = item
+            .started_ms
+            .map(|started| now.saturating_sub(started))
+            .unwrap_or(0);
+        item.stage_elapsed_ms = item
+            .stage_started_ms
+            .map(|started| now.saturating_sub(started))
+            .unwrap_or(0);
+        item.completed_ms = (provider_phase_is_terminal(phase)
+            && matches!(stage, "ready" | "fallback" | "error"))
+        .then_some(now);
+        item.fallback_reason = fallback_reason;
+    }
+    refresh_provider_totals(status);
+}
+
+fn provider_phase_is_terminal(phase: &str) -> bool {
+    matches!(phase, "ready" | "fallback" | "error")
+}
+
+fn refresh_provider_totals(status: &mut SearchStatus) {
+    status.scanned_files = status
+        .providers
+        .iter()
+        .map(|item| item.discovered_records)
+        .sum();
+    status.indexed_files = status
+        .providers
+        .iter()
+        .map(|item| item.searchable_files)
+        .sum();
 }
 
 #[cfg(windows)]
@@ -1208,39 +1856,51 @@ struct NtfsFinalizeJob {
 }
 
 #[cfg(windows)]
-fn scan_ntfs_volume(
+fn enumerate_ntfs_volume_snapshot<S: SearchStatusSink>(
     manager: &Arc<FileSearchManager>,
-    app: &tauri::AppHandle,
-    generation: u64,
-    config: &SearchConfig,
-    root: &str,
-    volume: char,
-) -> anyhow::Result<()> {
-    let snapshot = enumerate_ntfs_volume_snapshot(manager, app, generation, config, root, volume)?;
-    let job = index_ntfs_volume_paths(manager, app, generation, snapshot)?;
-    persist_and_finalize_ntfs_volume(&manager.db_path, job)
-}
-
-#[cfg(windows)]
-fn enumerate_ntfs_volume_snapshot(
-    manager: &Arc<FileSearchManager>,
-    app: &tauri::AppHandle,
+    app: &S,
     generation: u64,
     config: &SearchConfig,
     root: &str,
     volume: char,
 ) -> anyhow::Result<NtfsFinalizeJob> {
+    let volume_started = std::time::Instant::now();
+    eprintln!("[search-index] root={root} stage=enumeratingMft event=start records=0");
+    set_provider_stage(
+        manager,
+        app,
+        root,
+        "windowsNtfs",
+        "scanning",
+        "readingUsn",
+        None,
+    );
     let journal_before = query_usn_via_service(volume)?;
     let mut records = Vec::<MftRecord>::new();
-    enumerate_mft_via_service(volume, |batch| {
+    set_provider_stage(
+        manager,
+        app,
+        root,
+        "windowsNtfs",
+        "scanning",
+        "enumeratingMft",
+        None,
+    );
+    let enumeration = enumerate_mft_via_service(volume, |batch| {
         if manager.is_cancelled(generation) {
             anyhow::bail!("MFT 枚举已取消");
         }
-        manager.status.lock().unwrap().scanned_files += batch.len() as u64;
+        add_provider_progress(manager, app, root, "enumeratingMft", batch.len() as u64, 0);
         records.extend(batch);
-        manager.emit_status(app);
         Ok(())
     })?;
+    eprintln!(
+        "[search-index] root={root} volume={} stage=enumeratingMft event=complete records={} batches={} elapsed_ms={}",
+        volume.to_ascii_uppercase(),
+        enumeration.records,
+        enumeration.batches,
+        volume_started.elapsed().as_millis()
+    );
     if manager.is_cancelled(generation) {
         anyhow::bail!("MFT enumeration was cancelled");
     }
@@ -1254,13 +1914,18 @@ fn enumerate_ntfs_volume_snapshot(
 }
 
 #[cfg(windows)]
-fn index_ntfs_volume_paths(
+fn index_ntfs_volume_paths<S: SearchStatusSink>(
     manager: &Arc<FileSearchManager>,
-    app: &tauri::AppHandle,
+    app: &S,
     generation: u64,
     snapshot: NtfsFinalizeJob,
 ) -> anyhow::Result<NtfsFinalizeJob> {
+    let started = std::time::Instant::now();
     let root = snapshot.root.clone();
+    let mut merge_elapsed = Duration::ZERO;
+    let mut searchable_files = 0_u64;
+    eprintln!("[search-index] root={root} stage=resolvingPaths event=start records=0");
+    eprintln!("[search-index] root={root} stage=merging event=start records=0");
     let (_, records) = resolve_mft_files_in_batches_retain(
         &root,
         snapshot.records,
@@ -1274,12 +1939,24 @@ fn index_ntfs_volume_paths(
                 .filter(|entry| !is_excluded(Path::new(&entry.path), &snapshot.exclusions))
                 .map(|entry| indexed_mft_entry(&root, entry))
                 .collect::<Vec<_>>();
+            let merge_started = std::time::Instant::now();
             manager.index_files(&files)?;
-            manager.emit_status(app);
+            merge_elapsed = merge_elapsed.saturating_add(merge_started.elapsed());
+            searchable_files = searchable_files.saturating_add(files.len() as u64);
+            add_provider_progress(manager, app, &root, "resolvingPaths", 0, files.len() as u64);
             Ok(())
         },
     )?;
+    let resolving_elapsed = started.elapsed().saturating_sub(merge_elapsed);
+    eprintln!(
+        "[search-index] root={root} stage=resolvingPaths event=complete records={searchable_files} elapsed_ms={}",
+        resolving_elapsed.as_millis()
+    );
     manager.commit_query_index()?;
+    eprintln!(
+        "[search-index] root={root} stage=merging event=complete records={searchable_files} elapsed_ms={}",
+        merge_elapsed.as_millis()
+    );
     Ok(NtfsFinalizeJob {
         root,
         volume: snapshot.volume,
@@ -1290,65 +1967,184 @@ fn index_ntfs_volume_paths(
 }
 
 #[cfg(windows)]
-fn system_volume_letter() -> Option<char> {
-    std::env::var("SystemDrive")
-        .ok()
-        .and_then(|drive| drive.chars().find(char::is_ascii_alphabetic))
-        .map(|letter| letter.to_ascii_uppercase())
+fn ntfs_volume_worker_count(task_count: usize) -> usize {
+    task_count.min(NTFS_VOLUME_WORKERS_MAX)
 }
 
 #[cfg(windows)]
-fn ntfs_scan_priority(
-    volume: char,
-    record_count: usize,
-    system_volume: Option<char>,
-) -> (bool, usize) {
-    (
-        system_volume.is_some_and(|letter| letter.eq_ignore_ascii_case(&volume)),
-        record_count,
-    )
-}
-
-#[cfg(windows)]
-fn persist_and_finalize_ntfs_volume(db_path: &Path, job: NtfsFinalizeJob) -> anyhow::Result<()> {
-    let mut connection = open_database(db_path)?;
-    connection.pragma_update(None, "synchronous", "OFF")?;
-    connection.pragma_update(None, "cache_size", -65_536)?;
-    connection.execute("DELETE FROM files WHERE root = ?1", params![&job.root])?;
-    let (_, records) = resolve_mft_files_in_batches_retain(
-        &job.root,
-        job.records,
-        NTFS_RESOLVE_BATCH,
-        |entries| {
-            let files = entries
-                .into_iter()
-                .filter(|entry| !is_excluded(Path::new(&entry.path), &job.exclusions))
-                .map(|entry| indexed_mft_entry(&job.root, entry))
-                .collect::<Vec<_>>();
-            insert_batch(&mut connection, &files)
-        },
-    )?;
-    replace_ntfs_nodes(&mut connection, &job.root, &records)?;
-    let journal_after = query_usn_via_service(job.volume)?;
-    if journal_after.journal_id != job.journal_before.journal_id
-        || job.journal_before.next_usn < journal_after.first_usn
-    {
-        anyhow::bail!("USN Journal 在 MFT 快照期间失效，需要重新枚举该卷");
+fn run_ntfs_volume_tasks<T, Work, Consume, Cancel>(
+    tasks: Vec<(String, char)>,
+    work: &Work,
+    is_cancelled: &Cancel,
+    mut consume: Consume,
+) -> anyhow::Result<bool>
+where
+    T: Send,
+    Work: Fn(String, char) -> anyhow::Result<T> + Sync,
+    Consume: FnMut(String, anyhow::Result<T>) -> anyhow::Result<()>,
+    Cancel: Fn() -> bool + Sync,
+{
+    let task_count = tasks.len();
+    if task_count == 0 {
+        return Ok(true);
     }
-    let mut changes = Vec::new();
-    read_usn_via_service(
-        job.volume,
-        job.journal_before.next_usn,
-        job.journal_before.journal_id,
-        journal_after.next_usn,
-        |batch| {
-            changes.extend(batch);
-            Ok(())
-        },
-    )?;
-    apply_usn_changes(&mut connection, &job.root, &job.exclusions, changes)?;
-    save_ntfs_volume_state(&connection, &job.root, job.volume, &journal_after, true)?;
-    Ok(())
+    let tasks = Arc::new(Mutex::new(VecDeque::from(tasks)));
+    let worker_count = ntfs_volume_worker_count(task_count);
+    let (sender, receiver) = sync_channel(worker_count);
+    std::thread::scope(|scope| -> anyhow::Result<bool> {
+        for _ in 0..worker_count {
+            let tasks = Arc::clone(&tasks);
+            let sender = sender.clone();
+            scope.spawn(move || loop {
+                if is_cancelled() {
+                    break;
+                }
+                let task = tasks.lock().unwrap().pop_front();
+                let Some((root, volume)) = task else {
+                    break;
+                };
+                let result = work(root.clone(), volume);
+                if sender.send((root, result)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(sender);
+
+        for _ in 0..task_count {
+            if is_cancelled() {
+                return Ok(false);
+            }
+            let (root, result) = receiver.recv().map_err(|_| {
+                anyhow::anyhow!("NTFS volume worker stopped before reporting its result")
+            })?;
+            consume(root, result)?;
+        }
+        Ok(true)
+    })
+}
+
+#[cfg(windows)]
+fn persist_and_finalize_ntfs_volume(
+    db_path: &Path,
+    job: NtfsFinalizeJob,
+    rebuild_node_index: bool,
+) -> anyhow::Result<()> {
+    let NtfsFinalizeJob {
+        root,
+        volume,
+        exclusions,
+        journal_before,
+        records: snapshot_records,
+    } = job;
+    let started = std::time::Instant::now();
+    eprintln!(
+        "[search-index] root={} stage=persisting event=start records={}",
+        root,
+        snapshot_records.len()
+    );
+    let directory_ids = snapshot_records
+        .iter()
+        .filter(|record| record.is_directory())
+        .map(|record| record.id)
+        .collect::<HashSet<_>>();
+    std::thread::scope(|scope| -> anyhow::Result<()> {
+        let usn_reconciliation = scope.spawn(|| -> anyhow::Result<_> {
+            let journal_after = query_usn_via_service(volume)?;
+            if journal_after.journal_id != journal_before.journal_id
+                || journal_before.next_usn < journal_after.first_usn
+            {
+                anyhow::bail!("USN Journal 在 MFT 快照期间失效，需要重新枚举该卷");
+            }
+            if persistence_usn_range_exceeds_limit(journal_before.next_usn, journal_after.next_usn)
+            {
+                return Ok((journal_after, Vec::new(), Some("bounded-usn-range-limit")));
+            }
+            let (changes, watcher_reconcile_reason) = collect_persistence_usn_changes(
+                &directory_ids,
+                MAX_USN_REPLAY_RECORDS,
+                PERSISTENCE_USN_REPLAY_MAX_DURATION,
+                |on_batch| {
+                    read_usn_via_service(
+                        volume,
+                        journal_before.next_usn,
+                        journal_before.journal_id,
+                        journal_after.next_usn,
+                        on_batch,
+                    )
+                },
+            )?;
+            Ok((journal_after, changes, watcher_reconcile_reason))
+        });
+
+        let mut connection = open_database(db_path)?;
+        connection.pragma_update(None, "synchronous", "OFF")?;
+        connection.pragma_update(None, "cache_size", -524_288)?;
+        connection.pragma_update(None, "mmap_size", 268_435_456_i64)?;
+        let transaction = connection.transaction()?;
+        transaction.execute("DELETE FROM files WHERE root = ?1", params![&root])?;
+        let paths_started = std::time::Instant::now();
+        let (_, records) = resolve_mft_files_in_batches_retain(
+            &root,
+            snapshot_records,
+            NTFS_RESOLVE_BATCH,
+            |entries| {
+                let files = entries
+                    .into_iter()
+                    .filter(|entry| !is_excluded(Path::new(&entry.path), &exclusions))
+                    .map(|entry| indexed_mft_entry(&root, entry))
+                    .collect::<Vec<_>>();
+                write_file_rows(&transaction, &files, false)
+            },
+        )?;
+        transaction.commit()?;
+        eprintln!(
+            "[search-index] root={} sqlite-paths-ready records={} elapsed_ms={}",
+            root,
+            records.len(),
+            paths_started.elapsed().as_millis()
+        );
+        let nodes_started = std::time::Instant::now();
+        if rebuild_node_index {
+            replace_ntfs_nodes(&mut connection, &root, &records)?;
+        } else {
+            replace_ntfs_node_rows(&mut connection, &root, &records)?;
+        }
+        eprintln!(
+            "[search-index] root={} sqlite-nodes-ready records={} elapsed_ms={}",
+            root,
+            records.len(),
+            nodes_started.elapsed().as_millis()
+        );
+        let (journal_after, changes, watcher_reconcile_reason) = usn_reconciliation
+            .join()
+            .map_err(|_| anyhow::anyhow!("USN reconciliation worker panicked"))??;
+        if let Some(reason) = watcher_reconcile_reason {
+            save_ntfs_volume_state(&connection, &root, volume, &journal_after, false)?;
+            eprintln!(
+                "[search-index] root={} strategy=watcher-reconcile snapshot_complete=false reason={} elapsed_ms={}",
+                root,
+                reason,
+                started.elapsed().as_millis()
+            );
+            eprintln!(
+                "[search-index] root={} stage=persisting event=complete records={} strategy=watcher-reconcile elapsed_ms={}",
+                root,
+                records.len(),
+                started.elapsed().as_millis()
+            );
+            return Ok(());
+        }
+        apply_usn_changes(&mut connection, &root, &exclusions, changes)?;
+        save_ntfs_volume_state(&connection, &root, volume, &journal_after, true)?;
+        eprintln!(
+            "[search-index] root={} stage=persisting event=complete records={} elapsed_ms={}",
+            root,
+            records.len(),
+            started.elapsed().as_millis()
+        );
+        Ok(())
+    })
 }
 
 #[cfg(windows)]
@@ -1373,9 +2169,23 @@ fn replace_ntfs_nodes(
     records: &[MftRecord],
 ) -> anyhow::Result<()> {
     connection.execute_batch("DROP INDEX IF EXISTS ntfs_nodes_parent_idx")?;
+    replace_ntfs_node_rows(connection, root, records)?;
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS ntfs_nodes_parent_idx
+           ON ntfs_nodes(root, parent_id)",
+    )?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_ntfs_node_rows(
+    connection: &mut Connection,
+    root: &str,
+    records: &[MftRecord],
+) -> anyhow::Result<()> {
     let tx = connection.transaction()?;
     tx.execute("DELETE FROM ntfs_nodes WHERE root = ?1", params![root])?;
-    for chunk in records.chunks(500) {
+    for chunk in records.chunks(5_000) {
         let placeholders = (0..chunk.len())
             .map(|_| "(?, ?, ?, ?, ?, ?)")
             .collect::<Vec<_>>()
@@ -1396,7 +2206,18 @@ fn replace_ntfs_nodes(
         tx.execute(&sql, rusqlite::params_from_iter(values))?;
     }
     tx.commit()?;
-    connection.execute_batch(
+    Ok(())
+}
+
+#[cfg(windows)]
+fn begin_ntfs_nodes_bulk(db_path: &Path) -> anyhow::Result<()> {
+    open_database(db_path)?.execute_batch("DROP INDEX IF EXISTS ntfs_nodes_parent_idx")?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn finish_ntfs_nodes_bulk(db_path: &Path) -> anyhow::Result<()> {
+    open_database(db_path)?.execute_batch(
         "CREATE INDEX IF NOT EXISTS ntfs_nodes_parent_idx
            ON ntfs_nodes(root, parent_id)",
     )?;
@@ -1405,10 +2226,23 @@ fn replace_ntfs_nodes(
 
 #[cfg(windows)]
 fn load_ntfs_nodes(connection: &Connection, root: &str) -> anyhow::Result<Vec<MftRecord>> {
-    let mut statement = connection.prepare(
+    load_ntfs_records(connection, root, false)
+}
+
+#[cfg(windows)]
+fn load_ntfs_records(
+    connection: &Connection,
+    root: &str,
+    directories_only: bool,
+) -> anyhow::Result<Vec<MftRecord>> {
+    let sql = if directories_only {
         "SELECT file_id, parent_id, name, attributes, usn
-         FROM ntfs_nodes WHERE root = ?1",
-    )?;
+         FROM ntfs_nodes WHERE root = ?1 AND (attributes & 16) != 0"
+    } else {
+        "SELECT file_id, parent_id, name, attributes, usn
+         FROM ntfs_nodes WHERE root = ?1"
+    };
+    let mut statement = connection.prepare(sql)?;
     let rows = statement.query_map(params![root], |row| {
         let id = row.get::<_, Vec<u8>>(0)?;
         let parent_id = row.get::<_, Vec<u8>>(1)?;
@@ -1441,6 +2275,26 @@ fn apply_usn_changes(
     const USN_REASON_RENAME_OLD_NAME: u32 = 0x0000_1000;
     if changes.is_empty() {
         return Ok(());
+    }
+    let has_directory_change = {
+        let mut attributes = connection
+            .prepare_cached("SELECT attributes FROM ntfs_nodes WHERE root = ?1 AND file_id = ?2")?;
+        changes.iter().try_fold(false, |found, change| {
+            if found || change.is_directory() {
+                return Ok(true);
+            }
+            let previous = attributes
+                .query_row(params![root, change.id.as_bytes().as_slice()], |row| {
+                    row.get::<_, u32>(0)
+                })
+                .optional()?;
+            Ok::<_, anyhow::Error>(
+                previous.is_some_and(|value| value & FILE_ATTRIBUTE_DIRECTORY != 0),
+            )
+        })?
+    };
+    if !has_directory_change {
+        return apply_file_usn_changes(connection, root, exclusions, changes);
     }
     let old_records = load_ntfs_nodes(connection, root)?;
     let old_by_id = old_records
@@ -1507,6 +2361,65 @@ fn apply_usn_changes(
         let files = entries
             .into_iter()
             .filter(|entry| new_affected.contains(&entry.id))
+            .filter(|entry| !is_excluded(Path::new(&entry.path), exclusions))
+            .map(|entry| indexed_mft_entry(root, entry))
+            .collect::<Vec<_>>();
+        write_batch(connection, &files)
+    })?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn apply_file_usn_changes(
+    connection: &mut Connection,
+    root: &str,
+    exclusions: &[String],
+    changes: Vec<MftRecord>,
+) -> anyhow::Result<()> {
+    const USN_REASON_FILE_DELETE: u32 = 0x0000_0200;
+    const USN_REASON_RENAME_OLD_NAME: u32 = 0x0000_1000;
+    let mut changed = HashMap::new();
+    let tx = connection.transaction()?;
+    {
+        let mut delete_node =
+            tx.prepare_cached("DELETE FROM ntfs_nodes WHERE root = ?1 AND file_id = ?2")?;
+        let mut upsert_node = tx.prepare_cached(
+            "INSERT INTO ntfs_nodes(root, file_id, parent_id, name, attributes, usn)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(root, file_id) DO UPDATE SET
+               parent_id=excluded.parent_id, name=excluded.name,
+               attributes=excluded.attributes, usn=excluded.usn",
+        )?;
+        let mut delete_file =
+            tx.prepare_cached("DELETE FROM files WHERE root = ?1 AND file_id = ?2")?;
+        for change in changes {
+            delete_file.execute(params![root, change.id.as_bytes().as_slice()])?;
+            if change.reason & USN_REASON_FILE_DELETE != 0 {
+                delete_node.execute(params![root, change.id.as_bytes().as_slice()])?;
+                changed.remove(&change.id);
+            } else if change.reason & USN_REASON_RENAME_OLD_NAME == 0 {
+                upsert_node.execute(params![
+                    root,
+                    change.id.as_bytes().as_slice(),
+                    change.parent_id.as_bytes().as_slice(),
+                    change.name,
+                    change.attributes,
+                    change.usn,
+                ])?;
+                changed.insert(change.id, change);
+            }
+        }
+    }
+    tx.commit()?;
+
+    if changed.is_empty() {
+        return Ok(());
+    }
+    let mut records = load_ntfs_records(connection, root, true)?;
+    records.extend(changed.into_values());
+    resolve_mft_files_in_batches(root, records, NTFS_RESOLVE_BATCH, |entries| {
+        let files = entries
+            .into_iter()
             .filter(|entry| !is_excluded(Path::new(&entry.path), exclusions))
             .map(|entry| indexed_mft_entry(root, entry))
             .collect::<Vec<_>>();
@@ -1627,13 +2540,28 @@ fn load_ntfs_volume_state(
 }
 
 #[cfg(windows)]
-fn catch_up_ntfs_volume(
+struct NtfsCatchUpJob {
+    root: String,
+    volume: char,
+    exclusions: Vec<String>,
+    journal: UsnJournalInfo,
+    changes: Vec<MftRecord>,
+}
+
+#[cfg(windows)]
+enum NtfsResumeJob {
+    CatchUp(NtfsCatchUpJob),
+    Rebuild(NtfsFinalizeJob),
+}
+
+#[cfg(windows)]
+fn prepare_ntfs_catch_up(
     db_path: &Path,
     root: &str,
     volume: char,
     exclusions: &[String],
-) -> anyhow::Result<()> {
-    let mut connection = open_database(db_path)?;
+) -> anyhow::Result<NtfsCatchUpJob> {
+    let connection = open_database(db_path)?;
     let state = load_ntfs_volume_state(&connection, root)?
         .filter(|state| state.snapshot_complete)
         .ok_or_else(|| anyhow::anyhow!("NTFS 快照未完成"))?;
@@ -1664,13 +2592,152 @@ fn catch_up_ntfs_volume(
             Ok(())
         },
     )?;
-    apply_usn_changes(&mut connection, root, exclusions, changes)?;
-    save_ntfs_volume_state(&connection, root, volume, &journal, true)
+    if usn_changes_require_rebuild(&connection, root, &changes)? {
+        anyhow::bail!("USN 包含目录变化，需要全量重建该卷");
+    }
+    Ok(NtfsCatchUpJob {
+        root: root.into(),
+        volume,
+        exclusions: exclusions.to_vec(),
+        journal,
+        changes,
+    })
 }
 
-fn scan_folder_roots(
+#[cfg(windows)]
+fn usn_changes_require_rebuild(
+    connection: &Connection,
+    root: &str,
+    changes: &[MftRecord],
+) -> anyhow::Result<bool> {
+    let mut attributes = connection
+        .prepare_cached("SELECT attributes FROM ntfs_nodes WHERE root = ?1 AND file_id = ?2")?;
+    changes.iter().try_fold(false, |found, change| {
+        if found || change.is_directory() {
+            return Ok(true);
+        }
+        let previous = attributes
+            .query_row(params![root, change.id.as_bytes().as_slice()], |row| {
+                row.get::<_, u32>(0)
+            })
+            .optional()?;
+        Ok(previous.is_some_and(|value| value & FILE_ATTRIBUTE_DIRECTORY != 0))
+    })
+}
+
+#[cfg(all(windows, test))]
+#[derive(Debug)]
+struct DirectoryChangeDuringUsnRead;
+
+#[cfg(all(windows, test))]
+impl std::fmt::Display for DirectoryChangeDuringUsnRead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("directory change detected while reading USN batches")
+    }
+}
+
+#[cfg(all(windows, test))]
+impl std::error::Error for DirectoryChangeDuringUsnRead {}
+
+#[cfg(all(windows, test))]
+fn collect_usn_changes_until_directory_change<F, R>(
+    connection: &Connection,
+    root: &str,
+    read_batches: F,
+) -> anyhow::Result<(Vec<MftRecord>, bool)>
+where
+    F: FnOnce(&mut dyn FnMut(Vec<MftRecord>) -> anyhow::Result<()>) -> anyhow::Result<R>,
+{
+    let mut changes = Vec::new();
+    let mut on_batch = |batch: Vec<MftRecord>| {
+        if usn_changes_require_rebuild(connection, root, &batch)? {
+            return Err(anyhow::Error::new(DirectoryChangeDuringUsnRead));
+        }
+        changes.extend(batch);
+        Ok(())
+    };
+    match read_batches(&mut on_batch) {
+        Ok(_) => Ok((changes, false)),
+        Err(error)
+            if error
+                .downcast_ref::<DirectoryChangeDuringUsnRead>()
+                .is_some() =>
+        {
+            Ok((changes, true))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct PersistenceUsnReplayStopped(&'static str);
+
+#[cfg(windows)]
+impl std::fmt::Display for PersistenceUsnReplayStopped {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "persistence USN replay stopped: {}", self.0)
+    }
+}
+
+#[cfg(windows)]
+impl std::error::Error for PersistenceUsnReplayStopped {}
+
+#[cfg(windows)]
+fn collect_persistence_usn_changes<F, R>(
+    known_directories: &HashSet<crate::ntfs::FileId>,
+    max_records: usize,
+    max_duration: Duration,
+    read_batches: F,
+) -> anyhow::Result<(Vec<MftRecord>, Option<&'static str>)>
+where
+    F: FnOnce(&mut dyn FnMut(Vec<MftRecord>) -> anyhow::Result<()>) -> anyhow::Result<R>,
+{
+    let started = std::time::Instant::now();
+    let mut changes = Vec::new();
+    let mut on_batch = |batch: Vec<MftRecord>| {
+        if batch
+            .iter()
+            .any(|change| change.is_directory() || known_directories.contains(&change.id))
+        {
+            return Err(anyhow::Error::new(PersistenceUsnReplayStopped(
+                "directory-change-during-persistence",
+            )));
+        }
+        if changes.len().saturating_add(batch.len()) > max_records
+            || started.elapsed() >= max_duration
+        {
+            return Err(anyhow::Error::new(PersistenceUsnReplayStopped(
+                "bounded-usn-replay-limit",
+            )));
+        }
+        changes.extend(batch);
+        Ok(())
+    };
+    match read_batches(&mut on_batch) {
+        Ok(_) => Ok((changes, None)),
+        Err(error) => match error.downcast_ref::<PersistenceUsnReplayStopped>() {
+            Some(stopped) => Ok((changes, Some(stopped.0))),
+            None => Err(error),
+        },
+    }
+}
+
+#[cfg(windows)]
+fn persistence_usn_range_exceeds_limit(start_usn: i64, target_usn: i64) -> bool {
+    target_usn.saturating_sub(start_usn) > PERSISTENCE_USN_REPLAY_MAX_RANGE
+}
+
+#[cfg(windows)]
+fn apply_ntfs_catch_up(db_path: &Path, job: NtfsCatchUpJob) -> anyhow::Result<()> {
+    let mut connection = open_database(db_path)?;
+    apply_usn_changes(&mut connection, &job.root, &job.exclusions, job.changes)?;
+    save_ntfs_volume_state(&connection, &job.root, job.volume, &job.journal, true)
+}
+
+fn scan_folder_roots<S: SearchStatusSink>(
     manager: &Arc<FileSearchManager>,
-    app: &tauri::AppHandle,
+    app: &S,
     generation: u64,
     config: &SearchConfig,
     roots: &[String],
@@ -1683,6 +2750,23 @@ fn scan_folder_roots(
         if manager.is_cancelled(generation) {
             return Ok(());
         }
+        let fallback_reason = manager
+            .status
+            .lock()
+            .unwrap()
+            .providers
+            .iter()
+            .find(|item| item.root == *root)
+            .and_then(|item| item.fallback_reason.clone());
+        set_provider_stage(
+            manager,
+            app,
+            root,
+            "folderScan",
+            "scanning",
+            "scanning",
+            fallback_reason,
+        );
         let root_path = PathBuf::from(root);
         if !root_path.is_dir() || is_excluded(&root_path, &config.exclusions) {
             continue;
@@ -1732,13 +2816,26 @@ fn scan_folder_roots(
                 if let Some(indexed) = indexed_file(&path, root) {
                     pending.push(indexed);
                     let mut status = manager.status.lock().unwrap();
-                    status.scanned_files += 1;
+                    if let Some(provider) = status
+                        .providers
+                        .iter_mut()
+                        .find(|provider| provider.root == *root)
+                    {
+                        provider.discovered_records = provider.discovered_records.saturating_add(1);
+                    }
+                    status.scanned_files = status
+                        .providers
+                        .iter()
+                        .map(|provider| provider.discovered_records)
+                        .sum();
                     let scanned = status.scanned_files;
                     drop(status);
                     if pending.len() >= SCAN_WRITE_BATCH {
+                        let searchable = pending.len() as u64;
                         write_batch(&mut connection, &pending)?;
                         manager.index_files(&pending)?;
                         pending.clear();
+                        add_provider_progress(manager, app, root, "scanning", 0, searchable);
                     }
                     if scanned % 2048 == 0 {
                         manager.refresh_counts();
@@ -1747,10 +2844,13 @@ fn scan_folder_roots(
                 }
             }
         }
-    }
-    if !pending.is_empty() {
-        write_batch(&mut connection, &pending)?;
-        manager.index_files(&pending)?;
+        if !pending.is_empty() {
+            let searchable = pending.len() as u64;
+            write_batch(&mut connection, &pending)?;
+            manager.index_files(&pending)?;
+            pending.clear();
+            add_provider_progress(manager, app, root, "scanning", 0, searchable);
+        }
     }
     manager.commit_query_index()?;
     for root in roots {
@@ -1765,6 +2865,25 @@ fn scan_folder_roots(
         set_provider_status(manager, app, root, "folderScan", "ready", fallback_reason);
     }
     Ok(())
+}
+
+fn replace_roots_with_folder_scan<S: SearchStatusSink>(
+    manager: &Arc<FileSearchManager>,
+    app: &S,
+    generation: u64,
+    config: &SearchConfig,
+    roots: &[String],
+) -> anyhow::Result<()> {
+    let mut connection = open_database(&manager.db_path)?;
+    let transaction = connection.transaction()?;
+    for root in roots {
+        transaction.execute("DELETE FROM files WHERE root = ?1", params![root])?;
+        transaction.execute("DELETE FROM ntfs_nodes WHERE root = ?1", params![root])?;
+        transaction.execute("DELETE FROM search_volumes WHERE root = ?1", params![root])?;
+    }
+    transaction.commit()?;
+    scan_folder_roots(manager, app, generation, config, roots)?;
+    manager.rebuild_query_index_from_database()
 }
 
 fn apply_event_paths(
@@ -1790,9 +2909,11 @@ fn apply_event_paths(
         } else {
             let value = path.to_string_lossy();
             let prefix = format!("{}{}", value, std::path::MAIN_SEPARATOR);
+            let upper_bound = format!("{prefix}{}", char::MAX);
+            tx.execute("DELETE FROM files WHERE path = ?1", params![value.as_ref()])?;
             tx.execute(
-                "DELETE FROM files WHERE path = ?1 OR substr(path, 1, length(?2)) = ?2",
-                params![value.as_ref(), prefix],
+                "DELETE FROM files WHERE path >= ?1 AND path < ?2",
+                params![prefix, upper_bound],
             )?;
         }
     }
@@ -1800,30 +2921,42 @@ fn apply_event_paths(
     Ok(())
 }
 
-fn drain_event_paths(
-    db_path: &Path,
-    config: &SearchConfig,
-    receiver: &Receiver<Event>,
-) -> anyhow::Result<()> {
-    loop {
+fn collect_event_paths_bounded(receiver: &Receiver<Event>) -> Vec<PathBuf> {
+    let started = std::time::Instant::now();
+    eprintln!("[search-index] stage=handoff event=start records=0");
+    let mut batches = 0;
+    let mut event_paths = 0usize;
+    let mut pending_paths = Vec::new();
+    while event_handoff_should_continue(batches, started.elapsed()) {
         let mut paths = Vec::new();
         loop {
             match receiver.try_recv() {
                 Ok(event) => paths.extend(event.paths),
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return Ok(()),
+                Err(TryRecvError::Disconnected) => break,
             }
             if paths.len() >= EVENT_BATCH {
                 break;
             }
         }
         if paths.is_empty() {
-            return Ok(());
+            break;
         }
-        paths.sort();
-        paths.dedup();
-        apply_event_paths(db_path, config, &paths)?;
+        event_paths = event_paths.saturating_add(paths.len());
+        pending_paths.extend(paths);
+        batches += 1;
     }
+    pending_paths.sort();
+    pending_paths.dedup();
+    eprintln!(
+        "[search-index] stage=handoff event=complete batches={batches} records={event_paths} elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
+    pending_paths
+}
+
+fn event_handoff_should_continue(batches: usize, elapsed: Duration) -> bool {
+    batches < EVENT_HANDOFF_MAX_BATCHES && elapsed < EVENT_HANDOFF_MAX_DURATION
 }
 
 fn upsert_subtree(
@@ -1896,6 +3029,7 @@ fn initialize_database_with_query(
     query_documents: Option<u64>,
 ) -> anyhow::Result<DatabaseInitialization> {
     let connection = open_database(path)?;
+    connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS files(
@@ -2118,8 +3252,7 @@ fn open_database(path: &Path) -> anyhow::Result<Connection> {
         fs::create_dir_all(parent)?;
     }
     let connection = Connection::open(path)?;
-    connection.busy_timeout(Duration::from_secs(5))?;
-    connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.busy_timeout(Duration::from_secs(15))?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
     Ok(connection)
 }
@@ -2135,18 +3268,23 @@ fn write_batch(connection: &mut Connection, files: &[IndexedFile]) -> anyhow::Re
     write_files(connection, files, true)
 }
 
-#[cfg(windows)]
-fn insert_batch(connection: &mut Connection, files: &[IndexedFile]) -> anyhow::Result<()> {
-    write_files(connection, files, false)
-}
-
 fn write_files(
     connection: &mut Connection,
     files: &[IndexedFile],
     update_existing: bool,
 ) -> anyhow::Result<()> {
     let tx = connection.transaction()?;
-    for chunk in files.chunks(500) {
+    write_file_rows(&tx, files, update_existing)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn write_file_rows(
+    connection: &Connection,
+    files: &[IndexedFile],
+    update_existing: bool,
+) -> anyhow::Result<()> {
+    for chunk in files.chunks(3_000) {
         let placeholders = (0..chunk.len())
             .map(|_| "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .collect::<Vec<_>>()
@@ -2191,9 +3329,8 @@ fn write_files(
                     .unwrap_or(rusqlite::types::Value::Null),
             );
         }
-        tx.execute(&sql, rusqlite::params_from_iter(values))?;
+        connection.execute(&sql, rusqlite::params_from_iter(values))?;
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -2566,6 +3703,14 @@ fn planned_provider_statuses(roots: &[String]) -> Vec<SearchProviderStatus> {
             root: root.clone(),
             provider: planned_provider(root).into(),
             phase: "pending".into(),
+            stage: "pending".into(),
+            discovered_records: 0,
+            searchable_files: 0,
+            started_ms: None,
+            elapsed_ms: 0,
+            stage_started_ms: None,
+            stage_elapsed_ms: 0,
+            completed_ms: None,
             fallback_reason: None,
         })
         .collect()
@@ -2805,6 +3950,37 @@ mod tests {
     }
 
     #[test]
+    fn read_connection_does_not_renegotiate_wal_while_a_writer_is_active() {
+        let directory = test_directory("concurrent-read");
+        let database = directory.join("index.sqlite3");
+        initialize_database(&database).unwrap();
+
+        let writer = open_database(&database).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        writer
+            .execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES('writer_active', 1)",
+                [],
+            )
+            .unwrap();
+
+        let reader = open_database(&database).unwrap();
+        let journal_mode = reader
+            .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+            .unwrap();
+        let file_count = reader
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, u64>(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        assert_eq!(file_count, 0);
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        drop(reader);
+        drop(writer);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn visible_metadata_is_enriched_without_reading_file_contents() {
         let directory = test_directory("visible-metadata");
         let path = directory.join("service.log");
@@ -2875,6 +4051,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(old_total, 1, "旧快照应在新快照完成前保持可查询");
+        manager.commit_query_index().unwrap();
+        manager.status.lock().unwrap().phase = "scanning".into();
+        let (_, partial_total) = manager
+            .query_tantivy(&["replacement".into()], "log", 0, 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(partial_total, 1, "重建期间应查询已提交的 staging 结果");
         manager.finish_query_index_bulk().unwrap();
         let (_, new_total) = manager
             .query_tantivy(&["replacement".into()], "log", 0, 10)
@@ -2898,6 +4081,161 @@ mod tests {
         assert_eq!(new_total, 1, "中断重建后应恢复上一份完整快照");
         assert!(!query_index_staging_path(&recovered.query_index_path).exists());
         drop(recovered);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn query_index_filesystem_errors_include_stage_paths_and_use_bounded_retry() {
+        let attempts = AtomicU64::new(0);
+        let source = Path::new("source.next");
+        let destination = Path::new("active");
+        let result = retry_query_index_fs(
+            "switch-staging-to-active",
+            source,
+            Some(destination),
+            || {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                if cfg!(windows) && attempt < 2 {
+                    Err(std::io::Error::from_raw_os_error(5))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            if cfg!(windows) { 3 } else { 1 }
+        );
+
+        let error = retry_query_index_fs::<(), _>(
+            "switch-active-to-previous",
+            source,
+            Some(destination),
+            || Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("stage=switch-active-to-previous"));
+        assert!(error.contains("source.next"));
+        assert!(error.contains("active"));
+    }
+
+    #[test]
+    fn query_snapshot_switch_tolerates_concurrent_queries() {
+        let directory = test_directory("concurrent-query-switch");
+        let manager = FileSearchManager::new(directory.clone());
+        manager
+            .query_index
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .add_batch(&[SearchIndexEntry {
+                path: "C:\\old.log".into(),
+                name: "old.log".into(),
+                is_log: true,
+                is_archive: false,
+            }])
+            .unwrap();
+        manager.commit_query_index().unwrap();
+        manager.query_index_ready.store(true, Ordering::Release);
+        manager.begin_query_index_bulk().unwrap();
+        manager
+            .index_files(&[IndexedFile {
+                path: "D:\\new.log".into(),
+                name: "new.log".into(),
+                root: "D:\\".into(),
+                size: 0,
+                modified_ms: None,
+                is_log: true,
+                is_archive: false,
+                file_id: None,
+                parent_id: None,
+            }])
+            .unwrap();
+        manager.commit_query_index().unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        std::thread::scope(|scope| {
+            let stop_query = Arc::clone(&stop);
+            let manager_query = Arc::clone(&manager);
+            scope.spawn(move || {
+                while !stop_query.load(Ordering::Relaxed) {
+                    let _ = manager_query.query_tantivy(&["old".into()], "", 0, 10);
+                }
+            });
+            manager.finish_query_index_bulk().unwrap();
+            stop.store(true, Ordering::Relaxed);
+        });
+        let (_, total) = manager
+            .query_tantivy(&["new".into()], "", 0, 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(total, 1);
+        drop(manager);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn query_index_recovery_promotes_previous_snapshot_when_active_is_missing() {
+        let directory = test_directory("previous-query-recovery");
+        let active = directory.join("index");
+        let previous = query_index_previous_path(&active);
+        let mut index = SearchIndex::open(&previous).unwrap();
+        index
+            .add_batch(&[SearchIndexEntry {
+                path: "C:\\restored.log".into(),
+                name: "restored.log".into(),
+                is_log: true,
+                is_archive: false,
+            }])
+            .unwrap();
+        index.commit().unwrap();
+        drop(index);
+
+        recover_query_index_directories(&active).unwrap();
+        assert!(active.exists());
+        assert!(!previous.exists());
+        let index = SearchIndex::open(&active).unwrap();
+        assert_eq!(index.search(&["restored".into()], "", 0, 10).unwrap().1, 1);
+        drop(index);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_staging_switch_rolls_the_previous_snapshot_back() {
+        let directory = test_directory("query-switch-rollback");
+        let manager = FileSearchManager::new(directory.clone());
+        manager
+            .query_index
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .add_batch(&[SearchIndexEntry {
+                path: "C:\\stable.log".into(),
+                name: "stable.log".into(),
+                is_log: true,
+                is_archive: false,
+            }])
+            .unwrap();
+        manager.commit_query_index().unwrap();
+        manager.query_index_ready.store(true, Ordering::Release);
+
+        let error = manager
+            .activate_staged_query_index()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("stage=switch-staging-to-active"));
+        assert!(manager.query_index_path.exists());
+        assert!(!query_index_previous_path(&manager.query_index_path).exists());
+        let (_, total) = manager
+            .query_tantivy(&["stable".into()], "", 0, 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(total, 1);
+        drop(manager);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -3050,11 +4388,321 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn non_system_ntfs_volumes_are_indexed_before_the_system_volume() {
-        assert!(
-            ntfs_scan_priority('D', 3_000_000, Some('C')) < ntfs_scan_priority('C', 1, Some('C'))
+    fn ntfs_volume_workers_are_bounded_by_service_capacity() {
+        assert_eq!(ntfs_volume_worker_count(0), 0);
+        assert_eq!(ntfs_volume_worker_count(2), 2);
+        assert_eq!(ntfs_volume_worker_count(10), NTFS_VOLUME_WORKERS_MAX);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn volume_scheduler_consumes_results_in_completion_order_and_isolates_failures() {
+        let consumed = Mutex::new(Vec::new());
+        let completed = run_ntfs_volume_tasks(
+            vec![
+                ("slow".into(), 'S'),
+                ("fast".into(), 'F'),
+                ("failed".into(), 'X'),
+            ],
+            &|root, _| {
+                if root == "slow" {
+                    std::thread::sleep(Duration::from_millis(40));
+                }
+                if root == "failed" {
+                    anyhow::bail!("simulated volume failure");
+                }
+                Ok(root)
+            },
+            &|| false,
+            |root, result| {
+                consumed.lock().unwrap().push((root, result.is_ok()));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(completed);
+        let consumed = consumed.into_inner().unwrap();
+        assert_eq!(consumed.len(), 3);
+        assert_eq!(consumed[0].0, "fast");
+        assert!(consumed.iter().any(|(root, ok)| root == "slow" && *ok));
+        assert!(consumed.iter().any(|(root, ok)| root == "failed" && !ok));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancelled_volume_scheduler_waits_for_started_workers_to_exit() {
+        struct ActiveGuard(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for ActiveGuard {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_signal = Arc::clone(&cancelled);
+        let trigger = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            cancel_signal.store(true, Ordering::SeqCst);
+        });
+        let worker_active = Arc::clone(&active);
+        let completed = run_ntfs_volume_tasks(
+            vec![("C:\\".into(), 'C'), ("D:\\".into(), 'D')],
+            &move |_, _| {
+                worker_active.fetch_add(1, Ordering::SeqCst);
+                let _guard = ActiveGuard(Arc::clone(&worker_active));
+                std::thread::sleep(Duration::from_millis(50));
+                Ok(())
+            },
+            &|| cancelled.load(Ordering::SeqCst),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        trigger.join().unwrap();
+
+        assert!(!completed);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn provider_progress_aggregates_real_per_volume_counts() {
+        let config = SearchConfig {
+            roots: vec!["C:\\".into(), "D:\\".into()],
+            ..SearchConfig::default()
+        };
+        let mut status = SearchStatus::disabled(&config);
+        status.phase = "scanning".into();
+        status.providers[0].phase = "scanning".into();
+        status.providers[0].stage = "enumeratingMft".into();
+        status.providers[0].discovered_records = 3_080_000;
+        status.providers[1].phase = "scanning".into();
+        status.providers[1].stage = "readingUsn".into();
+        status.providers[1].discovered_records = 0;
+
+        refresh_provider_elapsed(&mut status);
+
+        assert_eq!(status.scanned_files, 3_080_000);
+        assert_eq!(status.providers[0].stage, "enumeratingMft");
+        assert_eq!(status.providers[1].stage, "readingUsn");
+        assert_eq!(status.providers[1].discovered_records, 0);
+    }
+
+    #[test]
+    fn provider_stage_timing_resets_and_terminal_values_are_frozen() {
+        let config = SearchConfig {
+            roots: vec!["C:\\".into()],
+            ..SearchConfig::default()
+        };
+        let mut status = SearchStatus::disabled(&config);
+
+        update_provider_stage_at(
+            &mut status,
+            "C:\\",
+            "windowsNtfs",
+            "scanning",
+            "connecting",
+            None,
+            100,
         );
-        assert!(ntfs_scan_priority('E', 1, Some('C')) < ntfs_scan_priority('D', 2, Some('C')));
+        update_provider_stage_at(
+            &mut status,
+            "C:\\",
+            "windowsNtfs",
+            "scanning",
+            "connecting",
+            None,
+            150,
+        );
+        assert_eq!(status.providers[0].elapsed_ms, 50);
+        assert_eq!(status.providers[0].stage_elapsed_ms, 50);
+
+        update_provider_stage_at(
+            &mut status,
+            "C:\\",
+            "windowsNtfs",
+            "scanning",
+            "enumeratingMft",
+            None,
+            200,
+        );
+        assert_eq!(status.providers[0].elapsed_ms, 100);
+        assert_eq!(status.providers[0].stage_elapsed_ms, 0);
+
+        update_provider_stage_at(
+            &mut status,
+            "C:\\",
+            "windowsNtfs",
+            "ready",
+            "persisting",
+            None,
+            250,
+        );
+        assert_eq!(status.providers[0].elapsed_ms, 150);
+        assert_eq!(status.providers[0].stage_elapsed_ms, 0);
+        assert_eq!(status.providers[0].completed_ms, None);
+        update_provider_stage_at(
+            &mut status,
+            "C:\\",
+            "windowsNtfs",
+            "ready",
+            "ready",
+            None,
+            400,
+        );
+        assert_eq!(status.providers[0].elapsed_ms, 300);
+        assert_eq!(status.providers[0].completed_ms, Some(400));
+        let frozen = status.providers[0].clone();
+        refresh_provider_elapsed(&mut status);
+        assert_eq!(status.providers[0].elapsed_ms, frozen.elapsed_ms);
+        assert_eq!(
+            status.providers[0].stage_elapsed_ms,
+            frozen.stage_elapsed_ms
+        );
+    }
+
+    #[test]
+    fn global_searchable_count_is_the_sum_of_provider_snapshots() {
+        let config = SearchConfig {
+            roots: vec!["C:\\".into(), "D:\\".into()],
+            ..SearchConfig::default()
+        };
+        let mut status = SearchStatus::disabled(&config);
+        status.providers[0].discovered_records = 3_080_000;
+        status.providers[0].searchable_files = 2_529_000;
+        status.providers[1].discovered_records = 2_798_000;
+        status.providers[1].searchable_files = 2_515_000;
+
+        refresh_provider_totals(&mut status);
+
+        assert_eq!(status.scanned_files, 5_878_000);
+        assert_eq!(status.indexed_files, 5_044_000);
+    }
+
+    #[test]
+    fn event_handoff_is_bounded_by_batches_and_wall_time() {
+        assert!(event_handoff_should_continue(0, Duration::ZERO));
+        assert!(!event_handoff_should_continue(
+            EVENT_HANDOFF_MAX_BATCHES,
+            Duration::ZERO
+        ));
+        assert!(!event_handoff_should_continue(
+            0,
+            EVENT_HANDOFF_MAX_DURATION
+        ));
+    }
+
+    #[test]
+    fn watcher_skips_access_and_directory_metadata_noise() {
+        use notify::event::{AccessKind, DataChange, MetadataKind, ModifyKind, RenameMode};
+
+        let directory = test_directory("watcher-event-filter");
+        let file = directory.join("changed.log");
+        fs::write(&file, b"changed").unwrap();
+        assert!(!event_path_requires_reconcile(
+            &notify::EventKind::Access(AccessKind::Any),
+            &file,
+        ));
+        assert!(!event_path_requires_reconcile(
+            &notify::EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+            &directory,
+        ));
+        assert!(event_path_requires_reconcile(
+            &notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            &file,
+        ));
+        assert!(event_path_requires_reconcile(
+            &notify::EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            &directory,
+        ));
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn bounded_event_handoff_leaves_remaining_events_for_the_worker() {
+        let directory = test_directory("event-handoff");
+        let db = directory.join("search.sqlite3");
+        initialize_database(&db).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let event_count = EVENT_BATCH * EVENT_HANDOFF_MAX_BATCHES + 1;
+        for index in 0..event_count {
+            sender
+                .send(
+                    Event::new(notify::EventKind::Any)
+                        .add_path(directory.join(format!("missing-{index}.log"))),
+                )
+                .unwrap();
+        }
+
+        let handoff_paths = collect_event_paths_bounded(&receiver);
+
+        assert_eq!(handoff_paths.len(), EVENT_BATCH * EVENT_HANDOFF_MAX_BATCHES);
+        assert!(receiver.try_recv().is_ok());
+        drop(sender);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn ready_state_hands_later_events_to_the_resident_consumer_without_loss() {
+        let directory = test_directory("event-ready-handoff");
+        let db = directory.join("search.sqlite3");
+        initialize_database(&db).unwrap();
+        let root = directory.to_string_lossy().into_owned();
+        let config = SearchConfig {
+            enabled: true,
+            roots: vec![root],
+            exclusions: Vec::new(),
+            ..SearchConfig::default()
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (first_sender, first_receiver) = sync_channel(0);
+        let (continue_sender, continue_receiver) = sync_channel(0);
+        let producer_directory = directory.clone();
+        let producer = std::thread::spawn(move || {
+            for index in 0..10 {
+                let path = producer_directory.join(format!("before-ready-{index}.log"));
+                fs::write(&path, b"ready").unwrap();
+                sender
+                    .send(Event::new(notify::EventKind::Any).add_path(path))
+                    .unwrap();
+            }
+            first_sender.send(()).unwrap();
+            continue_receiver.recv().unwrap();
+            for index in 0..600 {
+                let path = producer_directory.join(format!("after-ready-{index}.log"));
+                fs::write(&path, b"resident").unwrap();
+                sender
+                    .send(Event::new(notify::EventKind::Any).add_path(path))
+                    .unwrap();
+            }
+        });
+
+        first_receiver.recv().unwrap();
+        let handoff_paths = collect_event_paths_bounded(&receiver);
+        apply_event_paths(&db, &config, &handoff_paths).unwrap();
+        let mut status = SearchStatus::disabled(&config);
+        status.phase = "ready".into();
+        assert_eq!(status.phase, "ready");
+        continue_sender.send(()).unwrap();
+
+        producer.join().unwrap();
+        while let Ok(first) = receiver.recv_timeout(Duration::from_millis(10)) {
+            let mut paths = first.paths;
+            while let Ok(event) = receiver.try_recv() {
+                paths.extend(event.paths);
+                if paths.len() >= EVENT_BATCH {
+                    break;
+                }
+            }
+            apply_event_paths(&db, &config, &paths).unwrap();
+        }
+        let connection = open_database(&db).unwrap();
+        let count = connection
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, u64>(0))
+            .unwrap();
+        assert_eq!(count, 610);
+        drop(connection);
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[cfg(windows)]
@@ -3165,6 +4813,273 @@ mod tests {
         let _ = fs::remove_dir_all(directory);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn directory_usn_changes_select_full_volume_rebuild() {
+        use crate::ntfs::{FileId, FILE_ATTRIBUTE_DIRECTORY};
+
+        let directory = test_directory("usn-strategy");
+        let db = directory.join("search.sqlite3");
+        initialize_database(&db).unwrap();
+        let mut connection = open_database(&db).unwrap();
+        let records = vec![
+            MftRecord {
+                id: FileId::from_u64(10),
+                parent_id: FileId::from_u64(5),
+                name: "Logs".into(),
+                attributes: FILE_ATTRIBUTE_DIRECTORY,
+                reason: 0,
+                usn: 1,
+            },
+            MftRecord {
+                id: FileId::from_u64(11),
+                parent_id: FileId::from_u64(10),
+                name: "app.log".into(),
+                attributes: 0,
+                reason: 0,
+                usn: 2,
+            },
+        ];
+        replace_ntfs_nodes(&mut connection, "C:\\", &records).unwrap();
+
+        let file_change = MftRecord {
+            reason: 0x100,
+            usn: 3,
+            ..records[1].clone()
+        };
+        assert!(!usn_changes_require_rebuild(&connection, "C:\\", &[file_change]).unwrap());
+
+        let renamed_directory_reported_without_attributes = MftRecord {
+            attributes: 0,
+            reason: 0x2000,
+            usn: 4,
+            ..records[0].clone()
+        };
+        assert!(usn_changes_require_rebuild(
+            &connection,
+            "C:\\",
+            &[renamed_directory_reported_without_attributes]
+        )
+        .unwrap());
+        drop(connection);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_change_in_first_usn_batch_stops_reading_later_batches() {
+        use crate::ntfs::{FileId, FILE_ATTRIBUTE_DIRECTORY};
+
+        let directory = test_directory("usn-directory-early-stop");
+        let db = directory.join("search.sqlite3");
+        initialize_database(&db).unwrap();
+        let mut connection = open_database(&db).unwrap();
+        let directory_record = MftRecord {
+            id: FileId::from_u64(10),
+            parent_id: FileId::from_u64(5),
+            name: "Logs".into(),
+            attributes: FILE_ATTRIBUTE_DIRECTORY,
+            reason: 0,
+            usn: 1,
+        };
+        replace_ntfs_nodes(
+            &mut connection,
+            "C:\\",
+            std::slice::from_ref(&directory_record),
+        )
+        .unwrap();
+
+        let mut batches_requested = 0;
+        let (changes, directory_change) = collect_usn_changes_until_directory_change(
+            &connection,
+            "C:\\",
+            |on_batch| -> anyhow::Result<()> {
+                batches_requested += 1;
+                on_batch(vec![MftRecord {
+                    attributes: 0,
+                    reason: 0x2000,
+                    usn: 2,
+                    ..directory_record
+                }])?;
+                batches_requested += 1;
+                on_batch(vec![MftRecord {
+                    id: FileId::from_u64(11),
+                    parent_id: FileId::from_u64(10),
+                    name: "never-read.log".into(),
+                    attributes: 0,
+                    reason: 0x100,
+                    usn: 3,
+                }])
+            },
+        )
+        .unwrap();
+
+        assert!(directory_change);
+        assert!(changes.is_empty());
+        assert_eq!(batches_requested, 1);
+        drop(connection);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn persistence_usn_replay_limit_stops_later_batches_and_requests_watcher_reconcile() {
+        use crate::ntfs::FileId;
+
+        let directory = test_directory("usn-persistence-limit");
+        let db = directory.join("search.sqlite3");
+        initialize_database(&db).unwrap();
+        let mut batches_requested = 0;
+        let known_directories = HashSet::new();
+        let (changes, reason) = collect_persistence_usn_changes(
+            &known_directories,
+            0,
+            Duration::from_secs(30),
+            |on_batch| -> anyhow::Result<()> {
+                batches_requested += 1;
+                on_batch(vec![MftRecord {
+                    id: FileId::from_u64(11),
+                    parent_id: FileId::from_u64(5),
+                    name: "changed.log".into(),
+                    attributes: 0,
+                    reason: 0x100,
+                    usn: 1,
+                }])?;
+                batches_requested += 1;
+                on_batch(Vec::new())
+            },
+        )
+        .unwrap();
+
+        assert!(changes.is_empty());
+        assert_eq!(reason, Some("bounded-usn-replay-limit"));
+        assert_eq!(batches_requested, 1);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn persistence_usn_classifies_attribute_less_known_directory_without_database_reads() {
+        use crate::ntfs::FileId;
+
+        let directory_id = FileId::from_u64(10);
+        let known_directories = HashSet::from([directory_id]);
+        let (changes, reason) = collect_persistence_usn_changes(
+            &known_directories,
+            MAX_USN_REPLAY_RECORDS,
+            Duration::from_secs(30),
+            |on_batch| -> anyhow::Result<()> {
+                on_batch(vec![MftRecord {
+                    id: directory_id,
+                    parent_id: FileId::from_u64(5),
+                    name: "Renamed".into(),
+                    attributes: 0,
+                    reason: 0x2000,
+                    usn: 1,
+                }])
+            },
+        )
+        .unwrap();
+
+        assert!(changes.is_empty());
+        assert_eq!(reason, Some("directory-change-during-persistence"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn persistence_usn_range_is_rejected_before_starting_an_unbounded_ipc_read() {
+        assert!(!persistence_usn_range_exceeds_limit(100, 100));
+        assert!(persistence_usn_range_exceeds_limit(100, 101));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_file_usn_changes_use_the_fast_path_without_rewriting_other_files() {
+        use crate::ntfs::{FileId, FILE_ATTRIBUTE_DIRECTORY};
+
+        let directory = test_directory("usn-file-fast-path");
+        let db = directory.join("search.sqlite3");
+        initialize_database(&db).unwrap();
+        let mut connection = open_database(&db).unwrap();
+        let records = vec![
+            MftRecord {
+                id: FileId::from_u64(5),
+                parent_id: FileId::from_u64(5),
+                name: ".".into(),
+                attributes: FILE_ATTRIBUTE_DIRECTORY,
+                reason: 0,
+                usn: 1,
+            },
+            MftRecord {
+                id: FileId::from_u64(10),
+                parent_id: FileId::from_u64(5),
+                name: "Logs".into(),
+                attributes: FILE_ATTRIBUTE_DIRECTORY,
+                reason: 0,
+                usn: 2,
+            },
+            MftRecord {
+                id: FileId::from_u64(11),
+                parent_id: FileId::from_u64(10),
+                name: "old.log".into(),
+                attributes: 0,
+                reason: 0,
+                usn: 3,
+            },
+            MftRecord {
+                id: FileId::from_u64(12),
+                parent_id: FileId::from_u64(10),
+                name: "untouched.log".into(),
+                attributes: 0,
+                reason: 0,
+                usn: 4,
+            },
+        ];
+        replace_ntfs_nodes(&mut connection, "C:\\", &records).unwrap();
+        let files = records[2..]
+            .iter()
+            .map(|record| IndexedFile {
+                path: format!("C:\\Logs\\{}", record.name),
+                name: record.name.clone(),
+                root: "C:\\".into(),
+                size: 0,
+                modified_ms: None,
+                is_log: true,
+                is_archive: false,
+                file_id: Some(record.id.as_bytes()),
+                parent_id: Some(record.parent_id.as_bytes()),
+            })
+            .collect::<Vec<_>>();
+        write_batch(&mut connection, &files).unwrap();
+
+        apply_usn_changes(
+            &mut connection,
+            "C:\\",
+            &[],
+            vec![MftRecord {
+                name: "renamed.log".into(),
+                reason: 0x2000,
+                usn: 5,
+                ..records[2].clone()
+            }],
+        )
+        .unwrap();
+
+        let paths = connection
+            .prepare("SELECT path FROM files ORDER BY path")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            paths,
+            vec!["C:\\Logs\\renamed.log", "C:\\Logs\\untouched.log"]
+        );
+        drop(connection);
+        let _ = fs::remove_dir_all(directory);
+    }
+
     #[test]
     fn runtime_config_excludes_the_search_database_directory() {
         let data_dir = test_directory("internal-exclusion");
@@ -3195,6 +5110,40 @@ mod tests {
         let current = manager.generation.load(Ordering::Relaxed);
         manager.cancel.store(true, Ordering::SeqCst);
         assert!(manager.is_cancelled(current));
+        drop(manager);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn cancellation_waits_for_the_active_operation_before_returning() {
+        let data_dir = test_directory("cancel-waits-operation");
+        let manager = FileSearchManager::new(data_dir.clone());
+        let operation_manager = Arc::clone(&manager);
+        let (locked_sender, locked_receiver) = sync_channel(0);
+        let (release_sender, release_receiver) = sync_channel(0);
+        let holder = std::thread::spawn(move || {
+            let _operation = operation_manager.operation.lock().unwrap();
+            locked_sender.send(()).unwrap();
+            release_receiver.recv().unwrap();
+        });
+        locked_receiver.recv().unwrap();
+
+        let cancel_manager = Arc::clone(&manager);
+        let (cancelled_sender, cancelled_receiver) = sync_channel(0);
+        let canceller = std::thread::spawn(move || {
+            cancel_manager.cancel_and_wait();
+            cancelled_sender.send(()).unwrap();
+        });
+        assert!(cancelled_receiver
+            .recv_timeout(Duration::from_millis(30))
+            .is_err());
+        release_sender.send(()).unwrap();
+        cancelled_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        holder.join().unwrap();
+        canceller.join().unwrap();
+        assert!(manager.cancel.load(Ordering::SeqCst));
         drop(manager);
         let _ = fs::remove_dir_all(data_dir);
     }
@@ -3654,15 +5603,17 @@ mod tests {
         connection
             .pragma_update(None, "cache_size", -65_536)
             .unwrap();
+        let transaction = connection.transaction().unwrap();
         let (_, records) =
             resolve_mft_files_in_batches_retain(&root, records, NTFS_RESOLVE_BATCH, |entries| {
                 let files = entries
                     .into_iter()
                     .map(|entry| indexed_mft_entry(&root, entry))
                     .collect::<Vec<_>>();
-                insert_batch(&mut connection, &files)
+                write_file_rows(&transaction, &files, false)
             })
             .unwrap();
+        transaction.commit().unwrap();
         let persisted_at = started.elapsed();
         replace_ntfs_nodes(&mut connection, &root, &records).unwrap();
         let nodes_at = started.elapsed();
@@ -3709,6 +5660,212 @@ mod tests {
         assert!(enumeration.records > 0);
         assert!(query_elapsed < Duration::from_millis(100));
         drop(query_index);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires installed LogCrate Index Service and local NTFS C and D volumes"]
+    fn windows_multi_volume_application_rebuild_performance() {
+        let directory = test_directory("multi-volume-application-performance");
+        let manager = FileSearchManager::new(directory.clone());
+        {
+            let mut config = manager.config.lock().unwrap();
+            config.enabled = true;
+            config.roots = vec!["C:\\".into(), "D:\\".into()];
+            config.exclusions.clear();
+        }
+        let sink = NoopSearchStatusSink;
+        let started = std::time::Instant::now();
+        manager.start(sink, true).unwrap();
+
+        let mut scheduled_at = None;
+        let mut first_searchable_at = None;
+        let mut query_ready_at = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10 * 60);
+        loop {
+            let status = manager.status();
+            if scheduled_at.is_none()
+                && status
+                    .providers
+                    .iter()
+                    .all(|provider| provider.phase != "pending")
+            {
+                scheduled_at = Some(started.elapsed());
+            }
+            if first_searchable_at.is_none() && status.indexed_files > 0 {
+                first_searchable_at = Some(started.elapsed());
+            }
+            if query_ready_at.is_none() && status.phase == "ready" {
+                query_ready_at = Some(started.elapsed());
+            }
+            let persistence_complete = query_ready_at.is_some()
+                && !manager.persistence_recovery.load(Ordering::Acquire)
+                && status
+                    .providers
+                    .iter()
+                    .all(|provider| provider.completed_ms.is_some());
+            if persistence_complete {
+                let query_started = std::time::Instant::now();
+                let c_page = manager.query("notepad.exe", "", 0, 100).unwrap();
+                let c_query = query_started.elapsed();
+                let query_started = std::time::Instant::now();
+                let d_page = manager
+                    .query("tauri.dev-static.conf.json", "", 0, 100)
+                    .unwrap();
+                let d_query = query_started.elapsed();
+                let final_status = manager.status();
+                eprintln!(
+                    "NTFS_APP_PHASE scheduled_ms={} first_searchable_ms={} query_ready_ms={} persisted_ms={} discovered={} searchable={} c_matches={} d_matches={} c_query_ms={} d_query_ms={} providers={:?}",
+                    scheduled_at.unwrap_or_default().as_millis(),
+                    first_searchable_at.unwrap_or_default().as_millis(),
+                    query_ready_at.unwrap_or_default().as_millis(),
+                    started.elapsed().as_millis(),
+                    final_status.scanned_files,
+                    final_status.indexed_files,
+                    c_page.items.len(),
+                    d_page.items.len(),
+                    c_query.as_millis(),
+                    d_query.as_millis(),
+                    final_status.providers,
+                );
+                assert!(c_page
+                    .items
+                    .iter()
+                    .any(|item| item.path.starts_with("C:\\")));
+                assert!(d_page
+                    .items
+                    .iter()
+                    .any(|item| item.path.starts_with("D:\\")));
+                assert_eq!(
+                    final_status.indexed_files,
+                    final_status
+                        .providers
+                        .iter()
+                        .map(|provider| provider.searchable_files)
+                        .sum::<u64>()
+                );
+                break;
+            }
+            if status.phase == "error" {
+                panic!(
+                    "multi-volume application rebuild failed: {:?}",
+                    status.error
+                );
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "multi-volume rebuild timed out"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        manager.pause(&sink);
+        drop(manager);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires installed LogCrate Index Service and a writable local NTFS D volume"]
+    fn windows_directory_change_rebuild_performance() {
+        struct TestDirectoryCleanup(Vec<PathBuf>);
+        impl Drop for TestDirectoryCleanup {
+            fn drop(&mut self) {
+                for path in &self.0 {
+                    let _ = fs::remove_dir_all(path);
+                }
+            }
+        }
+
+        let volume = 'D';
+        let root = "D:\\";
+        let unique = format!(
+            "LogCrateUsnRecoveryTest-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let created = Path::new(root).join(&unique);
+        let renamed = Path::new(root).join(format!("{unique}-renamed"));
+        let _cleanup = TestDirectoryCleanup(vec![created.clone(), renamed.clone()]);
+        let journal_before = query_usn_via_service(volume).unwrap();
+        fs::create_dir(&created).unwrap();
+        fs::rename(&created, &renamed).unwrap();
+        fs::write(renamed.join("logcrate-usn-recovery-proof.txt"), b"proof").unwrap();
+        let journal_after = query_usn_via_service(volume).unwrap();
+
+        let directory = test_directory("directory-change-recovery-performance");
+        let db = directory.join("search.sqlite3");
+        initialize_database(&db).unwrap();
+        let connection = open_database(&db).unwrap();
+        let (_, directory_change) =
+            collect_usn_changes_until_directory_change(&connection, root, |on_batch| {
+                read_usn_via_service(
+                    volume,
+                    journal_before.next_usn,
+                    journal_before.journal_id,
+                    journal_after.next_usn,
+                    on_batch,
+                )
+            })
+            .unwrap();
+        assert!(
+            directory_change,
+            "the real directory USN change was not classified"
+        );
+        drop(connection);
+
+        let started = std::time::Instant::now();
+        let mut records = Vec::new();
+        let enumeration = enumerate_mft_via_service(volume, |batch| {
+            records.extend(batch);
+            Ok(())
+        })
+        .unwrap();
+        let enumerated_at = started.elapsed();
+        let mut query_index = SearchIndex::open(&directory.join("tantivy")).unwrap();
+        query_index.begin_bulk().unwrap();
+        let mut searchable = 0_u64;
+        resolve_mft_files_in_batches(root, records, NTFS_RESOLVE_BATCH, |entries| {
+            let files = entries
+                .into_iter()
+                .map(|entry| indexed_mft_entry(root, entry))
+                .collect::<Vec<_>>();
+            searchable = searchable.saturating_add(files.len() as u64);
+            query_index.add_batch(&files.iter().map(search_index_entry).collect::<Vec<_>>())
+        })
+        .unwrap();
+        query_index.finish_bulk().unwrap();
+        let rebuilt_at = started.elapsed();
+        let (_, matches) = query_index
+            .search(
+                &[
+                    "logcrate".into(),
+                    "usn".into(),
+                    "recovery".into(),
+                    "proof".into(),
+                ],
+                "",
+                0,
+                100,
+            )
+            .unwrap();
+        eprintln!(
+            "NTFS_DIRECTORY_RECOVERY volume=D records={} searchable={} enum_ms={} query_ready_ms={} matches={}",
+            enumeration.records,
+            searchable,
+            enumerated_at.as_millis(),
+            rebuilt_at.as_millis(),
+            matches
+        );
+        assert!(matches > 0);
+        assert!(rebuilt_at <= Duration::from_millis(43_200));
+
+        drop(query_index);
+        fs::remove_file(renamed.join("logcrate-usn-recovery-proof.txt")).unwrap();
+        fs::remove_dir(&renamed).unwrap();
         let _ = fs::remove_dir_all(directory);
     }
 }

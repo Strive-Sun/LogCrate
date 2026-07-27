@@ -129,34 +129,69 @@ where
         .map(|record| record.id)
         .collect::<Vec<_>>();
     let mut directory_memo = HashMap::<FileId, Option<String>>::new();
-    let mut batch = Vec::with_capacity(batch_size);
-    for id in file_ids {
-        let record = &by_id[&id];
-        let mut visiting = HashSet::new();
-        let Some(parent) = resolve_directory(
-            record.parent_id,
-            &root,
-            &by_id,
-            &mut directory_memo,
-            &mut visiting,
-            &mut diagnostics,
-        ) else {
-            continue;
-        };
-        batch.push(ResolvedMftEntry {
-            id,
-            parent_id: record.parent_id,
-            path: format!("{parent}\\{}", record.name),
-            name: record.name.clone(),
-            attributes: record.attributes,
-        });
-        if batch.len() >= batch_size {
-            on_batch(std::mem::take(&mut batch))?;
-            batch.reserve(batch_size);
+    let mut visiting = HashSet::new();
+    let parent_ids = file_ids
+        .iter()
+        .map(|id| by_id[id].parent_id)
+        .collect::<HashSet<_>>();
+    for parent_id in parent_ids {
+        if !directory_memo.contains_key(&parent_id) {
+            visiting.clear();
+            let path = resolve_directory(
+                parent_id,
+                &root,
+                &by_id,
+                &mut directory_memo,
+                &mut visiting,
+                &mut diagnostics,
+            );
+            directory_memo.entry(parent_id).or_insert(path);
         }
     }
-    if !batch.is_empty() {
-        on_batch(batch)?;
+
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(4);
+    for ids in file_ids.chunks(batch_size) {
+        let chunk_size = ids.len().saturating_add(worker_count - 1) / worker_count;
+        let mut batch = std::thread::scope(|scope| -> anyhow::Result<Vec<ResolvedMftEntry>> {
+            let handles = ids
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    let by_id = &by_id;
+                    let directory_memo = &directory_memo;
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .filter_map(|id| {
+                                let record = &by_id[id];
+                                let parent = directory_memo.get(&record.parent_id)?.as_ref()?;
+                                Some(ResolvedMftEntry {
+                                    id: *id,
+                                    parent_id: record.parent_id,
+                                    path: format!("{parent}\\{}", record.name),
+                                    name: record.name.clone(),
+                                    attributes: record.attributes,
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut batch = Vec::with_capacity(ids.len());
+            for handle in handles {
+                batch.extend(
+                    handle
+                        .join()
+                        .map_err(|_| anyhow!("MFT path worker panicked"))?,
+                );
+            }
+            Ok(batch)
+        })?;
+        if !batch.is_empty() {
+            on_batch(std::mem::take(&mut batch))?;
+        }
     }
     Ok((diagnostics, by_id.into_values().collect()))
 }
@@ -176,7 +211,9 @@ fn resolve_directory(
     // the NTFS root directory. Its well-known file-record number is 5; the
     // upper 16 bits of a V2 reference are the sequence number.
     if id.is_ntfs_root_reference() {
-        return Some(root.to_string());
+        let path = Some(root.to_string());
+        memo.insert(id, path.clone());
+        return path;
     }
     let Some(record) = records.get(&id) else {
         diagnostics.orphan_records += 1;
@@ -592,5 +629,50 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, "C:\\Logs\\app.log");
         assert_eq!(diagnostics.reparse_records, 1);
+    }
+
+    #[test]
+    fn streams_large_shared_directory_without_losing_or_duplicating_files() {
+        const FILE_COUNT: u64 = 20_000;
+        let mut records = Vec::with_capacity(FILE_COUNT as usize + 2);
+        records.push(MftRecord {
+            id: FileId::from_u64(5),
+            parent_id: FileId::from_u64(5),
+            name: ".".into(),
+            attributes: FILE_ATTRIBUTE_DIRECTORY,
+            reason: 0,
+            usn: 1,
+        });
+        records.push(MftRecord {
+            id: FileId::from_u64(10),
+            parent_id: FileId::from_u64(5),
+            name: "Logs".into(),
+            attributes: FILE_ATTRIBUTE_DIRECTORY,
+            reason: 0,
+            usn: 2,
+        });
+        for index in 0..FILE_COUNT {
+            records.push(MftRecord {
+                id: FileId::from_u64(100 + index),
+                parent_id: FileId::from_u64(10),
+                name: format!("{index}.log"),
+                attributes: 0,
+                reason: 0,
+                usn: index as i64 + 3,
+            });
+        }
+
+        let mut paths = HashSet::with_capacity(FILE_COUNT as usize);
+        let diagnostics = resolve_mft_files_in_batches("C:\\", records, 257, |batch| {
+            assert!(batch.len() <= 257);
+            paths.extend(batch.into_iter().map(|entry| entry.path));
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(paths.len(), FILE_COUNT as usize);
+        assert!(paths.contains("C:\\Logs\\0.log"));
+        assert!(paths.contains("C:\\Logs\\19999.log"));
+        assert_eq!(diagnostics, ResolveDiagnostics::default());
     }
 }

@@ -156,6 +156,14 @@ export interface FileSearchProviderStatus {
   root: string;
   provider: 'windowsNtfs' | 'folderScan' | string;
   phase: string;
+  stage?: string;
+  discoveredRecords?: number;
+  searchableFiles?: number;
+  startedMs?: number;
+  elapsedMs?: number;
+  stageStartedMs?: number;
+  stageElapsedMs?: number;
+  completedMs?: number;
   fallbackReason?: string;
 }
 
