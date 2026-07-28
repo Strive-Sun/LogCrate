@@ -280,11 +280,11 @@ impl<R: tauri::Runtime> SearchStatusSink for tauri::AppHandle<R> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 #[derive(Clone, Copy)]
 struct NoopSearchStatusSink;
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 impl SearchStatusSink for NoopSearchStatusSink {
     fn emit_search_status(&self, _status: SearchStatus) {}
 }
@@ -1767,6 +1767,7 @@ fn add_provider_progress<S: SearchStatusSink>(
     manager.emit_status(app);
 }
 
+#[cfg(windows)]
 fn set_provider_searchable_files<S: SearchStatusSink>(
     manager: &FileSearchManager,
     app: &S,
@@ -1782,6 +1783,7 @@ fn set_provider_searchable_files<S: SearchStatusSink>(
     manager.emit_status(app);
 }
 
+#[cfg(windows)]
 fn indexed_root_count(db_path: &Path, root: &str) -> u64 {
     open_database(db_path)
         .and_then(|connection| {
@@ -2888,6 +2890,7 @@ fn scan_folder_roots<S: SearchStatusSink>(
     Ok(())
 }
 
+#[cfg(windows)]
 fn replace_roots_with_folder_scan<S: SearchStatusSink>(
     manager: &Arc<FileSearchManager>,
     app: &S,
