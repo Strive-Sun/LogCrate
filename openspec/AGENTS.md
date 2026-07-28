@@ -14,7 +14,7 @@ These instructions apply only after `规则手册/Step-0/OPENSPEC.md` determines
 - Scaffold: `proposal.md`, `tasks.md`, `design.md` (only if needed), and delta specs per affected capability
 - Write deltas: use `## ADDED|MODIFIED|REMOVED|RENAMED Requirements`; include at least one `#### Scenario:` per requirement
 - Validate: `openspec validate [change-id] --strict` and fix issues
-- Request approval: record explicit maintainer approval in `approval.md`; do not start implementation without a valid approved revision
+- Request approval before the first Git commit: record explicit maintainer approval in `approval.md`; do not commit or start implementation without approval
 
 ## Three-Stage Workflow
 
@@ -52,12 +52,12 @@ Do not use the changed file type as an exemption. A dependency or configuration 
 2. Choose a unique verb-led `change-id` and scaffold `proposal.md`, `tasks.md`, optional `design.md`, and spec deltas under `openspec/changes/<id>/`.
 3. Draft spec deltas using `## ADDED|MODIFIED|REMOVED Requirements` with at least one `#### Scenario:` per requirement.
 4. Run `openspec validate <id> --strict` and resolve any issues before sharing the proposal.
-5. Commit the complete proposal bundle so the reviewed content has a stable Git revision.
-6. Request explicit maintainer approval for that revision. Only after approval, create `approval.md` using the format below and commit the approval record separately.
+5. Request explicit maintainer approval for the uncommitted proposal snapshot.
+6. Only after approval, create or complete `approval.md` and commit the complete approved proposal bundle once. Do not create a pre-approval proposal commit or a separate approval bookkeeping commit.
 
 ### Durable Approval Record
 
-`approval.md` is the repository authority for implementation approval. Missing approval, any status other than `approved`, a non-maintainer approval source, or a stale `Approved-Revision` means the change is still draft. Strict validation, task existence, or Agent judgment never grants approval.
+`approval.md` is the repository authority for implementation approval. Missing approval, any status other than `approved`, a non-maintainer approval source, or a stale approval snapshot means the change is still draft. Strict validation, task existence, or Agent judgment never grants approval.
 
 ```markdown
 # Approval
@@ -65,21 +65,21 @@ Do not use the changed file type as an exemption. A dependency or configuration 
 - Status: approved
 - Approved-By: <maintainer identity>
 - Approved-At: <ISO-8601 date or timestamp>
-- Approved-Revision: <Git commit containing the reviewed proposal bundle>
+- Approved-Revision: <pre-commit proposal snapshot identifier; after commit, the resulting Git commit is used to verify content identity>
 - Source: <PR review or explicit maintainer instruction>
 - Scope: proposal.md, design.md, specs/, and task scope/acceptance definitions
 ```
 
 - Allowed states are `draft`, `approved`, and `revoked`.
 - An Agent MUST NOT approve a proposal. It may write the record only after explicit maintainer approval.
-- The approved revision MUST already contain the reviewed `proposal.md`, optional `design.md`, delta specs, and task scope/acceptance definitions; `approval.md` is committed afterward to avoid revision self-reference.
+- Approval MUST be granted before the first commit containing the proposal bundle. The approval record and reviewed `proposal.md`, optional `design.md`, delta specs, and task scope/acceptance definitions MUST be committed together once approval is recorded; no pre-approval or follow-up bookkeeping commit is allowed.
 - Semantic changes to requirements, design, delta specs, task scope, or acceptance criteria invalidate approval. Set `Status: draft`, validate again, and obtain a new approval revision before continuing implementation.
 - Implementation code, additional tests, validation evidence, and task checkbox updates do not require reapproval unless they change the approved semantics or scope.
 
 ### Stage 2: Implementing Changes
 For LogCrate, `规则手册/Step-2/工作约束.md`, `规则手册/Step-4/执行规则.md`, and `规则手册/Step-5/验证规则.md` define the authoritative work-state and task lifecycle. Track these steps as TODOs and complete them one smallest numbered leaf task at a time.
 
-1. **Approval gate** - Verify `approval.md` is `approved`, names a maintainer source, and references the current reviewed proposal revision; otherwise do not implement
+1. **Approval gate** - Verify `approval.md` is `approved`, names a maintainer source, and matches the currently reviewed proposal snapshot; otherwise do not commit or implement
 2. **Read proposal.md** - Understand what's being built
 3. **Read design.md** (if exists) - Review technical decisions
 4. **Read tasks.md** - Identify the smallest numbered leaf task whose dependencies are complete

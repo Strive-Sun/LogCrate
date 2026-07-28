@@ -19,11 +19,11 @@
 ## Proposal 与实施
 
 - OpenSpec 要求 proposal 的变更，先完成 proposal、必要的 design、tasks 和 delta spec，并通过严格校验。
-- 严格校验只证明格式和结构有效，不等于 proposal 已获批准；批准前不得实施产品变更。
+- 严格校验只证明格式和结构有效，不等于 proposal 已获批准；批准前不得实施产品变更，也不得将 proposal、design、delta spec 或 tasks 提交到 Git。
 - 需要审批的活动 change 必须使用独立的 `approval.md` 保存可从仓库恢复的审批记录。文件缺失、`Status` 不是 `approved`、审批来源不是维护者，或 `Approved-Revision` 与当前已审阅内容不一致时，一律视为 draft。
-- Agent 不得自行批准 proposal；只有维护者明确批准后，才能记录 `Approved-By`、`Approved-At`、`Approved-Revision`、`Source` 和审批范围。审批 revision 必须指向包含已审阅 proposal、design、delta specs 以及任务范围和验收定义的已有 commit。
+- Agent 不得自行批准 proposal；只有维护者明确批准后，才能记录 `Approved-By`、`Approved-At`、`Approved-Revision`、`Source` 和审批范围。审批发生在首次 Git commit 之前；批准记录与已审阅提案须在同一个提案提交中落盘，`Approved-Revision` 可在提交前使用提案快照标识，提交后再以 Git 历史核对内容一致性。
 - 审批后若 proposal、design、delta spec、任务范围或验收语义发生变化，必须在同一轮将审批状态退回 draft，重新严格校验并取得新审批。实现代码、测试补充、验证证据和任务勾选未改变上述语义时，不需要重新审批。
-- 实施时按 `tasks.md` 顺序执行。每个最小编号的实现任务完成后进入 `规则手册/Step-5/验证规则.md` 规定的验证、交接与提交门禁；全部完成前不得进入后续任务。
+- 实施时按 `tasks.md` 顺序执行。每个最小编号的实现任务完成后进入 `规则手册/Step-5/验证规则.md` 规定的验证、交接与独立提交门禁；一次只允许提交一个已完成的最小任务，全部完成前不得进入后续任务。
 - 失败或新发现改变需求、设计、验收语义或后续任务时，先更新 proposal/design/spec/tasks、重新严格校验并取得所需批准，再继续实现。
 
 ## 简单修复与无 change 工作
