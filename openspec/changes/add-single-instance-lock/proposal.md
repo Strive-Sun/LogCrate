@@ -1,18 +1,18 @@
-# Change: Prevent duplicate LogCrate processes
+# 变更：防止 LogCrate 重复运行
 
-## Why
+## 背景
 
-Launching LogCrate more than once currently creates competing desktop processes that can duplicate watchers, background indexing, tray state, and resource usage. Users need a single active application process per user session.
+当前重复启动 LogCrate 会创建相互竞争的桌面进程，可能导致目录监控、后台索引、系统托盘状态和资源占用重复。每个用户会话应当只运行一个活动中的应用进程。
 
-## What Changes
+## 变更内容
 
-- Add a cross-platform single-instance guard to the desktop application startup path.
-- Make a second launch exit without creating a window, tray icon, watcher, or background task.
-- Keep updater-driven restart and normal process exit compatible with the guard.
-- Add deterministic Rust coverage for first-instance acquisition and second-instance rejection.
+- 在桌面应用启动路径中增加跨平台的单实例锁。
+- 第二次启动时直接退出，不创建窗口、系统托盘图标、目录监控或后台任务。
+- 确保更新器触发的重启和正常进程退出与单实例锁兼容。
+- 增加确定性的 Rust 测试，覆盖首次获取锁和第二次启动被拒绝的场景。
 
-## Impact
+## 影响范围
 
-- Affected spec: `application-lifecycle`.
-- Affected code: `src-tauri/src/lib.rs`, Cargo dependencies, and lifecycle tests.
-- No frontend IPC or persisted user data changes.
+- 受影响的规格：`application-lifecycle`。
+- 受影响的代码：`src-tauri/src/lib.rs`、Cargo 依赖和生命周期测试。
+- 不涉及前端 IPC 或持久化用户数据变更。
