@@ -18,7 +18,7 @@
 
 ## Proposal 与实施
 
-- OpenSpec 提案中的说明、设计、任务和规格正文默认使用中文；为保证 `openspec` 工具正确解析，`## ADDED|MODIFIED|REMOVED|RENAMED Requirements`、`### Requirement:` 和 `#### Scenario:` 等结构标记必须保留规定的英文格式。
+- OpenSpec 提案中的说明、设计、任务和规格正文默认使用中文；为保证 `openspec` 工具正确解析，`## Why`、`## What Changes`、`## ADDED|MODIFIED|REMOVED|RENAMED Requirements`、`### Requirement:` 和 `#### Scenario:` 等结构标记必须保留规定的英文格式。
 - OpenSpec 要求 proposal 的变更，先完成 proposal、必要的 design、tasks 和 delta spec，并通过严格校验。
 - 严格校验只证明格式和结构有效，不等于 proposal 已获批准；批准前不得实施产品变更，也不得将 proposal、design、delta spec 或 tasks 提交到 Git。
 - 需要审批的活动 change 必须使用独立的 `approval.md` 保存可从仓库恢复的审批记录。文件缺失、`Status` 不是 `approved`、审批来源不是维护者，或 `Approved-Revision` 与当前已审阅内容不一致时，一律视为 draft。

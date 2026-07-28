@@ -178,7 +178,7 @@ openspec/
 
 ### Language Convention
 
-Proposal bundles (`proposal.md`, `design.md`, `tasks.md`, and delta specs) MUST use Chinese for explanatory text, requirement names, scenarios, task descriptions, and rationale. Keep only the exact English structural markers required by the OpenSpec parser, such as `## ADDED Requirements`, `### Requirement:`, and `#### Scenario:`.
+Proposal bundles (`proposal.md`, `design.md`, `tasks.md`, and delta specs) MUST use Chinese for explanatory text, requirement names, scenarios, task descriptions, and rationale. Keep only the exact English structural markers required by the OpenSpec parser, such as `## Why`, `## What Changes`, `## ADDED Requirements`, `### Requirement:`, and `#### Scenario:`.
 
 ### Decision Tree
 

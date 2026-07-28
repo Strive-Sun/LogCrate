@@ -158,3 +158,22 @@ TBD - created by archiving change add-close-to-tray. Update Purpose after archiv
 
 - **WHEN** 用户正常启动 LogCrate 且未运行性能基准
 - **THEN** 启动计时不进行网络上传，也不在 UI 线程同步写入日志文件
+
+### Requirement: 单一活动应用实例
+
+桌面应用 MUST 在创建主窗口、系统托盘、目录监控或后台 worker 之前，获取由操作系统支持的、针对当前用户的单实例锁。如果单实例锁已被另一个 LogCrate 进程持有，新进程 MUST 干净退出，不得产生上述启动副作用。首个进程 MUST 不受影响并继续正常生命周期；更新器请求的重启 MUST 在旧进程释放锁后得到允许。
+
+#### Scenario: 首次启动获取锁
+
+- **WHEN** 当前用户没有 LogCrate 进程持有单实例锁
+- **THEN** 该进程获取锁并继续正常启动，包括创建窗口和系统托盘
+
+#### Scenario: 重复启动被拒绝
+
+- **WHEN** 首个进程持有单实例锁期间，第二个 LogCrate 进程启动
+- **THEN** 第二个进程干净退出，不创建窗口、托盘图标、目录监控或后台任务
+
+#### Scenario: 崩溃或更新器重启释放所有权
+
+- **WHEN** 持有锁的进程正常退出、崩溃或交接给更新器重启
+- **THEN** 操作系统释放该锁，替代进程可以重新获取
