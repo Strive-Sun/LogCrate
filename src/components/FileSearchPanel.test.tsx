@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test, { afterEach, before } from 'node:test';
 import { JSDOM } from 'jsdom';
-import type { FileSearchPage, FileSearchResult, FileSearchStatus } from '../api/types';
+import type {
+  FileSearchConfig,
+  FileSearchPage,
+  FileSearchResult,
+  FileSearchStatus,
+  MacOsFileAccessCapabilities,
+} from '../api/types';
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', {
   url: 'http://localhost/',
@@ -109,6 +115,45 @@ afterEach(async () => {
   cleanup();
 });
 
+test('搜索状态与配置请求延迟时仍立即显示可用搜索界面', async () => {
+  const { render, screen } = await import('@testing-library/react');
+  const React = await import('react');
+  const { api } = await import('../api');
+  const { FileSearchPanel } = await import('./FileSearchPanel');
+  const { I18nProvider } = await import('../i18n/I18nProvider');
+  const original = {
+    fileSearchStatus: api.fileSearchStatus,
+    fileSearchConfig: api.fileSearchConfig,
+    subscribeFileSearchStatus: api.subscribeFileSearchStatus,
+    macOsFileAccessCapabilities: api.macOsFileAccessCapabilities,
+  };
+  api.fileSearchStatus = () => new Promise<FileSearchStatus>(() => undefined);
+  api.fileSearchConfig = () => new Promise<FileSearchConfig>(() => undefined);
+  api.subscribeFileSearchStatus = () => () => {};
+  api.macOsFileAccessCapabilities = () => new Promise<MacOsFileAccessCapabilities>(() => undefined);
+
+  try {
+    const view = render(
+      React.createElement(
+        I18nProvider,
+        null,
+        React.createElement(FileSearchPanel, {
+          onClose: () => undefined,
+          onOpenEntry: () => undefined,
+          onMonitorAdded: async () => undefined,
+          virtualizeResults: false,
+        }),
+      ),
+    );
+
+    assert.ok(screen.getByRole('textbox'));
+    assert.equal(view.container.querySelector('.file-search-loading'), null);
+    assert.ok(view.container.querySelector('.file-search-header'));
+  } finally {
+    Object.assign(api, original);
+  }
+});
+
 async function renderPanel(overrides?: {
   inspect?: () => Promise<{
     path: string;
@@ -130,6 +175,7 @@ async function renderPanel(overrides?: {
     fileSearchStatus: api.fileSearchStatus,
     fileSearchConfig: api.fileSearchConfig,
     subscribeFileSearchStatus: api.subscribeFileSearchStatus,
+    macOsFileAccessCapabilities: api.macOsFileAccessCapabilities,
     searchFiles: api.searchFiles,
     inspectSearchResult: api.inspectSearchResult,
     addSearchResultParent: api.addSearchResultParent,
@@ -142,6 +188,7 @@ async function renderPanel(overrides?: {
     exclusions: [],
   });
   api.subscribeFileSearchStatus = () => () => {};
+  api.macOsFileAccessCapabilities = () => new Promise<MacOsFileAccessCapabilities>(() => undefined);
   api.searchFiles = async () => {
     searchCalls += 1;
     return page;
@@ -164,7 +211,7 @@ async function renderPanel(overrides?: {
   let closed = 0;
   const opened: string[] = [];
   let monitorAdded = 0;
-  render(
+  const view = render(
     React.createElement(
       i18n.I18nProvider,
       null,
@@ -180,6 +227,7 @@ async function renderPanel(overrides?: {
       }),
     ),
   );
+  await waitFor(() => assert.ok(view.container.querySelector('.file-search-status.ready')));
   const input = await screen.findByRole('textbox');
   fireEvent.change(input, { target: { value: 'debug.log' } });
   await waitFor(() => assert.ok(searchCalls > 0));

@@ -24,6 +24,24 @@ import { ContextMenu } from './ContextMenu';
 const PAGE_SIZE = 200;
 const MAX_VISIBLE_RESULTS = 1_000;
 
+const INITIAL_SEARCH_STATUS: FileSearchStatus = {
+  phase: 'scanning',
+  scannedFiles: 0,
+  skippedDirectories: 0,
+  indexedFiles: 0,
+  indexBytes: 0,
+  roots: [],
+  exclusions: [],
+  providers: [],
+};
+
+const INITIAL_SEARCH_CONFIG: FileSearchConfig = {
+  version: 1,
+  enabled: true,
+  roots: [],
+  exclusions: [],
+};
+
 interface Props {
   active?: boolean;
   onClose: () => void;
@@ -84,8 +102,8 @@ export function FileSearchPanel({
   virtualizeResults = true,
 }: Props) {
   const { locale, t } = useI18n();
-  const [status, setStatus] = useState<FileSearchStatus | null>(null);
-  const [config, setConfig] = useState<FileSearchConfig | null>(null);
+  const [status, setStatus] = useState<FileSearchStatus>(INITIAL_SEARCH_STATUS);
+  const [config, setConfig] = useState<FileSearchConfig>(INITIAL_SEARCH_CONFIG);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<FileSearchFilter>('all');
   const [items, setItems] = useState<FileSearchResult[]>([]);
@@ -107,7 +125,6 @@ export function FileSearchPanel({
   const scrollRef = useRef<HTMLDivElement>(null);
   const queryGeneration = useRef(0);
   const progressRefreshKey = searchProgressRefreshKey(status);
-  const searchUiReady = status !== null && config !== null;
 
   const virtualizer = useVirtualizer({
     count: items.length,
@@ -126,12 +143,13 @@ export function FileSearchPanel({
 
   useEffect(() => {
     let active = true;
-    void Promise.all([api.fileSearchStatus(), api.fileSearchConfig()])
-      .then(([nextStatus, nextConfig]) => {
-        if (!active) return;
-        setStatus(nextStatus);
-        setConfig(nextConfig);
-      })
+    void api
+      .fileSearchStatus()
+      .then((nextStatus) => active && setStatus(nextStatus))
+      .catch((reason) => active && setError(String(reason)));
+    void api
+      .fileSearchConfig()
+      .then((nextConfig) => active && setConfig(nextConfig))
       .catch((reason) => active && setError(String(reason)));
     const unsubscribe = api.subscribeFileSearchStatus((next) => {
       setStatus(next);
@@ -144,13 +162,13 @@ export function FileSearchPanel({
   }, []);
 
   useEffect(() => {
-    if (!active || !searchUiReady) return;
+    if (!active) return;
     const focusToRestore = document.activeElement as HTMLElement | null;
     programmaticFocus.current = true;
     inputRef.current?.focus();
     programmaticFocus.current = false;
     return () => focusToRestore?.focus();
-  }, [active, searchUiReady]);
+  }, [active]);
 
   const executeQuery = useCallback(
     async (offset: number, append: boolean, preserveError = false) => {
@@ -159,7 +177,7 @@ export function FileSearchPanel({
         queryGeneration.current += 1;
         setItems([]);
         setTotal(0);
-        setPartial(status?.phase !== 'ready');
+        setPartial(status.phase !== 'ready');
         setLoading(false);
         setLoadingMore(false);
         return;
@@ -190,7 +208,7 @@ export function FileSearchPanel({
         }
       }
     },
-    [filter, query, status?.phase],
+    [filter, query, status.phase],
   );
 
   useEffect(() => {
@@ -269,7 +287,6 @@ export function FileSearchPanel({
   );
 
   const statusText = useMemo(() => {
-    if (!status) return t('search.querying');
     if (status.phase === 'scanning') {
       const preparation = searchPreparation(status);
       if (preparation) {
@@ -324,14 +341,6 @@ export function FileSearchPanel({
       if (item) void openResult(item);
     }
   };
-
-  if (!status || !config) {
-    return (
-      <section className="file-search-panel" onKeyDown={onKeyDown}>
-        <div className="file-search-loading">{t('search.querying')}</div>
-      </section>
-    );
-  }
 
   if (status.phase === 'disabled') {
     return (
