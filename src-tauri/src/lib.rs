@@ -1029,6 +1029,11 @@ fn show_main_window(app: &tauri::AppHandle) {
 }
 
 #[cfg(desktop)]
+fn second_instance_action() -> LifecycleAction {
+    LifecycleAction::ShowMainWindow
+}
+
+#[cfg(desktop)]
 fn setup_tray(app: &tauri::AppHandle, tray: &TrayMenuState) -> tauri::Result<()> {
     let mut state = tray.0.lock().unwrap_or_else(|error| error.into_inner());
     let (show_label, exit_label) = tray_labels(&state.locale);
@@ -1083,7 +1088,9 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             #[cfg(desktop)]
-            show_main_window(app);
+            if second_instance_action() == LifecycleAction::ShowMainWindow {
+                show_main_window(app);
+            }
         }))
         .on_window_event(|window, event| {
             if close_action(window.label()) == LifecycleAction::HideMainWindow {
@@ -1371,6 +1378,12 @@ mod lifecycle_tests {
             menu_action(SHOW_MAIN_MENU_ID),
             LifecycleAction::ShowMainWindow
         );
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn duplicate_launch_restores_the_existing_instance() {
+        assert_eq!(second_instance_action(), LifecycleAction::ShowMainWindow);
     }
 
     #[test]
