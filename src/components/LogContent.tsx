@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { api } from '../api';
-import type { LogLine, OpenSessionResult } from '../api';
+import type { LogLine, LogSearchMatch, OpenSessionResult } from '../api';
 import { fmtNum, fmtSize } from '../util/format';
 import { LogRow } from './LogRow';
 import { useI18n } from '../i18n/I18nProvider';
@@ -11,13 +11,14 @@ interface Props {
   activeKey: string | null;
   status?: 'opening' | 'ready' | 'dormant' | 'error';
   error?: string;
+  active?: boolean;
 }
 
 const PAGE = 200;
 const MAX_CACHED_LINES = 5_000;
 const ENCODINGS = ['UTF-8', 'GBK', 'GB18030', 'UTF-16LE', 'UTF-16BE'];
 
-export function LogContent({ session, activeKey, status = 'ready', error }: Props) {
+export function LogContent({ session, activeKey, status = 'ready', error, active = true }: Props) {
   const { t } = useI18n();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [percent, setPercent] = useState(100);
@@ -34,6 +35,17 @@ export function LogContent({ session, activeKey, status = 'ready', error }: Prop
   const pending = useRef<Set<number>>(new Set());
   const encodingUnsub = useRef<() => void>(() => {});
   const preferredEncoding = useRef<string | null>(null);
+  const findInputRef = useRef<HTMLInputElement>(null);
+  const findGeneration = useRef(0);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [findReverse, setFindReverse] = useState(false);
+  const [findWholeWord, setFindWholeWord] = useState(false);
+  const [findCaseSensitive, setFindCaseSensitive] = useState(false);
+  const [findWrap, setFindWrap] = useState(true);
+  const [findBusy, setFindBusy] = useState(false);
+  const [findStatus, setFindStatus] = useState<string | null>(null);
+  const [findMatch, setFindMatch] = useState<LogSearchMatch | null>(null);
 
   const rebuildForEncoding = useCallback(
     async (entryKey: string, encoding: string) => {
@@ -137,6 +149,104 @@ export function LogContent({ session, activeKey, status = 'ready', error }: Prop
     overscan: 20,
   });
 
+  useEffect(() => {
+    if (!active || !session || !activeKey) {
+      setFindOpen(false);
+      findGeneration.current += 1;
+      setFindBusy(false);
+      setFindMatch(null);
+      setFindStatus(null);
+      setFindQuery('');
+      setFindReverse(false);
+      setFindWholeWord(false);
+      setFindCaseSensitive(false);
+      setFindWrap(true);
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'f') {
+        event.preventDefault();
+        setFindOpen(true);
+        findInputRef.current?.focus();
+        return;
+      }
+      if (event.key === 'Escape' && findOpen) {
+        event.preventDefault();
+        setFindOpen(false);
+        scrollRef.current?.focus();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [active, activeKey, findOpen, session]);
+
+  useEffect(() => {
+    if (findOpen) findInputRef.current?.focus();
+  }, [findOpen]);
+
+  useEffect(() => {
+    setFindMatch(null);
+    setFindStatus(null);
+  }, [activeKey, findCaseSensitive, findQuery, findReverse, findWholeWord, findWrap]);
+
+  const runFind = useCallback(async () => {
+    const query = findQuery;
+    if (!activeKey || !query) return;
+    const generation = ++findGeneration.current;
+    setFindBusy(true);
+    setFindStatus(null);
+    const startLine = findMatch ? findMatch.lineNo - 1 : Math.max(0, currentLine - 1);
+    const startColumn = findMatch
+      ? findReverse
+        ? findMatch.startColumn
+        : findMatch.endColumn
+      : undefined;
+    try {
+      const result = await api.searchLog(activeKey, {
+        query,
+        startLine,
+        startColumn,
+        reverse: findReverse,
+        wholeWord: findWholeWord,
+        caseSensitive: findCaseSensitive,
+        wrap: findWrap,
+      });
+      if (generation !== findGeneration.current) return;
+      if (result.match) {
+        setFindMatch(result.match);
+        rowVirtualizer.scrollToIndex(result.match.lineNo - 1, { align: 'center' });
+        setFindStatus(
+          result.wrapped ? t(findReverse ? 'find.wrappedEnd' : 'find.wrappedStart') : null,
+        );
+      } else {
+        setFindStatus(
+          result.indexing
+            ? t('find.notFoundIndexed')
+            : !findWrap && result.reachedBoundary
+              ? t(findReverse ? 'find.reachedStart' : 'find.reachedEnd')
+              : t('find.notFound'),
+        );
+      }
+    } catch (error) {
+      if (generation === findGeneration.current) {
+        setFindStatus(t('find.failed', { error: String(error) }));
+      }
+    } finally {
+      if (generation === findGeneration.current) setFindBusy(false);
+    }
+  }, [
+    activeKey,
+    currentLine,
+    findCaseSensitive,
+    findMatch,
+    findQuery,
+    findReverse,
+    findWholeWord,
+    findWrap,
+    rowVirtualizer,
+    t,
+  ]);
+
   // 按可视区批量拉取未缓存的行(窗口化加载)
   const items = rowVirtualizer.getVirtualItems();
   useEffect(() => {
@@ -227,7 +337,90 @@ export function LogContent({ session, activeKey, status = 'ready', error }: Prop
         </div>
       )}
 
-      <div className="log-view" ref={scrollRef}>
+      {findOpen && (
+        <form
+          className="log-find-dialog"
+          role="dialog"
+          aria-label={t('find.title')}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void runFind();
+          }}
+        >
+          <div className="log-find-head">
+            <strong>{t('find.title')}</strong>
+            <button
+              type="button"
+              className="log-find-close"
+              aria-label={t('find.close')}
+              onClick={() => {
+                setFindOpen(false);
+                scrollRef.current?.focus();
+              }}
+            >
+              ×
+            </button>
+          </div>
+          <div className="log-find-query">
+            <input
+              ref={findInputRef}
+              value={findQuery}
+              aria-label={t('find.keyword')}
+              placeholder={t('find.placeholder')}
+              onInput={(event) => setFindQuery(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter') return;
+                event.preventDefault();
+                void runFind();
+              }}
+            />
+            <button type="submit" disabled={!findQuery || findBusy}>
+              {findBusy ? t('find.searching') : t('find.action')}
+            </button>
+          </div>
+          <div className="log-find-options">
+            <label>
+              <input
+                type="checkbox"
+                checked={findReverse}
+                onChange={(event) => setFindReverse(event.target.checked)}
+              />
+              {t('find.reverse')}
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={findWholeWord}
+                onChange={(event) => setFindWholeWord(event.target.checked)}
+              />
+              {t('find.wholeWord')}
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={findCaseSensitive}
+                onChange={(event) => setFindCaseSensitive(event.target.checked)}
+              />
+              {t('find.caseSensitive')}
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={findWrap}
+                onChange={(event) => setFindWrap(event.target.checked)}
+              />
+              {t('find.wrap')}
+            </label>
+          </div>
+          {findStatus && (
+            <div className="log-find-status" role="status">
+              {findStatus}
+            </div>
+          )}
+        </form>
+      )}
+
+      <div className="log-view" ref={scrollRef} tabIndex={-1}>
         <div
           style={{
             height: rowVirtualizer.getTotalSize(),
@@ -245,6 +438,7 @@ export function LogContent({ session, activeKey, status = 'ready', error }: Prop
                 lineNo={vi.index + 1}
                 line={line}
                 ready={ready}
+                match={findMatch}
               />
             );
           })}

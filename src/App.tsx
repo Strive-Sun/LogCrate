@@ -1392,6 +1392,7 @@ export function App() {
                       <LogContent
                         session={tab.session}
                         activeKey={id}
+                        active={activeKey === id && !fileSearchOpen}
                         status={tab.status}
                         error={tab.error}
                       />

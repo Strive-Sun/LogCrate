@@ -990,6 +990,61 @@ body.resizing {
 }
 .log-content-panel {
   flex: 1;
+  position: relative;
+}
+
+.log-find-dialog {
+  position: absolute;
+  top: 8px;
+  right: 18px;
+  z-index: 12;
+  width: min(420px, calc(100% - 36px));
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-elev);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 22%);
+  font-size: 12px;
+}
+.log-find-head,
+.log-find-query,
+.log-find-options {
+  display: flex;
+  align-items: center;
+}
+.log-find-head {
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.log-find-close {
+  border: 0;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.log-find-query {
+  gap: 8px;
+}
+.log-find-query input {
+  flex: 1;
+  min-width: 0;
+}
+.log-find-options {
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 9px;
+  color: var(--fg-dim);
+}
+.log-find-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.log-find-status {
+  margin-top: 8px;
+  color: var(--fg-dim);
 }
 
 .index-bar {
@@ -1060,6 +1115,11 @@ body.resizing {
 .log-line .txt .lvl-DEBUG,
 .log-line .txt .lvl-TRACE {
   color: var(--debug);
+}
+.log-line .log-find-match {
+  border-radius: 2px;
+  background: #ffd54f;
+  color: #1f2328;
 }
 .log-line .trunc-tag {
   color: var(--warn);
