@@ -118,3 +118,45 @@ test('disabled search entry cannot be clicked and exposes its settings hint on h
   harness.fireEvent.click(search);
   assert.equal(opened, 0);
 });
+
+test('enabled search entry opens only through normal button activation without shortcut hints', () => {
+  let opened = 0;
+  const props: ComponentProps<typeof TopBar> = {
+    onOpenSearch: () => opened++,
+    searchOpen: false,
+    searchFeature: { currentEnabled: true, nextLaunchEnabled: true },
+    searchPreferenceSaving: false,
+    onSearchEnabledChange: () => undefined,
+    theme: 'light',
+    onToggleTheme: () => undefined,
+    count: 0,
+    newItems: [],
+    onOpenItem: () => undefined,
+    onMarkAll: () => undefined,
+    appVersion: '1.0.0',
+    autoCheckUpdates: true,
+    updateStatus: 'idle',
+    updateInfo: null,
+    updateProgress: null,
+    updateError: null,
+    onAutoCheckUpdatesChange: () => undefined,
+    onCheckForUpdates: () => undefined,
+    onSkipUpdate: () => undefined,
+    onDownloadUpdate: () => undefined,
+    macOsFileAccessSupported: false,
+    onOpenMacOsFileAccessSettings: () => undefined,
+  };
+  harness.render(
+    <I18nProvider>
+      <TopBar {...props} />
+    </I18nProvider>,
+  );
+
+  const search = harness.screen.getByRole('button', { name: /Search/ });
+  assert.equal(search.title, 'Search local files');
+  assert.equal(search.title.includes('Ctrl+F'), false);
+  harness.fireEvent.keyDown(document, { key: 'f', ctrlKey: true });
+  assert.equal(opened, 0);
+  harness.fireEvent.click(search);
+  assert.equal(opened, 1);
+});

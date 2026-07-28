@@ -448,16 +448,6 @@ export function App() {
     [localizedError, searchPreferenceSaving, t],
   );
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.key.toLocaleLowerCase() !== 'f') return;
-      event.preventDefault();
-      openFileSearch();
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [openFileSearch]);
-
   const refreshTree = useCallback(async () => {
     const nodes = await api.listWatchDirs();
     treeRef.current = nodes;
