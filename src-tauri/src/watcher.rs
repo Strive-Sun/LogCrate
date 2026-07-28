@@ -2049,17 +2049,32 @@ mod tests {
         std::thread::sleep(Duration::from_secs(1));
 
         std::fs::rename(&old, &new).unwrap();
-        let batch = change_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(batch.changes.iter().any(|change| match change {
-            DirectoryChange::Rename { old_path, node } => {
-                old_path == &old.to_string_lossy() && node.path == new.to_string_lossy()
+        let old_path = old.to_string_lossy().into_owned();
+        let new_path = new.to_string_lossy().into_owned();
+        let mut visible_paths = HashSet::from([old_path.clone()]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while visible_paths.contains(&old_path) || !visible_paths.contains(&new_path) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "rename events did not converge");
+            let batch = change_rx.recv_timeout(remaining).unwrap();
+            for change in batch.changes {
+                match change {
+                    DirectoryChange::Upsert { node } => {
+                        visible_paths.insert(node.path);
+                    }
+                    DirectoryChange::Remove { path } => {
+                        visible_paths.remove(&path);
+                    }
+                    DirectoryChange::Rename { old_path, node } => {
+                        visible_paths.remove(&old_path);
+                        visible_paths.insert(node.path);
+                    }
+                    DirectoryChange::Rescan { nodes } => {
+                        visible_paths = nodes.into_iter().map(|node| node.path).collect();
+                    }
+                }
             }
-            DirectoryChange::Rescan { nodes } => {
-                nodes.iter().any(|node| node.path == new.to_string_lossy())
-                    && nodes.iter().all(|node| node.path != old.to_string_lossy())
-            }
-            _ => false,
-        }));
+        }
     }
 
     #[test]
