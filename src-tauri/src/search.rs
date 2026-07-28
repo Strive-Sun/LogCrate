@@ -5319,14 +5319,23 @@ mod tests {
     fn missing_tantivy_index_is_rebuilt_from_existing_database() {
         let directory = test_directory("tantivy-recovery");
         let db = directory.join("file-search.sqlite3");
+        let root = local_fixed_roots()
+            .into_iter()
+            .next()
+            .expect("test platform must expose a default search root");
+        let recoverable_path = Path::new(&root)
+            .join("logs")
+            .join("recoverable-debug.log")
+            .to_string_lossy()
+            .into_owned();
         initialize_database(&db).unwrap();
         let mut connection = open_database(&db).unwrap();
         write_batch(
             &mut connection,
             &[IndexedFile {
-                path: "D:\\logs\\recoverable-debug.log".into(),
+                path: recoverable_path.clone(),
                 name: "recoverable-debug.log".into(),
-                root: "D:\\".into(),
+                root,
                 size: 1,
                 modified_ms: None,
                 is_log: true,
@@ -5347,7 +5356,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(total, 1);
-        assert_eq!(items[0].path, "D:\\logs\\recoverable-debug.log");
+        assert_eq!(items[0].path, recoverable_path);
         drop(manager);
         let _ = fs::remove_dir_all(directory);
     }
