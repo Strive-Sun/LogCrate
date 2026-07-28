@@ -17,6 +17,8 @@ import type {
   EncodingProgress,
   IndexProgress,
   LogLine,
+  LogSearchRequest,
+  LogSearchResult,
   MacOsFileAccessCapabilities,
   MacOsSystemSettingsResult,
   NewLogItem,
@@ -110,6 +112,31 @@ function genLine(entrySeed: number, lineNo: number): string {
     line += ' ' + 'x'.repeat(2000) + ' <<超长行示例结束>>';
   }
   return line;
+}
+
+function mockWordCharacter(character: string | undefined): boolean {
+  return character !== undefined && /[\p{L}\p{N}_]/u.test(character);
+}
+
+function mockLineMatch(
+  line: string,
+  request: LogSearchRequest,
+  minimum: number,
+  maximum: number,
+): { startColumn: number; endColumn: number } | null {
+  const source = request.caseSensitive ? line : line.toLocaleLowerCase();
+  const query = request.caseSensitive ? request.query : request.query.toLocaleLowerCase();
+  if (!query) return null;
+  const candidates: Array<{ startColumn: number; endColumn: number }> = [];
+  for (let start = source.indexOf(query); start >= 0; start = source.indexOf(query, start + 1)) {
+    const end = start + query.length;
+    if (start < minimum || (request.reverse ? end > maximum : start >= maximum)) continue;
+    if (request.wholeWord && (mockWordCharacter(line[start - 1]) || mockWordCharacter(line[end]))) {
+      continue;
+    }
+    candidates.push({ startColumn: start, endColumn: end });
+  }
+  return request.reverse ? (candidates.at(-1) ?? null) : (candidates[0] ?? null);
 }
 
 interface EntryMeta {
@@ -408,6 +435,70 @@ export const mockApi = {
       });
     }
     return out;
+  },
+
+  async searchLog(entryKey: string, request: LogSearchRequest): Promise<LogSearchResult> {
+    const meta = ENTRY_TABLE[entryKey];
+    if (!meta) throw new Error('session not found');
+    if (!request.query) throw new Error('search query cannot be empty');
+    const indexedLines = meta.lineCount;
+    if (indexedLines === 0) {
+      return {
+        match: null,
+        wrapped: false,
+        reachedBoundary: true,
+        indexedLines,
+        indexing: false,
+      };
+    }
+    const startLine = Math.min(Math.max(0, request.startLine), indexedLines - 1);
+    const scan = async (
+      from: number,
+      to: number,
+      wrapped: boolean,
+    ): Promise<LogSearchResult['match']> => {
+      const step = request.reverse ? -1 : 1;
+      for (let lineNo = from; request.reverse ? lineNo >= to : lineNo <= to; lineNo += step) {
+        const line = genLine(meta.seed, lineNo);
+        const isCursorLine = lineNo === startLine;
+        const cursor = request.startColumn ?? (request.reverse ? line.length : 0);
+        const minimum =
+          isCursorLine && ((request.reverse && wrapped) || (!request.reverse && !wrapped))
+            ? cursor
+            : 0;
+        const maximum =
+          isCursorLine && ((request.reverse && !wrapped) || (!request.reverse && wrapped))
+            ? cursor
+            : Number.POSITIVE_INFINITY;
+        const matched = mockLineMatch(line, request, minimum, maximum);
+        if (matched) return { lineNo: lineNo + 1, ...matched };
+        if (Math.abs(lineNo - from) % 2000 === 1999) await delay(0);
+      }
+      return null;
+    };
+
+    const first = request.reverse
+      ? await scan(startLine, 0, false)
+      : await scan(startLine, indexedLines - 1, false);
+    if (first || !request.wrap) {
+      return {
+        match: first,
+        wrapped: false,
+        reachedBoundary: first === null,
+        indexedLines,
+        indexing: meta.compressed && meta.lineCount > 300_000,
+      };
+    }
+    const wrapped = request.reverse
+      ? await scan(indexedLines - 1, startLine, true)
+      : await scan(0, startLine, true);
+    return {
+      match: wrapped,
+      wrapped: true,
+      reachedBoundary: wrapped === null,
+      indexedLines,
+      indexing: meta.compressed && meta.lineCount > 300_000,
+    };
   },
 
   lineCount(entryKey: string): number {

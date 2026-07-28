@@ -1,7 +1,7 @@
 //! Incremental line indexing, windowed reads, decoding, and session lifecycle.
 
 use encoding_rs::Encoding;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -68,6 +68,39 @@ pub struct EncodingProgress {
 pub struct SnapshotExportResult {
     pub bytes: u64,
     pub complete: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogSearchRequest {
+    pub query: String,
+    /// Zero-based line used as the first search position.
+    pub start_line: u64,
+    /// UTF-16 code-unit offset. None means line start forward and line end in reverse.
+    pub start_column: Option<u64>,
+    pub reverse: bool,
+    pub whole_word: bool,
+    pub case_sensitive: bool,
+    pub wrap: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogSearchMatch {
+    pub line_no: u64,
+    pub start_column: u64,
+    pub end_column: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogSearchResult {
+    #[serde(rename = "match")]
+    pub matched: Option<LogSearchMatch>,
+    pub wrapped: bool,
+    pub reached_boundary: bool,
+    pub indexed_lines: u64,
+    pub indexing: bool,
 }
 
 pub struct Session {
@@ -667,6 +700,239 @@ impl SessionManager {
         Ok(lines)
     }
 
+    fn is_word_character(character: char) -> bool {
+        character.is_alphanumeric() || character == '_'
+    }
+
+    fn is_whole_word(text: &str, start: usize, end: usize) -> bool {
+        let before = text[..start].chars().next_back();
+        let after = text[end..].chars().next();
+        before.map_or(true, |character| !Self::is_word_character(character))
+            && after.map_or(true, |character| !Self::is_word_character(character))
+    }
+
+    fn folded_text_with_source_ranges(text: &str) -> (String, Vec<(usize, usize)>) {
+        let mut folded = String::new();
+        let mut ranges = Vec::new();
+        for (start, character) in text.char_indices() {
+            let end = start + character.len_utf8();
+            for folded_character in character.to_lowercase() {
+                folded.push(folded_character);
+                ranges.push((start, end));
+            }
+        }
+        (folded, ranges)
+    }
+
+    fn match_byte_ranges(text: &str, query: &str, case_sensitive: bool) -> Vec<(usize, usize)> {
+        if case_sensitive {
+            return text
+                .match_indices(query)
+                .map(|(start, matched)| (start, start + matched.len()))
+                .collect();
+        }
+
+        let (folded_text, source_ranges) = Self::folded_text_with_source_ranges(text);
+        let folded_query: String = query.chars().flat_map(char::to_lowercase).collect();
+        if folded_query.is_empty() {
+            return Vec::new();
+        }
+        folded_text
+            .match_indices(&folded_query)
+            .filter_map(|(folded_start, matched)| {
+                let start_index = folded_text[..folded_start].chars().count();
+                let end_index = start_index + matched.chars().count();
+                let &(source_start, _) = source_ranges.get(start_index)?;
+                let &(_, source_end) = source_ranges.get(end_index.checked_sub(1)?)?;
+                let begins_source_character = start_index == 0
+                    || source_ranges[start_index - 1].0 != source_ranges[start_index].0;
+                let ends_source_character = end_index == source_ranges.len()
+                    || source_ranges[end_index - 1].0 != source_ranges[end_index].0;
+                (begins_source_character && ends_source_character)
+                    .then_some((source_start, source_end))
+            })
+            .collect()
+    }
+
+    fn utf16_column(text: &str, byte_index: usize) -> u64 {
+        text[..byte_index].encode_utf16().count() as u64
+    }
+
+    fn matches_in_line(text: &str, request: &LogSearchRequest) -> Vec<(u64, u64)> {
+        Self::match_byte_ranges(text, &request.query, request.case_sensitive)
+            .into_iter()
+            .filter(|(start, end)| !request.whole_word || Self::is_whole_word(text, *start, *end))
+            .map(|(start, end)| {
+                (
+                    Self::utf16_column(text, start),
+                    Self::utf16_column(text, end),
+                )
+            })
+            .collect()
+    }
+
+    fn read_search_line(
+        file: &mut File,
+        session: &Arc<Mutex<Session>>,
+        line_no: u64,
+        encoding: &'static Encoding,
+    ) -> anyhow::Result<String> {
+        let (from, to) = {
+            let current = session.lock().unwrap();
+            (
+                current.offsets[line_no as usize],
+                current.offsets[line_no as usize + 1],
+            )
+        };
+        let read_len = (to - from).min(MAX_LINE_BYTES as u64) as usize;
+        let mut raw = vec![0u8; read_len];
+        file.seek(SeekFrom::Start(from))?;
+        file.read_exact(&mut raw)?;
+        Self::trim_line_bytes(&mut raw, encoding, line_no == 0);
+        let (text, _, _) = encoding.decode(&raw);
+        Ok(text.into_owned())
+    }
+
+    pub fn search_log(
+        &self,
+        session_id: &str,
+        request: &LogSearchRequest,
+    ) -> anyhow::Result<LogSearchResult> {
+        if request.query.is_empty() {
+            anyhow::bail!("search query cannot be empty");
+        }
+        let session = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
+        let _ = self.touch_lru(session_id);
+        let (cache_path, encoding, indexed_lines, indexing) = {
+            let current = session.lock().unwrap();
+            (
+                current.cache_path.clone(),
+                current.effective_encoding,
+                current.line_count(),
+                current.indexing,
+            )
+        };
+        if indexed_lines == 0 {
+            return Ok(LogSearchResult {
+                matched: None,
+                wrapped: false,
+                reached_boundary: true,
+                indexed_lines,
+                indexing,
+            });
+        }
+
+        let start_line = request.start_line.min(indexed_lines - 1);
+        let start_column = request.start_column;
+        let mut file = File::open(cache_path)?;
+        let find_forward = |file: &mut File,
+                            from_line: u64,
+                            to_line: u64,
+                            first_min: Option<u64>,
+                            last_max: Option<u64>|
+         -> anyhow::Result<Option<LogSearchMatch>> {
+            for line in from_line..to_line {
+                let text = Self::read_search_line(file, &session, line, encoding)?;
+                let minimum = (line == from_line)
+                    .then_some(first_min)
+                    .flatten()
+                    .unwrap_or(0);
+                let maximum = (line + 1 == to_line).then_some(last_max).flatten();
+                if let Some((start, end)) =
+                    Self::matches_in_line(&text, request)
+                        .into_iter()
+                        .find(|(start, _)| {
+                            *start >= minimum && maximum.map_or(true, |max| *start < max)
+                        })
+                {
+                    return Ok(Some(LogSearchMatch {
+                        line_no: line + 1,
+                        start_column: start,
+                        end_column: end,
+                    }));
+                }
+            }
+            Ok(None)
+        };
+        let find_reverse = |file: &mut File,
+                            from_line: u64,
+                            to_line_inclusive: u64,
+                            first_max: Option<u64>,
+                            last_min: Option<u64>|
+         -> anyhow::Result<Option<LogSearchMatch>> {
+            for line in (to_line_inclusive..=from_line).rev() {
+                let text = Self::read_search_line(file, &session, line, encoding)?;
+                let maximum = (line == from_line).then_some(first_max).flatten();
+                let minimum = (line == to_line_inclusive)
+                    .then_some(last_min)
+                    .flatten()
+                    .unwrap_or(0);
+                if let Some((start, end)) = Self::matches_in_line(&text, request)
+                    .into_iter()
+                    .rev()
+                    .find(|(start, end)| {
+                        *start >= minimum && maximum.map_or(true, |max| *end <= max)
+                    })
+                {
+                    return Ok(Some(LogSearchMatch {
+                        line_no: line + 1,
+                        start_column: start,
+                        end_column: end,
+                    }));
+                }
+            }
+            Ok(None)
+        };
+
+        let matched = if request.reverse {
+            find_reverse(&mut file, start_line, 0, start_column, None)?
+        } else {
+            find_forward(
+                &mut file,
+                start_line,
+                indexed_lines,
+                Some(start_column.unwrap_or(0)),
+                None,
+            )?
+        };
+        if matched.is_some() || !request.wrap {
+            let reached_boundary = matched.is_none();
+            return Ok(LogSearchResult {
+                matched,
+                wrapped: false,
+                reached_boundary,
+                indexed_lines,
+                indexing,
+            });
+        }
+
+        let matched = if request.reverse {
+            find_reverse(&mut file, indexed_lines - 1, start_line, None, start_column)?
+        } else {
+            find_forward(
+                &mut file,
+                0,
+                start_line + 1,
+                None,
+                Some(start_column.unwrap_or(0)),
+            )?
+        };
+        let reached_boundary = matched.is_none();
+        Ok(LogSearchResult {
+            matched,
+            wrapped: true,
+            reached_boundary,
+            indexed_lines,
+            indexing,
+        })
+    }
+
     pub fn line_count(&self, session_id: &str) -> u64 {
         self.sessions
             .lock()
@@ -833,6 +1099,148 @@ mod tests {
             .read_lines(&open.session_id, 0, 200)
             .unwrap()
             .is_empty());
+    }
+
+    fn search_request(query: &str) -> LogSearchRequest {
+        LogSearchRequest {
+            query: query.to_string(),
+            start_line: 0,
+            start_column: None,
+            reverse: false,
+            whole_word: false,
+            case_sensitive: false,
+            wrap: false,
+        }
+    }
+
+    #[test]
+    fn searches_forward_reverse_and_respects_match_options() {
+        let (manager, session_id, _) = indexed_manager(
+            "Error first\nerror errors error_code\nmiddle error\nlast ERROR\nÄpfel"
+                .as_bytes()
+                .to_vec(),
+        );
+
+        let first = manager
+            .search_log(&session_id, &search_request("error"))
+            .unwrap()
+            .matched
+            .unwrap();
+        assert_eq!(first.line_no, 1);
+        assert_eq!((first.start_column, first.end_column), (0, 5));
+
+        let mut whole_word = search_request("error");
+        whole_word.start_line = 1;
+        whole_word.start_column = Some(1);
+        whole_word.whole_word = true;
+        assert_eq!(
+            manager
+                .search_log(&session_id, &whole_word)
+                .unwrap()
+                .matched
+                .unwrap()
+                .line_no,
+            3
+        );
+
+        let mut case_sensitive = search_request("ERROR");
+        case_sensitive.case_sensitive = true;
+        assert_eq!(
+            manager
+                .search_log(&session_id, &case_sensitive)
+                .unwrap()
+                .matched
+                .unwrap()
+                .line_no,
+            4
+        );
+
+        let mut unicode_case = search_request("äpfel");
+        unicode_case.start_line = 4;
+        assert_eq!(
+            manager
+                .search_log(&session_id, &unicode_case)
+                .unwrap()
+                .matched
+                .unwrap()
+                .line_no,
+            5
+        );
+
+        let mut reverse = search_request("error");
+        reverse.start_line = 3;
+        reverse.start_column = Some(0);
+        reverse.reverse = true;
+        assert_eq!(
+            manager
+                .search_log(&session_id, &reverse)
+                .unwrap()
+                .matched
+                .unwrap()
+                .line_no,
+            3
+        );
+    }
+
+    #[test]
+    fn search_wraps_once_or_reports_the_reached_boundary() {
+        let (manager, session_id, _) = indexed_manager(b"first hit\nlast hit".to_vec());
+        let mut request = search_request("hit");
+        request.start_line = 1;
+        request.start_column = Some(8);
+
+        let boundary = manager.search_log(&session_id, &request).unwrap();
+        assert!(boundary.matched.is_none());
+        assert!(!boundary.wrapped);
+        assert!(boundary.reached_boundary);
+
+        request.wrap = true;
+        let wrapped = manager.search_log(&session_id, &request).unwrap();
+        assert_eq!(wrapped.matched.unwrap().line_no, 1);
+        assert!(wrapped.wrapped);
+        assert!(!wrapped.reached_boundary);
+
+        request.reverse = true;
+        request.start_line = 0;
+        request.start_column = Some(0);
+        let reverse_wrapped = manager.search_log(&session_id, &request).unwrap();
+        assert_eq!(reverse_wrapped.matched.unwrap().line_no, 2);
+        assert!(reverse_wrapped.wrapped);
+
+        request.query = "missing".into();
+        let missing = manager.search_log(&session_id, &request).unwrap();
+        assert!(missing.matched.is_none());
+        assert!(missing.wrapped);
+        assert!(missing.reached_boundary);
+    }
+
+    #[test]
+    fn search_reports_the_current_indexed_window_while_indexing() {
+        let manager = SessionManager::default();
+        let bytes = b"first match\nsecond line\nunfinished".to_vec();
+        let open = manager
+            .prepare("partial-search.log".into(), bytes.len() as u64)
+            .unwrap();
+        let mut observed = None;
+        manager.index(
+            &open.session_id,
+            bytes.len() as u64,
+            Cursor::new(bytes),
+            |progress| {
+                if !progress.done && progress.indexed_lines > 0 && observed.is_none() {
+                    observed = Some(
+                        manager
+                            .search_log(&open.session_id, &search_request("match"))
+                            .unwrap(),
+                    );
+                }
+            },
+        );
+
+        let result = observed.unwrap();
+        assert_eq!(result.matched.unwrap().line_no, 1);
+        assert!(result.indexing);
+        assert_eq!(result.indexed_lines, 2);
     }
 
     #[test]

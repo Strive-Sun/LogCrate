@@ -15,7 +15,10 @@ mod startup_trace;
 mod watcher;
 
 use archive::{open_archive, resolve_archive_chain, ArchiveEntry};
-use index::{IndexProgress, LogLine, OpenResult, SessionManager, SnapshotExportResult};
+use index::{
+    IndexProgress, LogLine, LogSearchRequest, LogSearchResult, OpenResult, SessionManager,
+    SnapshotExportResult,
+};
 use serde::Serialize;
 use std::io::SeekFrom;
 use std::path::PathBuf;
@@ -962,6 +965,20 @@ async fn read_lines(
 }
 
 #[tauri::command]
+async fn search_log(
+    state: State<'_, AppState>,
+    session_id: String,
+    request: LogSearchRequest,
+) -> Result<LogSearchResult, String> {
+    let state = state.ready().await;
+    let sessions = state.sessions.clone();
+    tauri::async_runtime::spawn_blocking(move || sessions.search_log(&session_id, &request))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn line_count(state: State<'_, AppState>, session_id: String) -> Result<u64, String> {
     let state = state.ready().await;
     Ok(state.sessions.line_count(&session_id))
@@ -1304,6 +1321,7 @@ pub fn run() {
             list_archive_entries,
             open_log_session,
             read_lines,
+            search_log,
             line_count,
             export_session_snapshot,
             set_session_encoding,

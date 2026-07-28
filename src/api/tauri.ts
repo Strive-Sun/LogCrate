@@ -26,6 +26,8 @@ import type {
   EncodingProgress,
   IndexProgress,
   LogLine,
+  LogSearchRequest,
+  LogSearchResult,
   MacOsFileAccessCapabilities,
   MacOsSystemSettingsResult,
   NewLogItem,
@@ -321,6 +323,12 @@ export const tauriApi = {
     const sid = sessionByKey.get(entryKey);
     if (!sid) return [];
     return invoke<LogLine[]>('read_lines', { sessionId: sid, start, count });
+  },
+
+  async searchLog(entryKey: string, request: LogSearchRequest): Promise<LogSearchResult> {
+    const sessionId = sessionByKey.get(entryKey);
+    if (!sessionId) throw new Error('session not found');
+    return invoke<LogSearchResult>('search_log', { sessionId, request });
   },
 
   lineCount(entryKey: string): number {

@@ -24,6 +24,34 @@ export interface LogLine {
   truncated: boolean;
 }
 
+export interface LogSearchRequest {
+  query: string;
+  /** Zero-based line used as the first search position. */
+  startLine: number;
+  /** UTF-16 code-unit offset; omitted means line start forward and line end in reverse. */
+  startColumn?: number;
+  reverse: boolean;
+  wholeWord: boolean;
+  caseSensitive: boolean;
+  wrap: boolean;
+}
+
+export interface LogSearchMatch {
+  /** One-based line number, matching LogLine.lineNo. */
+  lineNo: number;
+  /** UTF-16 code-unit offsets for direct use with JavaScript string slicing. */
+  startColumn: number;
+  endColumn: number;
+}
+
+export interface LogSearchResult {
+  match: LogSearchMatch | null;
+  wrapped: boolean;
+  reachedBoundary: boolean;
+  indexedLines: number;
+  indexing: boolean;
+}
+
 /** 监控目录树中的节点类型 */
 export type NodeKind = 'dir' | 'archive' | 'file';
 
