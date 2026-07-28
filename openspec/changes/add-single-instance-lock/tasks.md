@@ -1,4 +1,4 @@
-## 1. Implementation
+## 1. 实现
 
-- [ ] 1.1 Add and register the cross-platform single-instance guard before desktop setup, with a safe second-launch exit/focus path.
-- [ ] 1.2 Add deterministic regression tests and run the lifecycle/Rust validation required by the change.
+- [ ] 1.1 在桌面初始化之前增加并注册跨平台单实例锁，实现安全的第二次启动退出或聚焦路径。
+- [ ] 1.2 增加确定性的回归测试，并执行本变更要求的生命周期与 Rust 验证。

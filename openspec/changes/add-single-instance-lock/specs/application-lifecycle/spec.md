@@ -1,20 +1,20 @@
 ## ADDED Requirements
 
-### Requirement: Single active application instance
+### Requirement: 单一活动应用实例
 
-The desktop application MUST acquire a platform-backed per-user single-instance lock before creating its main window, tray, watchers, or background workers. If acquisition fails because another LogCrate process owns the lock, the new process MUST exit cleanly without creating those startup side effects. The first process MUST remain unaffected and continue its normal lifecycle; an updater-requested restart MUST be allowed after the old process releases the lock.
+桌面应用 MUST 在创建主窗口、系统托盘、目录监控或后台 worker 之前，获取由操作系统支持的、针对当前用户的单实例锁。如果单实例锁已被另一个 LogCrate 进程持有，新进程 MUST 干净退出，不得产生上述启动副作用。首个进程 MUST 不受影响并继续正常生命周期；更新器请求的重启 MUST 在旧进程释放锁后得到允许。
 
-#### Scenario: First launch acquires the lock
+#### Scenario: 首次启动获取锁
 
-- **WHEN** no LogCrate process for the current user owns the instance lock
-- **THEN** the process acquires the lock and continues normal startup, including window and tray creation
+- **WHEN** 当前用户没有 LogCrate 进程持有单实例锁
+- **THEN** 该进程获取锁并继续正常启动，包括创建窗口和系统托盘
 
-#### Scenario: Duplicate launch is rejected
+#### Scenario: 重复启动被拒绝
 
-- **WHEN** a second LogCrate process starts while the first process owns the instance lock
-- **THEN** the second process exits cleanly without creating a window, tray icon, watcher, or background task
+- **WHEN** 首个进程持有单实例锁期间，第二个 LogCrate 进程启动
+- **THEN** 第二个进程干净退出，不创建窗口、托盘图标、目录监控或后台任务
 
-#### Scenario: Crash or updater restart releases ownership
+#### Scenario: 崩溃或更新器重启释放所有权
 
-- **WHEN** the owning process exits normally, crashes, or hands off to an updater restart
-- **THEN** the operating system releases the lock and the replacement process can acquire it
+- **WHEN** 持有锁的进程正常退出、崩溃或交接给更新器重启
+- **THEN** 操作系统释放该锁，替代进程可以重新获取

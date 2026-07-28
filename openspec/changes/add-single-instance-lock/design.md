@@ -1,27 +1,27 @@
-## Context
+## 背景
 
-The guard must run before desktop window creation and before any startup worker is scheduled. It must work on Windows and macOS, avoid stale lock files after crashes, and not interfere with an intentional updater restart.
+单实例锁必须在创建桌面窗口、调度任何启动 worker 之前生效。它必须同时支持 Windows 和 macOS，避免进程崩溃后留下失效锁文件，并且不能干扰有意触发的更新器重启。
 
-## Goals / Non-Goals
+## 目标与非目标
 
-- Goals: one process per user session; deterministic second-launch behavior; no duplicate side effects; preserve normal and updater exits.
-- Non-Goals: cross-user machine-wide exclusivity, forwarding arbitrary command-line files, or changing tray/window behavior of the first process.
+- 目标：每个用户会话只运行一个进程；第二次启动具有确定性行为；不产生重复副作用；保留正常退出和更新器退出能力。
+- 非目标：不实现跨用户的整机互斥，不转发任意命令行文件，也不改变首个进程的托盘和窗口行为。
 
-## Decisions
+## 技术决策
 
-- Use a platform-backed named single-instance primitive through a maintained Tauri single-instance plugin rather than an ad-hoc lock file. The operating system releases ownership when the process exits or crashes.
-- Register the plugin before `setup`; the second-instance callback only records/focuses the already-created main window and never constructs another application state.
-- Treat failure to acquire the primitive as a normal early exit with a concise diagnostic; the first instance continues startup unchanged.
+- 通过维护中的 Tauri 单实例插件使用由操作系统支持的命名单实例原语，而不是自行实现锁文件。进程正常退出或崩溃时，操作系统会释放所有权。
+- 在 `setup` 之前注册插件；第二实例回调只记录或聚焦已经创建的主窗口，绝不重新构造应用状态。
+- 无法获取单实例原语时按正常提前退出处理，并输出简洁诊断；首个实例继续按原流程启动。
 
-## Risks / Trade-offs
+## 风险与权衡
 
-- Plugin behavior and callback APIs become a build dependency; pin the major version compatible with Tauri 2 and cover callback registration in compile-time tests.
-- A second launch cannot be used to open a new path in this change; forwarding arguments remains a separate capability.
+- 插件行为和回调 API 会成为构建依赖；应固定与 Tauri 2 兼容的主版本，并通过编译期测试覆盖回调注册。
+- 本次变更不支持通过第二次启动打开新路径；参数转发应作为独立能力处理。
 
-## Migration Plan
+## 迁移计划
 
-No data migration. Existing installations acquire the named primitive on their next launch; uninstall and updater restart remain ordinary process lifecycle operations.
+无需数据迁移。已有安装会在下一次启动时获取命名原语；卸载和更新器重启仍按普通进程生命周期处理。
 
-## Open Questions
+## 待决问题
 
-- None for this change.
+- 本次变更无待决问题。
