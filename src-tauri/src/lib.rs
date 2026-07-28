@@ -1081,6 +1081,10 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            #[cfg(desktop)]
+            show_main_window(app);
+        }))
         .on_window_event(|window, event| {
             if close_action(window.label()) == LifecycleAction::HideMainWindow {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
