@@ -303,6 +303,18 @@ impl SearchStatus {
             error: None,
         }
     }
+
+    pub(crate) fn initializing(config: &SearchConfig) -> Self {
+        let mut status = Self::disabled(config);
+        if config.enabled {
+            status.phase = "scanning".into();
+            if status.roots.is_empty() {
+                status.roots = local_fixed_roots();
+                status.providers = planned_provider_statuses(&status.roots);
+            }
+        }
+        status
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4495,6 +4507,22 @@ mod tests {
         assert_eq!(status.providers[0].stage, "enumeratingMft");
         assert_eq!(status.providers[1].stage, "readingUsn");
         assert_eq!(status.providers[1].discovered_records, 0);
+    }
+
+    #[test]
+    fn initializing_status_is_available_before_manager_creation() {
+        let config = SearchConfig {
+            enabled: true,
+            roots: vec!["C:\\".into()],
+            ..SearchConfig::default()
+        };
+
+        let status = SearchStatus::initializing(&config);
+
+        assert_eq!(status.phase, "scanning");
+        assert_eq!(status.roots, config.roots);
+        assert_eq!(status.providers.len(), 1);
+        assert_eq!(status.indexed_files, 0);
     }
 
     #[test]

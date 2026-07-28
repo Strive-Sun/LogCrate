@@ -132,6 +132,7 @@ struct ReadyAppState {
 struct SearchRuntime {
     preferences: SearchPreferenceStore,
     current_enabled: bool,
+    initial_status: SearchStatus,
     manager: OnceLock<Result<Arc<FileSearchManager>, String>>,
     manager_notify: Notify,
 }
@@ -140,9 +141,11 @@ struct SearchRuntime {
 impl SearchRuntime {
     fn new(preferences: SearchPreferenceStore) -> Self {
         let current_enabled = preferences.config().enabled;
+        let initial_status = SearchStatus::initializing(&preferences.config());
         Self {
             preferences,
             current_enabled,
+            initial_status,
             manager: OnceLock::new(),
             manager_notify: Notify::new(),
         }
@@ -164,6 +167,23 @@ impl SearchRuntime {
                 return manager.clone();
             }
             notified.await;
+        }
+    }
+
+    fn config(&self) -> SearchConfig {
+        self.preferences.config()
+    }
+
+    fn status(&self) -> SearchStatus {
+        match self.manager.get() {
+            Some(Ok(manager)) => manager.status(),
+            Some(Err(error)) => {
+                let mut status = self.initial_status.clone();
+                status.phase = "error".into();
+                status.error = Some(error.clone());
+                status
+            }
+            None => self.initial_status.clone(),
         }
     }
 }
@@ -474,14 +494,16 @@ async fn inspect_dropped_file(
 #[tauri::command]
 async fn file_search_status(state: State<'_, AppState>) -> Result<SearchStatus, String> {
     let state = state.ready().await;
-    Ok(ready_search(state).await?.status())
+    ensure_search_enabled(state)?;
+    Ok(state.search.status())
 }
 
 #[cfg(desktop)]
 #[tauri::command]
 async fn file_search_config(state: State<'_, AppState>) -> Result<SearchConfig, String> {
     let state = state.ready().await;
-    Ok(ready_search(state).await?.config())
+    ensure_search_enabled(state)?;
+    Ok(state.search.config())
 }
 
 #[cfg(desktop)]
@@ -1437,6 +1459,28 @@ mod lifecycle_tests {
         let ready = state.ready().await;
         assert!(ready.search.manager.get().is_none());
         assert!(!search_dir.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn search_status_and_config_do_not_wait_for_manager_initialization() {
+        let root = std::env::temp_dir().join(format!(
+            "logcrate-search-runtime-status-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let preferences = SearchPreferenceStore::new(root.clone());
+        preferences.set_enabled(true).unwrap();
+        let runtime = SearchRuntime::new(preferences);
+
+        assert!(runtime.manager.get().is_none());
+        assert!(runtime.config().enabled);
+        assert_eq!(runtime.status().phase, "scanning");
+
         let _ = std::fs::remove_dir_all(root);
     }
 
