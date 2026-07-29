@@ -995,6 +995,268 @@ body.resizing {
   position: relative;
 }
 
+.log-field-bar {
+  position: relative;
+  display: flex;
+  height: 34px;
+  flex-shrink: 0;
+  overflow: visible;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  font: 11px var(--log-font);
+  z-index: 8;
+}
+.log-field-bar.is-empty {
+  align-items: center;
+  color: var(--fg-faint);
+}
+.log-field-gutter {
+  width: 84px;
+  flex: 0 0 84px;
+  border-right: 1px solid var(--border);
+}
+.log-field-track {
+  display: flex;
+  height: 100%;
+  min-width: max-content;
+  will-change: transform;
+}
+.log-field-warning {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 9;
+  max-width: 40%;
+  overflow: hidden;
+  padding-left: 8px;
+  background: var(--bg-elev);
+  color: var(--fg-faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.log-field {
+  position: relative;
+  flex: 0 0 auto;
+  min-width: 4ch;
+  border-right: 1px solid var(--border);
+}
+.log-field-button {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  padding: 0 7px;
+  border: 0;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.log-field.active .log-field-button,
+.log-field-button:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+.log-field-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  bottom: 0;
+  z-index: 2;
+  width: 6px;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+}
+.log-field-resizer:hover {
+  background: var(--accent);
+}
+.log-field-resizer:focus-visible {
+  background: var(--accent);
+  outline: 1px solid var(--accent);
+}
+.log-field-drag-guide {
+  position: absolute;
+  top: 0;
+  z-index: 7;
+  width: 1px;
+  height: calc(100vh - 34px);
+  pointer-events: none;
+  background: var(--accent);
+  opacity: 0.75;
+}
+.log-field-popover {
+  position: absolute;
+  top: 32px;
+  left: 0;
+  z-index: 20;
+  display: grid;
+  gap: 6px;
+  width: max(230px, 100%);
+  max-height: 340px;
+  overflow: auto;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 22%);
+  font-family: var(--ui-font);
+}
+.log-field-popover label {
+  display: grid;
+  gap: 3px;
+}
+.log-field-popover input:not([type='checkbox']),
+.log-field-popover select {
+  min-width: 0;
+}
+.log-field-choice {
+  grid-template-columns: auto 1fr auto !important;
+  align-items: center;
+}
+.log-field-inline-option {
+  display: flex !important;
+  align-items: center;
+  gap: 5px !important;
+}
+.log-field-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border);
+}
+.log-field-empty {
+  position: sticky;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 100%;
+  color: var(--fg-dim);
+}
+.log-field-matched {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.log-field-matched .ln {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg));
+}
+.log-field-mode {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.log-status-foot {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+.log-filter-menu {
+  display: contents;
+}
+.log-filter-menu > summary {
+  display: none;
+}
+.log-filter-menu > .log-filter-menu-content {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.log-filter-menu > summary,
+.log-field-mode button,
+.log-field-foot-button,
+.log-layout-menu summary,
+.log-layout-menu button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.log-field-mode button.active {
+  background: var(--accent);
+  color: white;
+}
+.log-field-unparsed-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.log-layout-menu {
+  position: relative;
+}
+.log-layout-menu summary {
+  list-style: none;
+}
+.log-layout-menu > div {
+  position: absolute;
+  bottom: 22px;
+  left: 0;
+  z-index: 20;
+  display: grid;
+  gap: 7px;
+  min-width: 210px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 22%);
+}
+.log-layout-menu small {
+  color: var(--fg-faint);
+}
+.log-field-status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.log-file-size {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .log-status-foot {
+    gap: 9px;
+  }
+  .log-filter-menu {
+    position: relative;
+    display: block;
+  }
+  .log-filter-menu > summary {
+    display: block;
+    list-style: none;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .log-filter-menu:not([open]) > .log-filter-menu-content {
+    display: none;
+  }
+  .log-filter-menu[open] > .log-filter-menu-content {
+    position: absolute;
+    bottom: 22px;
+    left: 0;
+    z-index: 21;
+    display: grid;
+    gap: 9px;
+    min-width: 230px;
+    padding: 9px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-elev);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 22%);
+  }
+  .log-filter-menu .log-layout-menu > div {
+    left: 0;
+  }
+}
+
 .log-find-dialog {
   position: absolute;
   top: 8px;
@@ -1087,6 +1349,9 @@ body.resizing {
 }
 .log-line:hover {
   background: var(--hover);
+}
+.log-line.log-field-matched:hover {
+  background: color-mix(in srgb, var(--accent) 20%, var(--hover));
 }
 .log-line .ln {
   flex-shrink: 0;

@@ -1,8 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { api } from '../api';
-import type { LogLine, LogSearchMatch, OpenSessionResult } from '../api';
+import type {
+  LogFieldCondition,
+  LogFieldLayout,
+  LogFieldMarkedLine,
+  LogFieldResultMode,
+  LogFieldStatistics,
+  LogLine,
+  LogSearchMatch,
+  OpenSessionResult,
+} from '../api';
 import { fmtNum, fmtSize } from '../util/format';
+import {
+  clearSavedLogFieldLayout,
+  loadLogFieldLayout,
+  persistLogFieldLayout,
+  savedLayoutFingerprintMatches,
+  type LayoutPersistenceTrigger,
+  type StoredLogFieldLayout,
+} from '../util/logFieldLayoutStorage';
+import { LogFieldFilterBar } from './LogFieldFilterBar';
 import { LogRow } from './LogRow';
 import { useI18n } from '../i18n/I18nProvider';
 
@@ -17,6 +35,79 @@ interface Props {
 const PAGE = 200;
 const MAX_CACHED_LINES = 5_000;
 const ENCODINGS = ['UTF-8', 'GBK', 'GB18030', 'UTF-16LE', 'UTF-16BE'];
+
+export function mergeLogLineWindow(
+  previous: Map<number, LogLine>,
+  start: number,
+  lines: LogLine[],
+  requestGeneration: number,
+  currentGeneration: number,
+): Map<number, LogLine> {
+  if (requestGeneration !== currentGeneration) return previous;
+  const next = new Map(previous);
+  lines.forEach((line, offset) => next.set(start + offset, line));
+  while (next.size > MAX_CACHED_LINES) {
+    const oldest = next.keys().next().value;
+    if (oldest === undefined) break;
+    next.delete(oldest);
+  }
+  return next;
+}
+
+function storedToRuntime(layout: StoredLogFieldLayout): LogFieldLayout {
+  return {
+    fields: layout.fields.map((field) => ({
+      id: field.id,
+      name: field.name,
+      fieldType: field.type,
+      boundary: { start: field.start, end: field.end },
+      displayWidth: Math.max(4, (field.end ?? field.start + 24) - field.start),
+    })),
+    pattern: { kind: 'manualColumns' },
+    confidence: 1,
+    source: layout.source,
+  };
+}
+
+function layoutFingerprint(layout: LogFieldLayout): string {
+  return JSON.stringify({ pattern: layout.pattern, fields: layout.fields.length });
+}
+
+function fallbackBodyLayout(name: string): LogFieldLayout {
+  return {
+    fields: [
+      {
+        id: 'field-1',
+        name,
+        fieldType: 'text',
+        boundary: { start: 0, end: null },
+        displayWidth: 80,
+      },
+    ],
+    pattern: { kind: 'manualColumns' },
+    confidence: 0,
+    source: 'manual',
+  };
+}
+
+function runtimeToStored(
+  layout: LogFieldLayout,
+  encoding: string,
+  fingerprint = layoutFingerprint(layout),
+): StoredLogFieldLayout {
+  return {
+    fields: layout.fields.map((field) => ({
+      id: field.id,
+      name: field.name,
+      type: field.fieldType,
+      start: field.boundary.start,
+      end: field.boundary.end,
+    })),
+    fingerprint,
+    encodingHint: encoding,
+    source: layout.source,
+  };
+}
 
 export function LogContent({ session, activeKey, status = 'ready', error, active = true }: Props) {
   const { t } = useI18n();
@@ -46,10 +137,54 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
   const [findBusy, setFindBusy] = useState(false);
   const [findStatus, setFindStatus] = useState<string | null>(null);
   const [findMatch, setFindMatch] = useState<LogSearchMatch | null>(null);
+  const [fieldLayout, setFieldLayout] = useState<LogFieldLayout | null>(null);
+  const [fieldConditions, setFieldConditions] = useState<LogFieldCondition[]>([]);
+  const [fieldStatistics, setFieldStatistics] = useState<LogFieldStatistics[]>([]);
+  const [fieldGeneration, setFieldGeneration] = useState<number | null>(null);
+  const [fieldScanned, setFieldScanned] = useState(0);
+  const [fieldMatched, setFieldMatched] = useState(0);
+  const [fieldUnparsed, setFieldUnparsed] = useState(0);
+  const [fieldFiltering, setFieldFiltering] = useState(false);
+  const [fieldRecognizing, setFieldRecognizing] = useState(false);
+  const [fieldError, setFieldError] = useState<string | null>(null);
+  const [fieldMode, setFieldMode] = useState<LogFieldResultMode>('compact');
+  const [includeUnparsed, setIncludeUnparsed] = useState(true);
+  const [logScrollLeft, setLogScrollLeft] = useState(0);
+  const [fieldEncodingVersion, setFieldEncodingVersion] = useState(0);
+  const fieldUnsub = useRef<() => void>(() => {});
+  const fieldRequestGeneration = useRef(0);
+  const fieldAnchor = useRef(1);
+  const fieldRestoreAnchor = useRef<number | null>(null);
+  const fieldUserInteracted = useRef(false);
+  const fieldLayoutFingerprint = useRef<string | null>(null);
+  const cacheRequestGeneration = useRef(0);
+  const currentLineRef = useRef(1);
+  const fieldModeRef = useRef<LogFieldResultMode>('compact');
+  const includeUnparsedRef = useRef(true);
+  const indexedLinesRef = useRef(0);
+  currentLineRef.current = currentLine;
+  fieldModeRef.current = fieldMode;
+  includeUnparsedRef.current = includeUnparsed;
+  indexedLinesRef.current = indexedLines;
+
+  const clearLineCache = useCallback(() => {
+    cacheRequestGeneration.current += 1;
+    setCache(new Map());
+    pending.current = new Set();
+  }, []);
 
   const rebuildForEncoding = useCallback(
     async (entryKey: string, encoding: string) => {
       encodingUnsub.current();
+      fieldUnsub.current();
+      fieldRequestGeneration.current += 1;
+      fieldRestoreAnchor.current = null;
+      setFieldConditions([]);
+      setFieldGeneration(null);
+      setFieldFiltering(false);
+      setFieldError(null);
+      clearLineCache();
+      setTotalLines(indexedLinesRef.current);
       setEncodingChanging(true);
       setEncodingPercent(0);
       try {
@@ -66,21 +201,22 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
           setEffectiveEncoding(progress.encoding);
           setTotalLines(progress.lineCount);
           setIndexedLines(progress.lineCount);
-          setCache(new Map());
-          pending.current = new Set();
+          clearLineCache();
           scrollRef.current?.scrollTo({ top: 0 });
+          setFieldEncodingVersion((value) => value + 1);
         });
       } catch (error) {
         setEncodingChanging(false);
         alert(t('error.encodingFailed', { error: String(error) }));
       }
     },
-    [t],
+    [clearLineCache, t],
   );
 
   useEffect(
     () => () => {
       encodingUnsub.current();
+      fieldUnsub.current();
     },
     [],
   );
@@ -88,8 +224,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
   // 打开新条目:重置并按需订阅建索引进度
   useEffect(() => {
     if (!session || !activeKey) {
-      setCache(new Map());
-      pending.current = new Set();
+      clearLineCache();
       setTotalLines(0);
       setIndexedLines(0);
       setIndexing(false);
@@ -98,8 +233,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
     }
     const encodingToRestore = preferredEncoding.current;
     if (!encodingToRestore) preferredEncoding.current = session.encoding;
-    setCache(new Map());
-    pending.current = new Set();
+    clearLineCache();
     const total = api.lineCount(activeKey);
     setTotalLines(total);
     setIndexedLines(total);
@@ -140,7 +274,162 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
         void rebuildForEncoding(activeKey, encodingToRestore);
       }
     }
-  }, [session, activeKey, rebuildForEncoding]);
+  }, [session, activeKey, rebuildForEncoding, clearLineCache]);
+
+  const applyFieldFilter = useCallback(
+    async (entryKey: string, layout: LogFieldLayout, conditions: LogFieldCondition[]) => {
+      const requestGeneration = ++fieldRequestGeneration.current;
+      fieldUnsub.current();
+      fieldAnchor.current = Math.max(1, currentLineRef.current);
+      setFieldFiltering(true);
+      setFieldError(null);
+      clearLineCache();
+      try {
+        const generation = await api.setLogFieldFilter(entryKey, { layout, conditions });
+        if (requestGeneration !== fieldRequestGeneration.current) return;
+        setFieldGeneration(generation);
+        fieldUnsub.current = api.subscribeLogFieldProgress(entryKey, generation, (progress) => {
+          if (requestGeneration !== fieldRequestGeneration.current) return;
+          setFieldScanned(progress.scannedLines);
+          setFieldMatched(progress.matchedLines);
+          setFieldUnparsed(progress.unparsedLines);
+          setTotalLines(
+            fieldModeRef.current === 'highlight'
+              ? Math.max(indexedLinesRef.current, progress.totalLines)
+              : progress.matchedLines + (includeUnparsedRef.current ? progress.unparsedLines : 0),
+          );
+          if (!progress.done) return;
+          setFieldFiltering(false);
+          if (progress.failed) {
+            setFieldError(progress.error ?? t('common.unknown'));
+            setFieldGeneration(null);
+            clearLineCache();
+            setTotalLines(indexedLinesRef.current);
+            return;
+          }
+          void api.logFieldStatus(entryKey).then((status) => {
+            if (status?.generation === generation) setFieldStatistics(status.statistics);
+          });
+          void api
+            .locateLogFieldAnchor(
+              entryKey,
+              generation,
+              fieldAnchor.current,
+              fieldModeRef.current,
+              includeUnparsedRef.current,
+            )
+            .then((anchor) => {
+              if (anchor && requestGeneration === fieldRequestGeneration.current) {
+                scrollRef.current?.scrollTo({ top: anchor.viewIndex * 18 });
+              }
+            });
+        });
+      } catch (error) {
+        if (requestGeneration !== fieldRequestGeneration.current) return;
+        setFieldFiltering(false);
+        setFieldError(String(error));
+        setFieldGeneration(null);
+        clearLineCache();
+        setTotalLines(indexedLinesRef.current);
+      }
+    },
+    [clearLineCache, t],
+  );
+
+  useEffect(() => {
+    fieldUnsub.current();
+    fieldRequestGeneration.current += 1;
+    fieldUserInteracted.current = false;
+    fieldRestoreAnchor.current = null;
+    fieldLayoutFingerprint.current = null;
+    setFieldConditions([]);
+    setFieldStatistics([]);
+    setFieldGeneration(null);
+    setFieldError(null);
+    setFieldMode('compact');
+    setIncludeUnparsed(true);
+    if (!session || !activeKey || status !== 'ready') {
+      setFieldLayout(null);
+      setFieldRecognizing(false);
+      return;
+    }
+    let cancelled = false;
+    const saved = loadLogFieldLayout(localStorage, activeKey);
+    const start = async () => {
+      setFieldRecognizing(true);
+      let layout = saved ? storedToRuntime(saved) : null;
+      if (layout) {
+        fieldLayoutFingerprint.current = saved!.fingerprint;
+        setFieldLayout(layout);
+        setFieldRecognizing(false);
+        await applyFieldFilter(activeKey, layout, []);
+        const quick = await api.analyzeLogFieldLayout(activeKey, 'quick');
+        if (cancelled) return;
+        const matches =
+          quick.layout && savedLayoutFingerprintMatches(saved!, layoutFingerprint(quick.layout));
+        if (!matches && !window.confirm(t('fields.savedMismatch'))) {
+          layout = quick.layout ?? fallbackBodyLayout(t('fields.body'));
+          setFieldLayout(layout);
+          if (quick.layout) {
+            fieldLayoutFingerprint.current = layoutFingerprint(layout);
+            persistLogFieldLayout(
+              localStorage,
+              activeKey,
+              runtimeToStored(layout, session.encoding),
+              'stableAutomatic',
+            );
+          } else {
+            fieldLayoutFingerprint.current = null;
+          }
+          await applyFieldFilter(activeKey, layout, []);
+        }
+      } else {
+        const quick = await api.analyzeLogFieldLayout(activeKey, 'quick');
+        if (cancelled) return;
+        layout = quick.layout ?? fallbackBodyLayout(t('fields.body'));
+        setFieldLayout(layout);
+        setFieldRecognizing(false);
+        if (quick.layout) {
+          fieldLayoutFingerprint.current = layoutFingerprint(layout);
+          persistLogFieldLayout(
+            localStorage,
+            activeKey,
+            runtimeToStored(layout, session.encoding),
+            'stableAutomatic',
+          );
+        }
+        await applyFieldFilter(activeKey, layout, []);
+      }
+      const background = await api.analyzeLogFieldLayout(activeKey, 'background');
+      if (
+        cancelled ||
+        fieldUserInteracted.current ||
+        !background.layout ||
+        (layout && background.layout.confidence <= layout.confidence)
+      ) {
+        return;
+      }
+      setFieldLayout(background.layout);
+      fieldLayoutFingerprint.current = layoutFingerprint(background.layout);
+      persistLogFieldLayout(
+        localStorage,
+        activeKey,
+        runtimeToStored(background.layout, session.encoding),
+        'stableAutomatic',
+      );
+      await applyFieldFilter(activeKey, background.layout, []);
+    };
+    void start().catch((error) => {
+      if (!cancelled) {
+        setFieldRecognizing(false);
+        setFieldError(String(error));
+      }
+    });
+    return () => {
+      cancelled = true;
+      fieldUnsub.current();
+    };
+  }, [activeKey, applyFieldFilter, clearLineCache, fieldEncodingVersion, session, status, t]);
 
   const rowVirtualizer = useVirtualizer({
     count: totalLines,
@@ -210,11 +499,28 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
         wholeWord: findWholeWord,
         caseSensitive: findCaseSensitive,
         wrap: findWrap,
+        ...(fieldGeneration
+          ? { fieldView: { generation: fieldGeneration, mode: fieldMode, includeUnparsed } }
+          : {}),
       });
       if (generation !== findGeneration.current) return;
       if (result.match) {
         setFindMatch(result.match);
-        rowVirtualizer.scrollToIndex(result.match.lineNo - 1, { align: 'center' });
+        if (fieldGeneration && fieldMode === 'compact') {
+          void api
+            .locateLogFieldAnchor(
+              activeKey,
+              fieldGeneration,
+              result.match.lineNo,
+              fieldMode,
+              includeUnparsed,
+            )
+            .then((anchor) => {
+              if (anchor) rowVirtualizer.scrollToIndex(anchor.viewIndex, { align: 'center' });
+            });
+        } else {
+          rowVirtualizer.scrollToIndex(result.match.lineNo - 1, { align: 'center' });
+        }
         setFindStatus(
           result.wrapped ? t(findReverse ? 'find.wrappedEnd' : 'find.wrappedStart') : null,
         );
@@ -243,6 +549,9 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
     findReverse,
     findWholeWord,
     findWrap,
+    fieldGeneration,
+    fieldMode,
+    includeUnparsed,
     rowVirtualizer,
     t,
   ]);
@@ -252,31 +561,158 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
   useEffect(() => {
     if (!activeKey || items.length === 0) return;
     const first = items[0].index;
-    setCurrentLine(first + 1);
+    setCurrentLine(cache.get(first)?.lineNo ?? first + 1);
     const start = Math.floor(first / PAGE) * PAGE;
     const last = items[items.length - 1].index;
     const endPage = Math.floor(last / PAGE) * PAGE;
     for (let p = start; p <= endPage; p += PAGE) {
       const pageLast = Math.min(p + PAGE - 1, totalLines - 1);
       if (pending.current.has(p) || cache.has(pageLast)) continue;
-      pending.current.add(p);
-      api
-        .readLines(activeKey, p, PAGE)
+      const pendingPages = pending.current;
+      pendingPages.add(p);
+      const read = fieldGeneration
+        ? fieldMode === 'compact'
+          ? api.readFilteredLines(activeKey, fieldGeneration, p, PAGE, includeUnparsed)
+          : api.readLinesWithFieldMatches(activeKey, fieldGeneration, p, PAGE)
+        : api.readLines(activeKey, p, PAGE);
+      const cacheGeneration = cacheRequestGeneration.current;
+      read
         .then((lines) => {
-          setCache((prev) => {
-            const next = new Map(prev);
-            for (const l of lines) next.set(l.lineNo - 1, l);
-            while (next.size > MAX_CACHED_LINES) {
-              const oldest = next.keys().next().value;
-              if (oldest === undefined) break;
-              next.delete(oldest);
-            }
-            return next;
-          });
+          if (cacheGeneration !== cacheRequestGeneration.current) return;
+          setCache((prev) =>
+            mergeLogLineWindow(prev, p, lines, cacheGeneration, cacheRequestGeneration.current),
+          );
         })
-        .finally(() => pending.current.delete(p));
+        .finally(() => pendingPages.delete(p));
     }
-  }, [items, activeKey, cache, totalLines]);
+  }, [items, activeKey, cache, totalLines, fieldGeneration, fieldMode, includeUnparsed]);
+
+  function changeFieldConditions(conditions: LogFieldCondition[]) {
+    if (!activeKey || !fieldLayout) return;
+    fieldUserInteracted.current = true;
+    fieldAnchor.current = currentLine;
+    if (fieldConditions.length === 0 && conditions.length > 0) {
+      fieldRestoreAnchor.current = currentLine;
+    }
+    setFieldConditions(conditions);
+    void applyFieldFilter(activeKey, fieldLayout, conditions);
+  }
+
+  function changeFieldLayout(
+    layout: LogFieldLayout,
+    trigger: 'boundary' | 'name' | 'type' | 'split' | 'merge',
+  ) {
+    if (!activeKey) return;
+    fieldUserInteracted.current = true;
+    setFieldLayout(layout);
+    setFieldConditions([]);
+    const persistenceTrigger: LayoutPersistenceTrigger =
+      trigger === 'boundary'
+        ? 'boundaryDragCommitted'
+        : trigger === 'name'
+          ? 'nameCommitted'
+          : trigger === 'type'
+            ? 'typeChanged'
+            : trigger === 'split'
+              ? 'fieldSplit'
+              : 'fieldMerged';
+    persistLogFieldLayout(
+      localStorage,
+      activeKey,
+      runtimeToStored(
+        layout,
+        effectiveEncoding,
+        fieldLayoutFingerprint.current ?? layoutFingerprint(layout),
+      ),
+      persistenceTrigger,
+    );
+    void applyFieldFilter(activeKey, layout, []);
+  }
+
+  function switchFieldMode(mode: LogFieldResultMode) {
+    setFieldMode(mode);
+    fieldModeRef.current = mode;
+    clearLineCache();
+    setTotalLines(
+      mode === 'highlight' ? indexedLines : fieldMatched + (includeUnparsed ? fieldUnparsed : 0),
+    );
+    if (activeKey && fieldGeneration) {
+      void api
+        .locateLogFieldAnchor(activeKey, fieldGeneration, currentLine, mode, includeUnparsed)
+        .then((anchor) => {
+          if (anchor) scrollRef.current?.scrollTo({ top: anchor.viewIndex * 18 });
+        });
+    }
+  }
+
+  function toggleUnparsed(show: boolean) {
+    setIncludeUnparsed(show);
+    includeUnparsedRef.current = show;
+    clearLineCache();
+    if (fieldMode === 'compact') setTotalLines(fieldMatched + (show ? fieldUnparsed : 0));
+  }
+
+  async function clearFieldFilters() {
+    if (!activeKey) return;
+    fieldUnsub.current();
+    fieldRequestGeneration.current += 1;
+    await api.clearLogFieldFilter(activeKey);
+    setFieldConditions([]);
+    setFieldGeneration(null);
+    setFieldFiltering(false);
+    setFieldError(null);
+    clearLineCache();
+    setTotalLines(indexedLines);
+    const restoreLine = fieldRestoreAnchor.current ?? fieldAnchor.current;
+    fieldRestoreAnchor.current = null;
+    scrollRef.current?.scrollTo({ top: Math.max(0, restoreLine - 1) * 18 });
+  }
+
+  async function reanalyzeFieldLayout() {
+    if (!activeKey) return;
+    fieldUserInteracted.current = false;
+    setFieldRecognizing(true);
+    try {
+      const analysis = await api.analyzeLogFieldLayout(activeKey, 'quick');
+      const layout = analysis.layout ?? fallbackBodyLayout(t('fields.body'));
+      setFieldLayout(layout);
+      setFieldConditions([]);
+      fieldRestoreAnchor.current = null;
+      if (analysis.layout) {
+        fieldLayoutFingerprint.current = layoutFingerprint(layout);
+        persistLogFieldLayout(
+          localStorage,
+          activeKey,
+          runtimeToStored(layout, effectiveEncoding),
+          'stableAutomatic',
+        );
+      } else {
+        fieldLayoutFingerprint.current = null;
+      }
+      await applyFieldFilter(activeKey, layout, []);
+      const background = await api.analyzeLogFieldLayout(activeKey, 'background');
+      if (
+        fieldUserInteracted.current ||
+        !background.layout ||
+        background.layout.confidence <= layout.confidence
+      ) {
+        return;
+      }
+      fieldLayoutFingerprint.current = layoutFingerprint(background.layout);
+      setFieldLayout(background.layout);
+      persistLogFieldLayout(
+        localStorage,
+        activeKey,
+        runtimeToStored(background.layout, effectiveEncoding),
+        'stableAutomatic',
+      );
+      await applyFieldFilter(activeKey, background.layout, []);
+    } catch (error) {
+      setFieldError(String(error));
+    } finally {
+      setFieldRecognizing(false);
+    }
+  }
 
   async function changeEncoding(encoding: string) {
     if (!activeKey || encoding === effectiveEncoding) return;
@@ -336,6 +772,16 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
           <span>{effectiveEncoding}</span>
         </div>
       )}
+
+      <LogFieldFilterBar
+        layout={fieldLayout}
+        conditions={fieldConditions}
+        statistics={fieldStatistics}
+        scrollLeft={logScrollLeft}
+        recognizing={fieldRecognizing}
+        onConditionsChange={changeFieldConditions}
+        onLayoutChange={changeFieldLayout}
+      />
 
       {findOpen && (
         <form
@@ -420,7 +866,20 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
         </form>
       )}
 
-      <div className="log-view" ref={scrollRef} tabIndex={-1}>
+      <div
+        className="log-view"
+        ref={scrollRef}
+        tabIndex={-1}
+        onScroll={(event) => setLogScrollLeft(event.currentTarget.scrollLeft)}
+      >
+        {fieldGeneration && !fieldFiltering && fieldMode === 'compact' && totalLines === 0 && (
+          <div className="log-field-empty">
+            <span>{t('fields.noResults')}</span>
+            <button type="button" onClick={() => void clearFieldFilters()}>
+              {t('fields.clear')}
+            </button>
+          </div>
+        )}
         <div
           style={{
             height: rowVirtualizer.getTotalSize(),
@@ -435,9 +894,13 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
               <LogRow
                 key={vi.index}
                 top={vi.start}
-                lineNo={vi.index + 1}
+                lineNo={line?.lineNo ?? vi.index + 1}
                 line={line}
-                ready={ready}
+                ready={fieldGeneration ? true : ready}
+                fieldMatched={
+                  fieldMode === 'highlight' &&
+                  Boolean((line as LogFieldMarkedLine | undefined)?.fieldMatched)
+                }
                 match={findMatch}
                 findQuery={findQuery}
                 findWholeWord={findWholeWord}
@@ -449,7 +912,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
         </div>
       </div>
 
-      <div className="col-foot" style={{ display: 'flex', gap: 16 }}>
+      <div className="col-foot log-status-foot">
         <select
           className="encoding-select"
           value={effectiveEncoding}
@@ -466,10 +929,89 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
             </option>
           ))}
         </select>
-        <span>
-          {t('log.lineStatus', { current: fmtNum(currentLine), total: fmtNum(totalLines) })}
+        <details className="log-filter-menu">
+          <summary>
+            {t('fields.filterMenu')}
+            {fieldConditions.length > 0 ? ` (${fieldConditions.length})` : ''} ▾
+          </summary>
+          <div className="log-filter-menu-content">
+            <div className="log-field-mode" aria-label={t('fields.resultMode')}>
+              <button
+                type="button"
+                className={fieldMode === 'compact' ? 'active' : ''}
+                disabled={!fieldLayout}
+                onClick={() => switchFieldMode('compact')}
+              >
+                {t('fields.compact')}
+              </button>
+              <button
+                type="button"
+                className={fieldMode === 'highlight' ? 'active' : ''}
+                disabled={!fieldLayout}
+                onClick={() => switchFieldMode('highlight')}
+              >
+                {t('fields.highlight')}
+              </button>
+            </div>
+            <label
+              className="log-field-unparsed-toggle"
+              title={fieldMode === 'highlight' ? t('fields.unparsedHighlightHint') : undefined}
+            >
+              <input
+                type="checkbox"
+                checked={includeUnparsed}
+                disabled={!fieldLayout || fieldMode === 'highlight'}
+                onChange={(event) => toggleUnparsed(event.target.checked)}
+              />
+              {t('fields.unparsed')}
+            </label>
+            <button
+              type="button"
+              className="log-field-foot-button"
+              disabled={fieldConditions.length === 0 && !fieldGeneration}
+              onClick={() => void clearFieldFilters()}
+            >
+              {t('fields.clear')}
+            </button>
+            <details className="log-layout-menu">
+              <summary>{t('fields.layout')} ▾</summary>
+              <div>
+                <button type="button" onClick={() => void reanalyzeFieldLayout()}>
+                  {t('fields.reanalyze')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activeKey) clearSavedLogFieldLayout(localStorage, activeKey);
+                  }}
+                >
+                  {t('fields.clearSaved')}
+                </button>
+                <small>{t('fields.autoSaveHint')}</small>
+              </div>
+            </details>
+          </div>
+        </details>
+        <span className="log-field-status-text">
+          {fieldError
+            ? t('fields.failed', { error: fieldError })
+            : fieldFiltering
+              ? t(
+                  fieldMode === 'compact' ? 'fields.filteringCompact' : 'fields.filteringHighlight',
+                  {
+                    matched: fmtNum(fieldMatched),
+                    scanned: fmtNum(fieldScanned),
+                    total: fmtNum(indexedLines),
+                  },
+                )
+              : fieldGeneration
+                ? t('fields.complete', {
+                    matched: fmtNum(fieldMatched),
+                    unparsed: fmtNum(fieldUnparsed),
+                  })
+                : t('log.lineStatus', { current: fmtNum(currentLine), total: fmtNum(totalLines) })}
         </span>
-        <span style={{ marginLeft: 'auto' }}>{fmtSize(session?.size)}</span>
+        <span className="log-file-size">{fmtSize(session?.size)}</span>
       </div>
     </div>
   );

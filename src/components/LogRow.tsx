@@ -14,6 +14,7 @@ interface Props {
   findWholeWord?: boolean;
   findCaseSensitive?: boolean;
   showAllFindMatches?: boolean;
+  fieldMatched?: boolean;
 }
 
 /** 单行日志:行号固定在左、内容可横向滚动、级别着色、截断标记 */
@@ -27,6 +28,7 @@ export const LogRow = memo(function LogRow({
   findWholeWord = false,
   findCaseSensitive = false,
   showAllFindMatches = false,
+  fieldMatched = false,
 }: Props) {
   const { t } = useI18n();
   const lvl = line ? detectLevel(line.content) : null;
@@ -67,7 +69,10 @@ export const LogRow = memo(function LogRow({
       })
     : null;
   return (
-    <div className="log-line" style={{ position: 'absolute', top, left: 0, right: 0, height: 18 }}>
+    <div
+      className={fieldMatched ? 'log-line log-field-matched' : 'log-line'}
+      style={{ position: 'absolute', top, left: 0, right: 0, height: 18 }}
+    >
       <span className="ln">{lineNo}</span>
       <span className="txt">
         {line ? (

@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
-import test, { afterEach, before } from 'node:test';
+import test, { afterEach, before, beforeEach } from 'node:test';
 import { JSDOM } from 'jsdom';
+import { useState } from 'react';
 import type { ComponentProps } from 'react';
-import { api, type LogSearchRequest } from '../api';
+import { api, type LogFieldCondition, type LogFieldLayout, type LogSearchRequest } from '../api';
 import { I18nProvider } from '../i18n/I18nProvider';
-import { LogContent } from './LogContent';
+import { persistLogFieldLayout } from '../util/logFieldLayoutStorage';
+import { LogContent, mergeLogLineWindow } from './LogContent';
+import { LogFieldFilterBar } from './LogFieldFilterBar';
 import { LogRow } from './LogRow';
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', {
@@ -14,6 +17,14 @@ const dom = new JSDOM('<!doctype html><html><body></body></html>', {
 
 let harness: typeof import('@testing-library/react');
 const originalSearchLog = api.searchLog;
+const originalAnalyzeLogFieldLayout = api.analyzeLogFieldLayout;
+const originalSetLogFieldFilter = api.setLogFieldFilter;
+const originalSubscribeLogFieldProgress = api.subscribeLogFieldProgress;
+const originalLogFieldStatus = api.logFieldStatus;
+const originalLocateLogFieldAnchor = api.locateLogFieldAnchor;
+const originalClearLogFieldFilter = api.clearLogFieldFilter;
+const originalPrompt = dom.window.prompt;
+const originalConfirm = dom.window.confirm;
 
 before(async () => {
   class ResizeObserverStub {
@@ -55,7 +66,20 @@ before(async () => {
 
 afterEach(() => {
   api.searchLog = originalSearchLog;
+  api.analyzeLogFieldLayout = originalAnalyzeLogFieldLayout;
+  api.setLogFieldFilter = originalSetLogFieldFilter;
+  api.subscribeLogFieldProgress = originalSubscribeLogFieldProgress;
+  api.logFieldStatus = originalLogFieldStatus;
+  api.locateLogFieldAnchor = originalLocateLogFieldAnchor;
+  api.clearLogFieldFilter = originalClearLogFieldFilter;
+  dom.window.prompt = originalPrompt;
+  dom.window.confirm = originalConfirm;
+  dom.window.localStorage.clear();
   harness.cleanup();
+});
+
+beforeEach(() => {
+  api.analyzeLogFieldLayout = () => new Promise(() => undefined);
 });
 
 function renderLog(overrides: Partial<ComponentProps<typeof LogContent>> = {}) {
@@ -77,6 +101,37 @@ function renderLog(overrides: Partial<ComponentProps<typeof LogContent>> = {}) {
       />
     </I18nProvider>,
   );
+}
+
+function fieldLayout(name = 'Level'): LogFieldLayout {
+  return {
+    fields: [
+      {
+        id: 'field-1',
+        name: 'Time',
+        fieldType: 'time',
+        boundary: { start: 0, end: 19 },
+        displayWidth: 19,
+      },
+      {
+        id: 'field-2',
+        name,
+        fieldType: 'level',
+        boundary: { start: 20, end: 25 },
+        displayWidth: 5,
+      },
+      {
+        id: 'field-3',
+        name: 'Body',
+        fieldType: 'text',
+        boundary: { start: 26, end: null },
+        displayWidth: 40,
+      },
+    ],
+    pattern: { kind: 'bracketed', segmentCount: 2 },
+    confidence: 1,
+    source: 'automatic',
+  };
 }
 
 test('Ctrl+F opens the active log find dialog with the required defaults and options', () => {
@@ -143,6 +198,434 @@ test('find action forwards all options and Escape closes the lightweight dialog'
   assert.equal(harness.screen.queryByRole('dialog', { name: 'Find in log' }), null);
 });
 
+test('field bar uses real fields, multi-selects values, switches result mode, and clears filters', async () => {
+  const layout = {
+    fields: [
+      {
+        id: 'field-1',
+        name: 'Time',
+        fieldType: 'time' as const,
+        boundary: { start: 0, end: 19 },
+        displayWidth: 19,
+      },
+      {
+        id: 'field-2',
+        name: 'Level',
+        fieldType: 'level' as const,
+        boundary: { start: 20, end: 25 },
+        displayWidth: 5,
+      },
+      {
+        id: 'field-3',
+        name: 'Body',
+        fieldType: 'text' as const,
+        boundary: { start: 26, end: null },
+        displayWidth: 40,
+      },
+    ],
+    pattern: { kind: 'manualColumns' as const },
+    confidence: 1,
+    source: 'automatic' as const,
+  };
+  const requests: Array<{ conditions: LogFieldCondition[] }> = [];
+  let generation = 0;
+  let cleared = false;
+  api.analyzeLogFieldLayout = async () => ({
+    layout,
+    sampledNonEmptyLines: 3,
+    sampledBytes: 180,
+    mainLayoutLines: 3,
+    unparsedLines: 0,
+  });
+  api.setLogFieldFilter = async (_entryKey, request) => {
+    requests.push(request);
+    return ++generation;
+  };
+  api.subscribeLogFieldProgress = (_entryKey, currentGeneration, onProgress) => {
+    onProgress({
+      sessionId: 'session-1',
+      generation: currentGeneration,
+      scannedLines: 3,
+      matchedLines: 2,
+      unparsedLines: 1,
+      totalLines: 3,
+      done: true,
+      failed: false,
+    });
+    return () => undefined;
+  };
+  api.logFieldStatus = async () => ({
+    generation,
+    layout,
+    conditions: [],
+    statistics: [
+      {
+        fieldId: 'field-2',
+        candidates: [
+          { value: 'INFO', count: 2 },
+          { value: 'WARN', count: 1 },
+        ],
+        highCardinality: false,
+      },
+    ],
+    scannedLines: 3,
+    matchedLines: 2,
+    unparsedLines: 1,
+    totalLines: 3,
+    done: true,
+    failed: false,
+  });
+  api.locateLogFieldAnchor = async () => ({ viewIndex: 0, lineNo: 1 });
+  api.clearLogFieldFilter = async () => {
+    cleared = true;
+  };
+
+  const view = renderLog();
+  await harness.waitFor(() => assert.ok(harness.screen.getByRole('button', { name: /^Level ▾$/ })));
+  assert.equal(view.container.querySelectorAll('.log-field').length, 3);
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Level ▾$/ }));
+  await harness.waitFor(() => assert.ok(harness.screen.getByText('INFO')));
+  harness.fireEvent.click(harness.screen.getByRole('checkbox', { name: /INFO/ }));
+  await harness.waitFor(() => {
+    assert.equal(requests.at(-1)?.conditions[0]?.kind, 'discrete');
+  });
+  harness.fireEvent.click(harness.screen.getByRole('checkbox', { name: /WARN/ }));
+  await harness.waitFor(() => {
+    const condition = requests.at(-1)?.conditions[0];
+    assert.equal(condition?.kind, 'discrete');
+    assert.deepEqual(condition?.kind === 'discrete' ? condition.values : [], ['INFO', 'WARN']);
+  });
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Highlight matches' }));
+  assert.equal(
+    (harness.screen.getByRole('checkbox', { name: 'Show unparsed' }) as HTMLInputElement).disabled,
+    true,
+  );
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Clear filters' }));
+  await harness.waitFor(() => assert.equal(cleared, true));
+});
+
+test('field controls support text case, editing actions, keyboard resize, drag guide, and Escape', () => {
+  const layout = fieldLayout();
+  const layoutChanges: Array<{ layout: LogFieldLayout; trigger: string }> = [];
+  let conditions: LogFieldCondition[] = [];
+  function ControlledBar() {
+    const [currentConditions, setCurrentConditions] = useState<LogFieldCondition[]>([]);
+    return (
+      <LogFieldFilterBar
+        layout={layout}
+        conditions={currentConditions}
+        statistics={[
+          { fieldId: 'field-2', candidates: [{ value: 'INFO', count: 2 }], highCardinality: false },
+        ]}
+        scrollLeft={42}
+        recognizing={false}
+        onConditionsChange={(next) => {
+          conditions = next;
+          setCurrentConditions(next);
+        }}
+        onLayoutChange={(next, trigger) => layoutChanges.push({ layout: next, trigger })}
+      />
+    );
+  }
+  const view = harness.render(
+    <I18nProvider>
+      <ControlledBar />
+    </I18nProvider>,
+  );
+
+  assert.equal(view.container.querySelectorAll('.log-field').length, 3);
+  assert.equal(
+    view.container.querySelector('.log-field-track')?.getAttribute('style'),
+    'transform: translateX(-42px);',
+  );
+  assert.equal(
+    view.container.querySelector('.log-field-bar')?.textContent?.includes('Matches only'),
+    false,
+  );
+
+  dom.window.prompt = () => 'Timestamp';
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Time ▾$/ }));
+  const startTime = harness.screen.getByRole('textbox', { name: /Start \(inclusive\)/ });
+  harness.fireEvent.input(startTime, { target: { value: '2026-07-01' } });
+  assert.deepEqual(conditions, [
+    { kind: 'time', fieldId: 'field-1', start: '2026-07-01', end: undefined },
+  ]);
+  harness.fireEvent.input(startTime, { target: { value: '' } });
+  assert.deepEqual(conditions, []);
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Rename' }));
+  harness.fireEvent.change(harness.screen.getByRole('combobox', { name: 'Field type' }), {
+    target: { value: 'text' },
+  });
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Split' }));
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Merge right' }));
+  const resizer = harness.screen.getByRole('button', { name: 'Resize Time' });
+  harness.fireEvent.keyDown(resizer, { key: 'ArrowRight' });
+  assert.deepEqual(
+    layoutChanges.map((change) => change.trigger),
+    ['name', 'type', 'split', 'merge', 'boundary'],
+  );
+
+  harness.fireEvent.pointerDown(resizer, { clientX: 100 });
+  harness.fireEvent.pointerMove(window, { clientX: 114 });
+  assert.ok(view.container.querySelector('.log-field-drag-guide'));
+  harness.fireEvent.pointerUp(window, { clientX: 114 });
+  assert.equal(view.container.querySelector('.log-field-drag-guide'), null);
+
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Body ▾$/ }));
+  harness.fireEvent.input(harness.screen.getByRole('textbox', { name: /Contains text/ }), {
+    target: { value: 'Failure' },
+  });
+  const matchCase = harness.screen.getByRole('checkbox', { name: 'Match case' });
+  assert.equal((matchCase as HTMLInputElement).disabled, false);
+  harness.fireEvent.click(matchCase);
+  assert.deepEqual(conditions, [
+    {
+      kind: 'text',
+      fieldId: 'field-3',
+      query: 'Failure',
+      caseSensitive: true,
+    },
+  ]);
+  harness.fireEvent.keyDown(matchCase, { key: 'Escape' });
+  assert.equal(harness.screen.queryByRole('checkbox', { name: 'Match case' }), null);
+});
+
+test('saved layout appears immediately, validates in background, and can re-recognize mismatch', async () => {
+  const saved = fieldLayout('Saved level');
+  persistLogFieldLayout(
+    localStorage,
+    'server.log',
+    {
+      fields: saved.fields.map((field) => ({
+        id: field.id,
+        name: field.name,
+        type: field.fieldType,
+        start: field.boundary.start,
+        end: field.boundary.end,
+      })),
+      fingerprint: JSON.stringify({ pattern: saved.pattern, fields: saved.fields.length }),
+      encodingHint: 'UTF-8',
+      source: 'automatic',
+    },
+    'stableAutomatic',
+  );
+  const recognized: LogFieldLayout = {
+    ...fieldLayout('Recognized level'),
+    fields: fieldLayout('Recognized level').fields.slice(0, 2),
+    pattern: { kind: 'chromium' },
+  };
+  let confirmCalls = 0;
+  dom.window.confirm = () => {
+    confirmCalls += 1;
+    return false;
+  };
+  api.analyzeLogFieldLayout = async () => ({
+    layout: recognized,
+    sampledNonEmptyLines: 3,
+    sampledBytes: 100,
+    mainLayoutLines: 3,
+    unparsedLines: 0,
+  });
+  let generation = 0;
+  api.setLogFieldFilter = async () => ++generation;
+  api.subscribeLogFieldProgress = () => () => undefined;
+
+  renderLog();
+  assert.ok(harness.screen.getByRole('button', { name: /^Saved level ▾$/ }));
+  await harness.waitFor(() =>
+    assert.ok(harness.screen.getByRole('button', { name: /^Recognized level ▾$/ })),
+  );
+  assert.equal(confirmCalls, 1);
+  assert.ok(harness.screen.getByText('Valid layout changes are saved automatically.'));
+  assert.equal(harness.screen.queryByRole('button', { name: /^Save$/ }), null);
+});
+
+test('low-confidence analysis falls back to an editable unsaved body field', async () => {
+  api.analyzeLogFieldLayout = async () => ({
+    layout: null,
+    sampledNonEmptyLines: 3,
+    sampledBytes: 100,
+    mainLayoutLines: 0,
+    unparsedLines: 3,
+  });
+  api.setLogFieldFilter = async () => 1;
+  api.subscribeLogFieldProgress = () => () => undefined;
+
+  const view = renderLog();
+  await harness.waitFor(() => assert.ok(harness.screen.getByRole('button', { name: /^Body ▾$/ })));
+  assert.ok(harness.screen.getByText(/No stable layout recognized/));
+  assert.equal(localStorage.getItem('logcrate.logFieldLayouts.v1'), null);
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Body ▾$/ }));
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Split' }));
+  await harness.waitFor(() =>
+    assert.equal(view.container.querySelectorAll('.log-field').length, 2),
+  );
+  assert.ok(localStorage.getItem('logcrate.logFieldLayouts.v1'));
+});
+
+test('failed filtering returns to the unfiltered search scope with an explicit error', async () => {
+  api.analyzeLogFieldLayout = async () => ({
+    layout: fieldLayout(),
+    sampledNonEmptyLines: 3,
+    sampledBytes: 100,
+    mainLayoutLines: 3,
+    unparsedLines: 0,
+  });
+  api.setLogFieldFilter = async () => 3;
+  api.subscribeLogFieldProgress = (_entryKey, generation, onProgress) => {
+    onProgress({
+      sessionId: 'session-1',
+      generation,
+      scannedLines: 2,
+      matchedLines: 1,
+      unparsedLines: 0,
+      totalLines: 42_000,
+      done: true,
+      failed: true,
+      error: 'scan failed',
+    });
+    return () => undefined;
+  };
+  let request: LogSearchRequest | null = null;
+  api.searchLog = async (_entryKey, next) => {
+    request = next;
+    return {
+      match: null,
+      wrapped: false,
+      reachedBoundary: true,
+      indexedLines: 42_000,
+      indexing: false,
+    };
+  };
+
+  renderLog();
+  await harness.waitFor(() => assert.ok(harness.screen.getByText(/scan failed/)));
+  harness.fireEvent.keyDown(document, { key: 'f', ctrlKey: true });
+  harness.fireEvent.input(harness.screen.getByRole('textbox', { name: 'Keyword' }), {
+    target: { value: 'needle' },
+  });
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Find' }));
+  await harness.waitFor(() => assert.ok(request));
+  assert.equal('fieldView' in request!, false);
+});
+
+test('late window responses cannot overwrite a newer cache generation', () => {
+  const current = new Map([[0, { lineNo: 1, content: 'NEW highlighted view', truncated: false }]]);
+  const stale = mergeLogLineWindow(
+    current,
+    0,
+    [{ lineNo: 99, content: 'OLD compact view', truncated: false }],
+    4,
+    5,
+  );
+  assert.equal(stale, current);
+  assert.equal(stale.get(0)?.content, 'NEW highlighted view');
+
+  const next = mergeLogLineWindow(
+    current,
+    1,
+    [{ lineNo: 2, content: 'CURRENT view', truncated: false }],
+    5,
+    5,
+  );
+  assert.notEqual(next, current);
+  assert.equal(next.get(1)?.content, 'CURRENT view');
+});
+
+test('Chinese field filtering labels are available', async () => {
+  localStorage.setItem('logcrate.locale', 'zh-CN');
+  api.analyzeLogFieldLayout = async () => ({
+    layout: fieldLayout('级别'),
+    sampledNonEmptyLines: 3,
+    sampledBytes: 100,
+    mainLayoutLines: 3,
+    unparsedLines: 0,
+  });
+  api.setLogFieldFilter = async () => 1;
+  api.subscribeLogFieldProgress = () => () => undefined;
+  renderLog();
+  await harness.waitFor(() => assert.ok(harness.screen.getByRole('button', { name: /^级别 ▾$/ })));
+  assert.ok(harness.screen.getByText('有效的布局调整会自动保存。'));
+  assert.ok(harness.screen.getByText('筛选 ▾'));
+});
+
+test('separate log tab component instances keep field conditions isolated', async () => {
+  const layouts = new Map([
+    ['tab-a.log', fieldLayout('Level A')],
+    ['tab-b.log', fieldLayout('Level B')],
+  ]);
+  const generations = new Map<string, number>();
+  api.analyzeLogFieldLayout = async (entryKey) => ({
+    layout: layouts.get(entryKey) ?? null,
+    sampledNonEmptyLines: 3,
+    sampledBytes: 100,
+    mainLayoutLines: 3,
+    unparsedLines: 0,
+  });
+  api.setLogFieldFilter = async (entryKey) => {
+    const generation = (generations.get(entryKey) ?? 0) + 1;
+    generations.set(entryKey, generation);
+    return generation;
+  };
+  api.subscribeLogFieldProgress = (entryKey, generation, onProgress) => {
+    onProgress({
+      sessionId: entryKey,
+      generation,
+      scannedLines: 3,
+      matchedLines: 2,
+      unparsedLines: 0,
+      totalLines: 3,
+      done: true,
+      failed: false,
+    });
+    return () => undefined;
+  };
+  api.logFieldStatus = async (entryKey) => ({
+    generation: generations.get(entryKey) ?? 0,
+    layout: layouts.get(entryKey)!,
+    conditions: [],
+    statistics: [
+      {
+        fieldId: 'field-2',
+        candidates: [{ value: 'INFO', count: 2 }],
+        highCardinality: false,
+      },
+    ],
+    scannedLines: 3,
+    matchedLines: 2,
+    unparsedLines: 0,
+    totalLines: 3,
+    done: true,
+    failed: false,
+  });
+  const session = (sessionId: string) => ({
+    sessionId,
+    sourcePath: `D:\\logs\\${sessionId}`,
+    entryPath: sessionId,
+    size: 100,
+    indexing: false,
+    encoding: 'UTF-8',
+    evictedSessionIds: [],
+  });
+  harness.render(
+    <I18nProvider>
+      <LogContent active activeKey="tab-a.log" session={session('tab-a.log')} />
+      <LogContent active={false} activeKey="tab-b.log" session={session('tab-b.log')} />
+    </I18nProvider>,
+  );
+
+  await harness.waitFor(() => {
+    assert.ok(harness.screen.getByRole('button', { name: /^Level A ▾$/ }));
+    assert.ok(harness.screen.getByRole('button', { name: /^Level B ▾$/ }));
+  });
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Level A ▾$/ }));
+  harness.fireEvent.click(harness.screen.getByRole('checkbox', { name: /INFO/ }));
+  await harness.waitFor(() =>
+    assert.ok(harness.screen.getByRole('button', { name: /^Level A: 1 ▾$/ })),
+  );
+  assert.ok(harness.screen.getByRole('button', { name: /^Level B ▾$/ }));
+});
+
 test('inactive log panels do not respond to Ctrl+F', () => {
   renderLog({ active: false });
   harness.fireEvent.keyDown(document, { key: 'f', ctrlKey: true });
@@ -184,6 +667,7 @@ test('log row highlights repeated keyword fragments and distinguishes the curren
         match={{ lineNo: 4, startColumn: 17, endColumn: 22 }}
         findQuery="token"
         showAllFindMatches
+        fieldMatched
       />
     </I18nProvider>,
   );
@@ -195,7 +679,8 @@ test('log row highlights repeated keyword fragments and distinguishes the curren
   assert.equal(matches[1].textContent, 'token');
   assert.equal(matches[1].classList.contains('log-find-match-current'), true);
   assert.ok(view.container.querySelector('.lvl-ERROR'));
-  assert.equal(view.container.querySelector('.log-line')?.className, 'log-line');
+  assert.equal(view.container.querySelector('.log-line')?.className, 'log-line log-field-matched');
+  assert.equal(view.container.querySelectorAll('.log-field-matched mark').length, 2);
 });
 
 test('keyword fragments are highlighted across rendered rows and closing find keeps only current', () => {
