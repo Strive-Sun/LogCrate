@@ -439,6 +439,10 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
                 line={line}
                 ready={ready}
                 match={findMatch}
+                findQuery={findQuery}
+                findWholeWord={findWholeWord}
+                findCaseSensitive={findCaseSensitive}
+                showAllFindMatches={findOpen}
               />
             );
           })}

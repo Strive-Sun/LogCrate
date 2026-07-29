@@ -155,8 +155,8 @@ test('Ctrl+F does not create a find dialog without an active log session', () =>
   assert.equal(harness.screen.queryByRole('dialog', { name: 'Find in log' }), null);
 });
 
-test('log row highlights only the returned UTF-16 match range', () => {
-  harness.render(
+test('log row keeps only the returned UTF-16 current match when all-match highlighting is hidden', () => {
+  const view = harness.render(
     <I18nProvider>
       <LogRow
         top={0}
@@ -169,4 +169,87 @@ test('log row highlights only the returned UTF-16 match range', () => {
   );
 
   assert.equal(harness.screen.getByText('Error').tagName, 'MARK');
+  assert.equal(view.container.querySelectorAll('.log-find-match').length, 1);
+  assert.ok(view.container.querySelector('.log-find-match-current'));
+});
+
+test('log row highlights repeated keyword fragments and distinguishes the current ERROR match', () => {
+  const view = harness.render(
+    <I18nProvider>
+      <LogRow
+        top={0}
+        lineNo={4}
+        line={{ lineNo: 4, content: 'ERROR token then token', truncated: false }}
+        ready
+        match={{ lineNo: 4, startColumn: 17, endColumn: 22 }}
+        findQuery="token"
+        showAllFindMatches
+      />
+    </I18nProvider>,
+  );
+
+  const matches = view.container.querySelectorAll('.log-find-match');
+  assert.equal(matches.length, 2);
+  assert.equal(matches[0].textContent, 'token');
+  assert.equal(matches[0].classList.contains('log-find-match-current'), false);
+  assert.equal(matches[1].textContent, 'token');
+  assert.equal(matches[1].classList.contains('log-find-match-current'), true);
+  assert.ok(view.container.querySelector('.lvl-ERROR'));
+  assert.equal(view.container.querySelector('.log-line')?.className, 'log-line');
+});
+
+test('keyword fragments are highlighted across rendered rows and closing find keeps only current', () => {
+  const rows = (showAllFindMatches: boolean) => (
+    <I18nProvider>
+      <LogRow
+        top={0}
+        lineNo={1}
+        line={{ lineNo: 1, content: 'hit one hit', truncated: false }}
+        ready
+        match={{ lineNo: 2, startColumn: 0, endColumn: 3 }}
+        findQuery="hit"
+        showAllFindMatches={showAllFindMatches}
+      />
+      <LogRow
+        top={18}
+        lineNo={2}
+        line={{ lineNo: 2, content: 'hit two', truncated: false }}
+        ready
+        match={{ lineNo: 2, startColumn: 0, endColumn: 3 }}
+        findQuery="hit"
+        showAllFindMatches={showAllFindMatches}
+      />
+    </I18nProvider>
+  );
+  const view = harness.render(rows(true));
+
+  assert.equal(view.container.querySelectorAll('.log-find-match').length, 3);
+  assert.equal(view.container.querySelectorAll('.log-find-match-current').length, 1);
+
+  view.rerender(rows(false));
+  assert.equal(view.container.querySelectorAll('.log-find-match').length, 1);
+  assert.equal(view.container.querySelectorAll('.log-find-match-current').length, 1);
+  assert.equal(view.container.querySelector('.log-find-match-current')?.textContent, 'hit');
+});
+
+test('whole-word and case-sensitive options recalculate rendered keyword fragments', () => {
+  const row = (caseSensitive: boolean) => (
+    <I18nProvider>
+      <LogRow
+        top={0}
+        lineNo={3}
+        line={{ lineNo: 3, content: 'Error Errors error', truncated: false }}
+        ready
+        findQuery="Error"
+        findWholeWord
+        findCaseSensitive={caseSensitive}
+        showAllFindMatches
+      />
+    </I18nProvider>
+  );
+  const view = harness.render(row(true));
+
+  assert.equal(view.container.querySelectorAll('.log-find-match').length, 1);
+  view.rerender(row(false));
+  assert.equal(view.container.querySelectorAll('.log-find-match').length, 2);
 });

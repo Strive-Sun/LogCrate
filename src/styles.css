@@ -9,6 +9,7 @@
   --fg-faint: #5a5a64;
   --accent: #4a9eff;
   --accent-dim: #2c5a8c;
+  --log-find-current-fg: #101014;
   --unread: #ff5c5c;
   --warn: #e0a030;
   --error: #ff6b6b;
@@ -42,6 +43,7 @@
   --fg-faint: #9a9aa2;
   --accent: #1a7fdb;
   --accent-dim: #a8cef0;
+  --log-find-current-fg: #fff;
   --unread: #e23b3b;
   --warn: #b57610;
   --error: #d33;
@@ -1119,7 +1121,11 @@ body.resizing {
 .log-line .log-find-match {
   border-radius: 2px;
   background: #ffd54f;
-  color: #1f2328;
+  color: inherit;
+}
+.log-line .log-find-match-current {
+  background: var(--accent);
+  color: var(--log-find-current-fg);
 }
 .log-line .trunc-tag {
   color: var(--warn);
