@@ -46,6 +46,18 @@ function fieldTrackOffset(fields: LogFieldDefinition[], index: number) {
   return Math.max(0, field.boundary.start - previous.boundary.end);
 }
 
+function fieldNameDisplayWidth(name: string) {
+  return Array.from(name).reduce((width, character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return width + (codePoint >= 0x1100 ? 2 : 1);
+  }, 0);
+}
+
+function fieldControlMinWidth(field: LogFieldDefinition) {
+  const labelWidth = fieldNameDisplayWidth(field.name) + 2;
+  return `calc(${labelWidth}ch + 16px)`;
+}
+
 export function LogFieldFilterBar({
   layout,
   conditions,
@@ -165,6 +177,7 @@ export function LogFieldFilterBar({
               className={'log-field' + (active ? ' active' : '')}
               style={{
                 width: `${Math.max(4, field.displayWidth)}ch`,
+                minWidth: fieldControlMinWidth(field),
                 marginLeft: `${fieldTrackOffset(layout.fields, index)}ch`,
               }}
               key={field.id}

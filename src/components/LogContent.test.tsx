@@ -305,7 +305,7 @@ test('field bar uses real fields, multi-selects values, switches result mode, an
 });
 
 test('field controls support text case, editing actions, keyboard resize, drag guide, and Escape', () => {
-  const layout = fieldLayout();
+  const layout = fieldLayout('级别');
   layout.fields[0].boundary = { start: 1, end: 20 };
   layout.fields[1].boundary = { start: 23, end: 28 };
   layout.fields[2].boundary = { start: 31, end: null };
@@ -340,12 +340,13 @@ test('field controls support text case, editing actions, keyboard resize, drag g
   assert.deepEqual(
     [...view.container.querySelectorAll<HTMLElement>('.log-field')].map((field) => ({
       width: field.style.width,
+      minWidth: field.style.minWidth,
       marginLeft: field.style.marginLeft,
     })),
     [
-      { width: '19ch', marginLeft: '1ch' },
-      { width: '5ch', marginLeft: '3ch' },
-      { width: '40ch', marginLeft: '3ch' },
+      { width: '19ch', minWidth: 'calc(6ch + 16px)', marginLeft: '1ch' },
+      { width: '5ch', minWidth: 'calc(6ch + 16px)', marginLeft: '3ch' },
+      { width: '40ch', minWidth: 'calc(6ch + 16px)', marginLeft: '3ch' },
     ],
   );
   assert.equal(
