@@ -1010,18 +1010,14 @@ body.resizing {
 }
 .log-field-bar.is-empty {
   align-items: center;
+  padding: 0 12px;
   color: var(--fg-faint);
-}
-.log-field-gutter {
-  width: var(--log-gutter-width);
-  flex: 0 0 var(--log-gutter-width);
-  border-right: 1px solid var(--border);
 }
 .log-field-track {
   display: flex;
+  flex: 1 1 auto;
   height: 100%;
-  min-width: max-content;
-  will-change: transform;
+  min-width: 0;
 }
 .log-field-warning {
   position: absolute;
@@ -1038,8 +1034,6 @@ body.resizing {
 }
 .log-field {
   position: relative;
-  flex: 0 0 auto;
-  min-width: 4ch;
   border-right: 1px solid var(--border);
 }
 .log-field-button {

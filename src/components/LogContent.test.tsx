@@ -337,22 +337,29 @@ test('field controls support text case, editing actions, keyboard resize, drag g
   );
 
   assert.equal(view.container.querySelectorAll('.log-field').length, 3);
-  assert.deepEqual(
-    [...view.container.querySelectorAll<HTMLElement>('.log-field')].map((field) => ({
+  const fieldStyles = [...view.container.querySelectorAll<HTMLElement>('.log-field')].map(
+    (field) => ({
       width: field.style.width,
+      flexBasis: field.style.flexBasis,
+      flexGrow: field.style.flexGrow,
+      flexShrink: field.style.flexShrink,
       minWidth: field.style.minWidth,
-      marginLeft: field.style.marginLeft,
-    })),
-    [
-      { width: '19ch', minWidth: 'calc(6ch + 16px)', marginLeft: '1ch' },
-      { width: '5ch', minWidth: 'calc(6ch + 16px)', marginLeft: '3ch' },
-      { width: '40ch', minWidth: 'calc(6ch + 16px)', marginLeft: '3ch' },
-    ],
+    }),
   );
-  assert.equal(
-    view.container.querySelector('.log-field-track')?.getAttribute('style'),
-    'transform: translateX(-42px);',
+  assert.equal(new Set(fieldStyles.map((field) => field.width)).size, 1);
+  assert.match(fieldStyles[0].width, /40ch/);
+  assert.ok(
+    fieldStyles.every(
+      (field) =>
+        field.flexBasis === field.width &&
+        field.flexGrow === '0' &&
+        field.flexShrink === '1' &&
+        field.minWidth === '0',
+    ),
   );
+  assert.equal(view.container.querySelector('.log-field-gutter'), null);
+  assert.equal(view.container.querySelector('.log-field-track')?.getAttribute('style'), null);
+  assert.equal(harness.screen.getByRole('button', { name: /^级别 ▾$/ }).title, '级别');
   assert.equal(
     view.container.querySelector('.log-field-bar')?.textContent?.includes('Matches only'),
     false,

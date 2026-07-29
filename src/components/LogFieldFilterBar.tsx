@@ -38,14 +38,6 @@ function updatedLayout(layout: LogFieldLayout, fields: LogFieldDefinition[]): Lo
   return { ...layout, fields, pattern: { kind: 'manualColumns' }, source: 'manual', confidence: 1 };
 }
 
-function fieldTrackOffset(fields: LogFieldDefinition[], index: number) {
-  const field = fields[index];
-  const previous = fields[index - 1];
-  if (!previous) return field.boundary.start;
-  if (previous.boundary.end === null) return 0;
-  return Math.max(0, field.boundary.start - previous.boundary.end);
-}
-
 function fieldNameDisplayWidth(name: string) {
   return Array.from(name).reduce((width, character) => {
     const codePoint = character.codePointAt(0) ?? 0;
@@ -53,9 +45,10 @@ function fieldNameDisplayWidth(name: string) {
   }, 0);
 }
 
-function fieldControlMinWidth(field: LogFieldDefinition) {
-  const labelWidth = fieldNameDisplayWidth(field.name) + 2;
-  return `calc(${labelWidth}ch + 16px)`;
+function commonFieldControlWidth(fields: LogFieldDefinition[]) {
+  const fieldWidth = Math.max(4, ...fields.map((field) => field.displayWidth));
+  const labelWidth = Math.max(...fields.map((field) => fieldNameDisplayWidth(field.name))) + 2;
+  return `max(${fieldWidth}ch, calc(${labelWidth}ch + 16px))`;
 }
 
 export function LogFieldFilterBar({
@@ -73,11 +66,12 @@ export function LogFieldFilterBar({
   if (!layout) {
     return (
       <div className="log-field-bar is-empty" role="status">
-        <span className="log-field-gutter" />
         {t(recognizing ? 'fields.recognizing' : 'fields.unstable')}
       </div>
     );
   }
+
+  const fieldControlWidth = commonFieldControlWidth(layout.fields);
 
   const rename = (field: LogFieldDefinition) => {
     const name = window.prompt(t('fields.renamePrompt'), field.name)?.trim();
@@ -158,7 +152,6 @@ export function LogFieldFilterBar({
         if (event.key === 'Escape') setOpenField(null);
       }}
     >
-      <span className="log-field-gutter" />
       {dragBoundary !== null && (
         <span
           className="log-field-drag-guide"
@@ -167,8 +160,8 @@ export function LogFieldFilterBar({
           }}
         />
       )}
-      <div className="log-field-track" style={{ transform: `translateX(${-scrollLeft}px)` }}>
-        {layout.fields.map((field, index) => {
+      <div className="log-field-track">
+        {layout.fields.map((field) => {
           const condition = conditionFor(conditions, field.id);
           const stats = statistics.find((item) => item.fieldId === field.id);
           const active = Boolean(condition);
@@ -176,15 +169,18 @@ export function LogFieldFilterBar({
             <div
               className={'log-field' + (active ? ' active' : '')}
               style={{
-                width: `${Math.max(4, field.displayWidth)}ch`,
-                minWidth: fieldControlMinWidth(field),
-                marginLeft: `${fieldTrackOffset(layout.fields, index)}ch`,
+                width: fieldControlWidth,
+                flexBasis: fieldControlWidth,
+                flexGrow: 0,
+                flexShrink: 1,
+                minWidth: 0,
               }}
               key={field.id}
             >
               <button
                 type="button"
                 className="log-field-button"
+                title={field.name}
                 aria-expanded={openField === field.id}
                 onDoubleClick={() => rename(field)}
                 onClick={() => setOpenField(openField === field.id ? null : field.id)}
