@@ -580,8 +580,16 @@ test('Chinese field filtering labels are available', async () => {
   api.subscribeLogFieldProgress = () => () => undefined;
   renderLog();
   await harness.waitFor(() => assert.ok(harness.screen.getByRole('button', { name: /^级别 ▾$/ })));
+  assert.ok(harness.screen.getByRole('button', { name: '仅显示匹配' }));
+  assert.ok(harness.screen.getByRole('button', { name: '高亮匹配' }));
+  assert.ok(harness.screen.getByRole('checkbox', { name: '显示未解析' }));
+  assert.ok(harness.screen.getByRole('button', { name: '清除筛选' }));
   assert.ok(harness.screen.getByText('有效的布局调整会自动保存。'));
-  assert.ok(harness.screen.getByText('筛选 ▾'));
+  const filterMenu = harness.screen.getByRole('button', { name: '筛选 ▾' });
+  assert.equal(filterMenu.getAttribute('aria-expanded'), 'false');
+  harness.fireEvent.click(filterMenu);
+  assert.equal(filterMenu.getAttribute('aria-expanded'), 'true');
+  assert.ok(filterMenu.closest('.log-filter-menu')?.classList.contains('open'));
 });
 
 test('separate log tab component instances keep field conditions isolated', async () => {

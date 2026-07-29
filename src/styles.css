@@ -1154,7 +1154,7 @@ body.resizing {
 .log-filter-menu {
   display: contents;
 }
-.log-filter-menu > summary {
+.log-filter-menu > .log-filter-menu-summary {
   display: none;
 }
 .log-filter-menu > .log-filter-menu-content {
@@ -1162,7 +1162,7 @@ body.resizing {
   align-items: center;
   gap: 16px;
 }
-.log-filter-menu > summary,
+.log-filter-menu > .log-filter-menu-summary,
 .log-field-mode button,
 .log-field-foot-button,
 .log-layout-menu summary,
@@ -1225,16 +1225,16 @@ body.resizing {
     position: relative;
     display: block;
   }
-  .log-filter-menu > summary {
+  .log-filter-menu > .log-filter-menu-summary {
     display: block;
     list-style: none;
     cursor: pointer;
     white-space: nowrap;
   }
-  .log-filter-menu:not([open]) > .log-filter-menu-content {
+  .log-filter-menu:not(.open) > .log-filter-menu-content {
     display: none;
   }
-  .log-filter-menu[open] > .log-filter-menu-content {
+  .log-filter-menu.open > .log-filter-menu-content {
     position: absolute;
     bottom: 22px;
     left: 0;

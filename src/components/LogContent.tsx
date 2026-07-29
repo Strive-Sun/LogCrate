@@ -149,6 +149,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
   const [fieldError, setFieldError] = useState<string | null>(null);
   const [fieldMode, setFieldMode] = useState<LogFieldResultMode>('compact');
   const [includeUnparsed, setIncludeUnparsed] = useState(true);
+  const [fieldFilterMenuOpen, setFieldFilterMenuOpen] = useState(false);
   const [logScrollLeft, setLogScrollLeft] = useState(0);
   const [fieldEncodingVersion, setFieldEncodingVersion] = useState(0);
   const fieldUnsub = useRef<() => void>(() => {});
@@ -934,11 +935,16 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
             </option>
           ))}
         </select>
-        <details className="log-filter-menu">
-          <summary>
+        <div className={`log-filter-menu${fieldFilterMenuOpen ? ' open' : ''}`}>
+          <button
+            type="button"
+            className="log-filter-menu-summary"
+            aria-expanded={fieldFilterMenuOpen}
+            onClick={() => setFieldFilterMenuOpen((open) => !open)}
+          >
             {t('fields.filterMenu')}
             {fieldConditions.length > 0 ? ` (${fieldConditions.length})` : ''} ▾
-          </summary>
+          </button>
           <div className="log-filter-menu-content">
             <div className="log-field-mode" aria-label={t('fields.resultMode')}>
               <button
@@ -996,7 +1002,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
               </div>
             </details>
           </div>
-        </details>
+        </div>
         <span className="log-field-status-text">
           {fieldError
             ? t('fields.failed', { error: fieldError })
