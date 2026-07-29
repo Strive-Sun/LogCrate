@@ -17,9 +17,11 @@ mod watcher;
 
 use archive::{open_archive, resolve_archive_chain, ArchiveEntry};
 use index::{
-    IndexProgress, LogLine, LogSearchRequest, LogSearchResult, OpenResult, SessionManager,
-    SnapshotExportResult,
+    IndexProgress, LogFieldAnchorResult, LogFieldFilterRequest, LogFieldMarkedLine,
+    LogFieldResultMode, LogFieldStatus, LogLine, LogSearchRequest, LogSearchResult, OpenResult,
+    SessionManager, SnapshotExportResult,
 };
+use log_fields::{LayoutAnalysis, SamplingPhase};
 use serde::Serialize;
 use std::io::SeekFrom;
 use std::path::PathBuf;
@@ -929,7 +931,9 @@ async fn open_log_session(
                     stream,
                     remaining_limit,
                     |event| {
+                        let refresh_session_id = event.session_id.clone();
                         let _ = app.emit("index-progress", event);
+                        spawn_log_field_refresh(sessions.clone(), refresh_session_id, app.clone());
                     },
                 );
             }
@@ -951,6 +955,26 @@ async fn open_log_session(
     Ok(result)
 }
 
+fn spawn_log_field_refresh(
+    sessions: Arc<SessionManager>,
+    session_id: String,
+    app: tauri::AppHandle,
+) {
+    let Some(build) = sessions.prepare_log_field_refresh(&session_id) else {
+        return;
+    };
+    std::thread::spawn(move || {
+        sessions.apply_log_field_filter(build, |event| {
+            let _ = app.emit("log-field-progress", event);
+        });
+        while let Some(refresh) = sessions.prepare_log_field_refresh(&session_id) {
+            sessions.apply_log_field_filter(refresh, |event| {
+                let _ = app.emit("log-field-progress", event);
+            });
+        }
+    });
+}
+
 #[tauri::command]
 async fn read_lines(
     state: State<'_, AppState>,
@@ -963,6 +987,129 @@ async fn read_lines(
         .sessions
         .read_lines(&session_id, start, count)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn analyze_log_field_layout(
+    state: State<'_, AppState>,
+    session_id: String,
+    phase: SamplingPhase,
+) -> Result<LayoutAnalysis, String> {
+    let state = state.ready().await;
+    let sessions = state.sessions.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        sessions.analyze_log_field_layout(&session_id, phase)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn set_log_field_filter(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    session_id: String,
+    request: LogFieldFilterRequest,
+) -> Result<u64, String> {
+    let state = state.ready().await;
+    let build = state
+        .sessions
+        .prepare_log_field_filter(&session_id, request)
+        .map_err(|error| error.to_string())?;
+    let generation = build.generation();
+    let sessions = state.sessions.clone();
+    std::thread::spawn(move || {
+        sessions.apply_log_field_filter(build, |event| {
+            let _ = app.emit("log-field-progress", event);
+        });
+        while let Some(refresh) = sessions.prepare_log_field_refresh(&session_id) {
+            sessions.apply_log_field_filter(refresh, |event| {
+                let _ = app.emit("log-field-progress", event);
+            });
+        }
+    });
+    Ok(generation)
+}
+
+#[tauri::command]
+async fn log_field_status(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Option<LogFieldStatus>, String> {
+    let state = state.ready().await;
+    Ok(state.sessions.log_field_status(&session_id))
+}
+
+#[tauri::command]
+async fn clear_log_field_filter(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    let state = state.ready().await;
+    state
+        .sessions
+        .clear_log_field_filter(&session_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn read_filtered_lines(
+    state: State<'_, AppState>,
+    session_id: String,
+    generation: u64,
+    start: u64,
+    count: u64,
+    include_unparsed: bool,
+) -> Result<Vec<LogLine>, String> {
+    let state = state.ready().await;
+    let sessions = state.sessions.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        sessions.read_filtered_lines(&session_id, generation, start, count, include_unparsed)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn read_lines_with_field_matches(
+    state: State<'_, AppState>,
+    session_id: String,
+    generation: u64,
+    start: u64,
+    count: u64,
+) -> Result<Vec<LogFieldMarkedLine>, String> {
+    let state = state.ready().await;
+    let sessions = state.sessions.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        sessions.read_lines_with_field_matches(&session_id, generation, start, count)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn locate_log_field_anchor(
+    state: State<'_, AppState>,
+    session_id: String,
+    generation: u64,
+    original_line_no: u64,
+    mode: LogFieldResultMode,
+    include_unparsed: bool,
+) -> Result<Option<LogFieldAnchorResult>, String> {
+    let state = state.ready().await;
+    state
+        .sessions
+        .locate_log_field_anchor(
+            &session_id,
+            generation,
+            original_line_no,
+            mode,
+            include_unparsed,
+        )
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1322,6 +1469,13 @@ pub fn run() {
             list_archive_entries,
             open_log_session,
             read_lines,
+            analyze_log_field_layout,
+            set_log_field_filter,
+            log_field_status,
+            clear_log_field_filter,
+            read_filtered_lines,
+            read_lines_with_field_matches,
+            locate_log_field_anchor,
             search_log,
             line_count,
             export_session_snapshot,

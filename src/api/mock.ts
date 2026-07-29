@@ -17,6 +17,14 @@ import type {
   EncodingProgress,
   IndexProgress,
   LogLine,
+  LogFieldAnchorResult,
+  LogFieldFilterRequest,
+  LogFieldLayout,
+  LogFieldLayoutAnalysis,
+  LogFieldMarkedLine,
+  LogFieldProgress,
+  LogFieldResultMode,
+  LogFieldStatus,
   LogSearchRequest,
   LogSearchResult,
   MacOsFileAccessCapabilities,
@@ -229,6 +237,38 @@ const ARCHIVE_ENTRIES: Record<string, string[]> = {
 };
 
 const progressTimers = new Map<string, number>();
+let mockLogFieldGeneration = 0;
+const mockLogFieldStatus = new Map<string, LogFieldStatus>();
+const mockLogFieldSubscribers = new Map<string, Set<(progress: LogFieldProgress) => void>>();
+
+const MOCK_LOG_FIELD_LAYOUT: LogFieldLayout = {
+  fields: [
+    {
+      id: 'field-1',
+      name: '时间',
+      fieldType: 'time',
+      boundary: { start: 0, end: 19 },
+      displayWidth: 19,
+    },
+    {
+      id: 'field-2',
+      name: '级别',
+      fieldType: 'level',
+      boundary: { start: 20, end: 25 },
+      displayWidth: 5,
+    },
+    {
+      id: 'field-3',
+      name: '正文',
+      fieldType: 'text',
+      boundary: { start: 26, end: null },
+      displayWidth: 48,
+    },
+  ],
+  pattern: { kind: 'manualColumns' },
+  confidence: 1,
+  source: 'automatic',
+};
 let encodingGeneration = 0;
 const encodingByKey = new Map<string, string>();
 
@@ -362,7 +402,10 @@ export const mockApi = {
     };
   },
 
-  async closeLogSession(_entryKey: string, _expectedSessionId?: string): Promise<void> {},
+  async closeLogSession(entryKey: string, _expectedSessionId?: string): Promise<void> {
+    mockLogFieldStatus.delete(entryKey);
+    mockLogFieldSubscribers.delete(entryKey);
+  },
 
   async saveSessionSnapshot(
     entryKey: string,
@@ -435,6 +478,110 @@ export const mockApi = {
       });
     }
     return out;
+  },
+
+  async analyzeLogFieldLayout(
+    entryKey: string,
+    phase: 'quick' | 'background',
+  ): Promise<LogFieldLayoutAnalysis> {
+    const total = ENTRY_TABLE[entryKey]?.lineCount ?? 0;
+    const sampledNonEmptyLines = Math.min(total, phase === 'quick' ? 256 : 10_000);
+    return {
+      layout: structuredClone(MOCK_LOG_FIELD_LAYOUT),
+      sampledNonEmptyLines,
+      sampledBytes: sampledNonEmptyLines * 96,
+      mainLayoutLines: sampledNonEmptyLines,
+      unparsedLines: 0,
+    };
+  },
+
+  async setLogFieldFilter(entryKey: string, request: LogFieldFilterRequest): Promise<number> {
+    const totalLines = ENTRY_TABLE[entryKey]?.lineCount ?? 0;
+    const generation = ++mockLogFieldGeneration;
+    const status: LogFieldStatus = {
+      generation,
+      layout: request.layout,
+      conditions: request.conditions,
+      statistics: [],
+      scannedLines: totalLines,
+      matchedLines: totalLines,
+      unparsedLines: 0,
+      totalLines,
+      done: true,
+      failed: false,
+    };
+    mockLogFieldStatus.set(entryKey, status);
+    window.setTimeout(() => {
+      const progress: LogFieldProgress = { sessionId: `sess:${entryKey}`, ...status };
+      mockLogFieldSubscribers.get(entryKey)?.forEach((subscriber) => subscriber(progress));
+    }, 0);
+    return generation;
+  },
+
+  async logFieldStatus(entryKey: string): Promise<LogFieldStatus | null> {
+    return mockLogFieldStatus.get(entryKey) ?? null;
+  },
+
+  async clearLogFieldFilter(entryKey: string): Promise<void> {
+    mockLogFieldStatus.delete(entryKey);
+  },
+
+  async readFilteredLines(
+    entryKey: string,
+    _generation: number,
+    start: number,
+    count: number,
+    _includeUnparsed: boolean,
+  ): Promise<LogLine[]> {
+    return this.readLines(entryKey, start, count);
+  },
+
+  async readLinesWithFieldMatches(
+    entryKey: string,
+    _generation: number,
+    start: number,
+    count: number,
+  ): Promise<LogFieldMarkedLine[]> {
+    return (await this.readLines(entryKey, start, count)).map((line) => ({
+      ...line,
+      fieldMatched: true,
+      fieldUnparsed: false,
+    }));
+  },
+
+  async locateLogFieldAnchor(
+    entryKey: string,
+    _generation: number,
+    originalLineNo: number,
+    _mode: LogFieldResultMode,
+    _includeUnparsed: boolean,
+  ): Promise<LogFieldAnchorResult | null> {
+    const total = ENTRY_TABLE[entryKey]?.lineCount ?? 0;
+    if (total === 0) return null;
+    const lineNo = Math.min(Math.max(1, originalLineNo), total);
+    return { viewIndex: lineNo - 1, lineNo };
+  },
+
+  subscribeLogFieldProgress(
+    entryKey: string,
+    generation: number,
+    onProgress: (progress: LogFieldProgress) => void,
+  ): () => void {
+    const subscriber = (progress: LogFieldProgress) => {
+      if (progress.generation === generation) onProgress(progress);
+    };
+    const subscribers = mockLogFieldSubscribers.get(entryKey) ?? new Set();
+    subscribers.add(subscriber);
+    mockLogFieldSubscribers.set(entryKey, subscribers);
+    const status = mockLogFieldStatus.get(entryKey);
+    if (status?.generation === generation) {
+      window.setTimeout(() => subscriber({ sessionId: `sess:${entryKey}`, ...status }), 0);
+    }
+    return () => {
+      const current = mockLogFieldSubscribers.get(entryKey);
+      current?.delete(subscriber);
+      if (current?.size === 0) mockLogFieldSubscribers.delete(entryKey);
+    };
   },
 
   async searchLog(entryKey: string, request: LogSearchRequest): Promise<LogSearchResult> {

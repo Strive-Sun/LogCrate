@@ -34,6 +34,7 @@ export interface LogSearchRequest {
   wholeWord: boolean;
   caseSensitive: boolean;
   wrap: boolean;
+  fieldView?: LogFieldSearchView;
 }
 
 export interface LogSearchMatch {
@@ -50,6 +51,95 @@ export interface LogSearchResult {
   reachedBoundary: boolean;
   indexedLines: number;
   indexing: boolean;
+}
+
+export type LogFieldType = 'time' | 'level' | 'discrete' | 'text';
+export type LogFieldResultMode = 'compact' | 'highlight';
+
+export interface LogFieldDefinition {
+  id: string;
+  name: string;
+  fieldType: LogFieldType;
+  boundary: { start: number; end: number | null };
+  displayWidth: number;
+}
+
+export type LogFieldLayoutPattern =
+  | { kind: 'bracketed'; segmentCount: number }
+  | { kind: 'chromium' }
+  | { kind: 'androidLogcat' }
+  | { kind: 'manualColumns' };
+
+export interface LogFieldLayout {
+  fields: LogFieldDefinition[];
+  pattern: LogFieldLayoutPattern;
+  confidence: number;
+  source: 'automatic' | 'manual';
+}
+
+export interface LogFieldLayoutAnalysis {
+  layout: LogFieldLayout | null;
+  sampledNonEmptyLines: number;
+  sampledBytes: number;
+  mainLayoutLines: number;
+  unparsedLines: number;
+}
+
+export type LogFieldCondition =
+  | { kind: 'discrete'; fieldId: string; values: string[] }
+  | { kind: 'time'; fieldId: string; start?: string; end?: string }
+  | { kind: 'text'; fieldId: string; query: string; caseSensitive: boolean };
+
+export interface LogFieldFilterRequest {
+  layout: LogFieldLayout;
+  conditions: LogFieldCondition[];
+}
+
+export interface LogFieldCandidateValue {
+  value: string;
+  count: number;
+}
+
+export interface LogFieldStatistics {
+  fieldId: string;
+  candidates: LogFieldCandidateValue[];
+  highCardinality: boolean;
+  minTime?: string;
+  maxTime?: string;
+}
+
+export interface LogFieldProgress {
+  sessionId: string;
+  generation: number;
+  scannedLines: number;
+  matchedLines: number;
+  unparsedLines: number;
+  totalLines: number;
+  done: boolean;
+  failed: boolean;
+  error?: string;
+}
+
+export interface LogFieldStatus extends Omit<LogFieldProgress, 'sessionId'> {
+  layout: LogFieldLayout;
+  conditions: LogFieldCondition[];
+  statistics: LogFieldStatistics[];
+}
+
+export interface LogFieldMarkedLine extends LogLine {
+  fieldMatched: boolean;
+  fieldUnparsed: boolean;
+}
+
+export interface LogFieldAnchorResult {
+  viewIndex: number;
+  lineNo: number;
+}
+
+export interface LogFieldSearchView {
+  generation: number;
+  mode: LogFieldResultMode;
+  includeUnparsed: boolean;
 }
 
 /** 监控目录树中的节点类型 */

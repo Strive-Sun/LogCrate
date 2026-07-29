@@ -26,6 +26,13 @@ import type {
   EncodingProgress,
   IndexProgress,
   LogLine,
+  LogFieldAnchorResult,
+  LogFieldFilterRequest,
+  LogFieldLayoutAnalysis,
+  LogFieldMarkedLine,
+  LogFieldProgress,
+  LogFieldResultMode,
+  LogFieldStatus,
   LogSearchRequest,
   LogSearchResult,
   MacOsFileAccessCapabilities,
@@ -44,6 +51,8 @@ const totalByKey = new Map<string, number>();
 const indexProgress = new IndexProgressStore();
 const latestEncodingProgress = new Map<string, EncodingProgress>();
 const encodingSubscribers = new Map<string, Set<(progress: EncodingProgress) => void>>();
+const latestLogFieldProgress = new Map<string, LogFieldProgress>();
+const logFieldSubscribers = new Map<string, Set<(progress: LogFieldProgress) => void>>();
 let pendingUpdate: Update | null = null;
 let sessionOpenQueue: Promise<void> = Promise.resolve();
 
@@ -62,6 +71,13 @@ const encodingListenerReady = hasTauriBridge
       const progress = event.payload;
       latestEncodingProgress.set(progress.sessionId, progress);
       encodingSubscribers.get(progress.sessionId)?.forEach((subscriber) => subscriber(progress));
+    })
+  : Promise.resolve(() => {});
+const logFieldListenerReady = hasTauriBridge
+  ? listen<LogFieldProgress>('log-field-progress', (event) => {
+      const progress = event.payload;
+      latestLogFieldProgress.set(progress.sessionId, progress);
+      logFieldSubscribers.get(progress.sessionId)?.forEach((subscriber) => subscriber(progress));
     })
   : Promise.resolve(() => {});
 
@@ -252,6 +268,8 @@ export const tauriApi = {
         indexProgress.clear(evictedSessionId);
         encodingSubscribers.delete(evictedSessionId);
         latestEncodingProgress.delete(evictedSessionId);
+        logFieldSubscribers.delete(evictedSessionId);
+        latestLogFieldProgress.delete(evictedSessionId);
       }
       sessionByKey.set(entryKey, res.sessionId);
       const total = await invoke<number>('line_count', { sessionId: res.sessionId });
@@ -273,6 +291,8 @@ export const tauriApi = {
     indexProgress.clear(sessionId);
     encodingSubscribers.delete(sessionId);
     latestEncodingProgress.delete(sessionId);
+    logFieldSubscribers.delete(sessionId);
+    latestLogFieldProgress.delete(sessionId);
     await invoke('close_log_session', { sessionId });
   },
 
@@ -323,6 +343,117 @@ export const tauriApi = {
     const sid = sessionByKey.get(entryKey);
     if (!sid) return [];
     return invoke<LogLine[]>('read_lines', { sessionId: sid, start, count });
+  },
+
+  async analyzeLogFieldLayout(
+    entryKey: string,
+    phase: 'quick' | 'background',
+  ): Promise<LogFieldLayoutAnalysis> {
+    const sessionId = sessionByKey.get(entryKey);
+    if (!sessionId) throw new Error('session not found');
+    return invoke<LogFieldLayoutAnalysis>('analyze_log_field_layout', { sessionId, phase });
+  },
+
+  async setLogFieldFilter(entryKey: string, request: LogFieldFilterRequest): Promise<number> {
+    await logFieldListenerReady;
+    const sessionId = sessionByKey.get(entryKey);
+    if (!sessionId) throw new Error('session not found');
+    latestLogFieldProgress.delete(sessionId);
+    return invoke<number>('set_log_field_filter', { sessionId, request });
+  },
+
+  async logFieldStatus(entryKey: string): Promise<LogFieldStatus | null> {
+    const sessionId = sessionByKey.get(entryKey);
+    if (!sessionId) return null;
+    return invoke<LogFieldStatus | null>('log_field_status', { sessionId });
+  },
+
+  async clearLogFieldFilter(entryKey: string): Promise<void> {
+    const sessionId = sessionByKey.get(entryKey);
+    if (!sessionId) return;
+    latestLogFieldProgress.delete(sessionId);
+    await invoke('clear_log_field_filter', { sessionId });
+  },
+
+  async readFilteredLines(
+    entryKey: string,
+    generation: number,
+    start: number,
+    count: number,
+    includeUnparsed: boolean,
+  ): Promise<LogLine[]> {
+    const sessionId = sessionByKey.get(entryKey);
+    if (!sessionId) return [];
+    return invoke<LogLine[]>('read_filtered_lines', {
+      sessionId,
+      generation,
+      start,
+      count,
+      includeUnparsed,
+    });
+  },
+
+  async readLinesWithFieldMatches(
+    entryKey: string,
+    generation: number,
+    start: number,
+    count: number,
+  ): Promise<LogFieldMarkedLine[]> {
+    const sessionId = sessionByKey.get(entryKey);
+    if (!sessionId) return [];
+    return invoke<LogFieldMarkedLine[]>('read_lines_with_field_matches', {
+      sessionId,
+      generation,
+      start,
+      count,
+    });
+  },
+
+  async locateLogFieldAnchor(
+    entryKey: string,
+    generation: number,
+    originalLineNo: number,
+    mode: LogFieldResultMode,
+    includeUnparsed: boolean,
+  ): Promise<LogFieldAnchorResult | null> {
+    const sessionId = sessionByKey.get(entryKey);
+    if (!sessionId) return null;
+    return invoke<LogFieldAnchorResult | null>('locate_log_field_anchor', {
+      sessionId,
+      generation,
+      originalLineNo,
+      mode,
+      includeUnparsed,
+    });
+  },
+
+  subscribeLogFieldProgress(
+    entryKey: string,
+    generation: number,
+    onProgress: (progress: LogFieldProgress) => void,
+  ): () => void {
+    const sessionId = sessionByKey.get(entryKey);
+    if (!sessionId) return () => {};
+    let finished = false;
+    const subscriber = (progress: LogFieldProgress) => {
+      if (finished || progress.generation !== generation) return;
+      onProgress(progress);
+      if (progress.done) {
+        finished = true;
+        logFieldSubscribers.get(sessionId)?.delete(subscriber);
+      }
+    };
+    const subscribers = logFieldSubscribers.get(sessionId) ?? new Set();
+    subscribers.add(subscriber);
+    logFieldSubscribers.set(sessionId, subscribers);
+    const latest = latestLogFieldProgress.get(sessionId);
+    if (latest) subscriber(latest);
+    return () => {
+      finished = true;
+      const current = logFieldSubscribers.get(sessionId);
+      current?.delete(subscriber);
+      if (current?.size === 0) logFieldSubscribers.delete(sessionId);
+    };
   },
 
   async searchLog(entryKey: string, request: LogSearchRequest): Promise<LogSearchResult> {

@@ -10,6 +10,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::log_fields::{
+    analyze_layout, extend_field_lines, scan_field_lines, LayoutAnalysis, LogFieldCondition,
+    LogFieldLayout, LogFieldScanResult, LogFieldStatistics, SamplingPhase,
+};
+
 pub const MAX_UNCOMPRESSED: u64 = 2 * 1024 * 1024 * 1024;
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 const MAX_SESSIONS: usize = 5;
@@ -82,6 +87,85 @@ pub struct LogSearchRequest {
     pub whole_word: bool,
     pub case_sensitive: bool,
     pub wrap: bool,
+    #[serde(default)]
+    pub field_view: Option<LogFieldSearchView>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LogFieldResultMode {
+    Compact,
+    Highlight,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFieldSearchView {
+    pub generation: u64,
+    pub mode: LogFieldResultMode,
+    pub include_unparsed: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFieldFilterRequest {
+    pub layout: LogFieldLayout,
+    pub conditions: Vec<LogFieldCondition>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFieldProgress {
+    pub session_id: String,
+    pub generation: u64,
+    pub scanned_lines: u64,
+    pub matched_lines: u64,
+    pub unparsed_lines: u64,
+    pub total_lines: u64,
+    pub done: bool,
+    pub failed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFieldStatus {
+    pub generation: u64,
+    pub layout: LogFieldLayout,
+    pub conditions: Vec<LogFieldCondition>,
+    pub statistics: Vec<LogFieldStatistics>,
+    pub scanned_lines: u64,
+    pub matched_lines: u64,
+    pub unparsed_lines: u64,
+    pub total_lines: u64,
+    pub done: bool,
+    pub failed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFieldMarkedLine {
+    #[serde(flatten)]
+    pub line: LogLine,
+    pub field_matched: bool,
+    pub field_unparsed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFieldAnchorResult {
+    pub view_index: u64,
+    pub line_no: u64,
+}
+
+#[derive(Debug, Clone)]
+struct LogFieldSessionState {
+    status: LogFieldStatus,
+    matched_original_lines: Vec<u64>,
+    unparsed_original_lines: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -112,7 +196,24 @@ pub struct Session {
     effective_encoding: &'static Encoding,
     indexing: bool,
     encoding_generation: u64,
+    field_generation: u64,
+    field_state: Option<LogFieldSessionState>,
     cancel: Arc<AtomicBool>,
+}
+
+pub struct LogFieldBuild {
+    session_id: String,
+    session: Arc<Mutex<Session>>,
+    generation: u64,
+    request: LogFieldFilterRequest,
+    total_lines: u64,
+    initial: Option<LogFieldScanResult>,
+}
+
+impl LogFieldBuild {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
 }
 
 impl Session {
@@ -323,6 +424,8 @@ impl SessionManager {
             effective_encoding: encoding_rs::UTF_8,
             indexing: true,
             encoding_generation: 0,
+            field_generation: 0,
+            field_state: None,
             cancel: Arc::new(AtomicBool::new(false)),
         };
         self.sessions
@@ -535,6 +638,8 @@ impl SessionManager {
             anyhow::bail!("wait for initial indexing to finish before changing encoding");
         }
         current.encoding_generation = current.encoding_generation.saturating_add(1);
+        current.field_generation = current.field_generation.saturating_add(1);
+        current.field_state = None;
         let change = EncodingChange {
             session_id: session_id.to_string(),
             session: session.clone(),
@@ -700,6 +805,550 @@ impl SessionManager {
         Ok(lines)
     }
 
+    pub fn prepare_log_field_filter(
+        &self,
+        session_id: &str,
+        request: LogFieldFilterRequest,
+    ) -> anyhow::Result<LogFieldBuild> {
+        if request.layout.fields.is_empty() {
+            anyhow::bail!("field layout cannot be empty");
+        }
+        let session = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
+        let _ = self.touch_lru(session_id);
+        let (generation, total_lines) = {
+            let mut current = session.lock().unwrap();
+            current.field_generation = current.field_generation.saturating_add(1);
+            let generation = current.field_generation;
+            let total_lines = current.line_count();
+            current.field_state = Some(LogFieldSessionState {
+                status: LogFieldStatus {
+                    generation,
+                    layout: request.layout.clone(),
+                    conditions: request.conditions.clone(),
+                    statistics: Vec::new(),
+                    scanned_lines: 0,
+                    matched_lines: 0,
+                    unparsed_lines: 0,
+                    total_lines,
+                    done: false,
+                    failed: false,
+                    error: None,
+                },
+                matched_original_lines: Vec::new(),
+                unparsed_original_lines: Vec::new(),
+            });
+            (generation, total_lines)
+        };
+        Ok(LogFieldBuild {
+            session_id: session_id.to_string(),
+            session,
+            generation,
+            request,
+            total_lines,
+            initial: None,
+        })
+    }
+
+    pub fn analyze_log_field_layout(
+        &self,
+        session_id: &str,
+        phase: SamplingPhase,
+    ) -> anyhow::Result<LayoutAnalysis> {
+        let session = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
+        let (total, cache_path) = {
+            let current = session.lock().unwrap();
+            (current.line_count(), current.cache_path.clone())
+        };
+        let mut file = File::open(cache_path)?;
+        Ok(analyze_layout(total as usize, phase, |index| {
+            Self::read_field_line_from(&mut file, &session, index as u64)
+                .ok()
+                .and_then(|(line, truncated)| (!truncated).then_some(line))
+        }))
+    }
+
+    /// Continue the current generation when the line index has published more complete lines.
+    /// A running or already current build is left untouched.
+    pub fn prepare_log_field_refresh(&self, session_id: &str) -> Option<LogFieldBuild> {
+        let session = self.sessions.lock().unwrap().get(session_id).cloned()?;
+        let mut current = session.lock().unwrap();
+        let total_lines = current.line_count();
+        let state = current.field_state.as_mut()?;
+        if !state.status.done || state.status.failed || state.status.scanned_lines >= total_lines {
+            return None;
+        }
+        state.status.done = false;
+        state.status.total_lines = total_lines;
+        let initial = LogFieldScanResult {
+            matched_lines: state.matched_original_lines.clone(),
+            unparsed_lines: state.unparsed_original_lines.clone(),
+            statistics: state.status.statistics.clone(),
+            scanned_lines: state.status.scanned_lines,
+        };
+        let request = LogFieldFilterRequest {
+            layout: state.status.layout.clone(),
+            conditions: state.status.conditions.clone(),
+        };
+        let build = LogFieldBuild {
+            session_id: session_id.to_string(),
+            session: session.clone(),
+            generation: state.status.generation,
+            request,
+            total_lines,
+            initial: Some(initial),
+        };
+        drop(current);
+        Some(build)
+    }
+
+    fn read_field_line_from(
+        file: &mut File,
+        session: &Arc<Mutex<Session>>,
+        line_index: u64,
+    ) -> anyhow::Result<(String, bool)> {
+        let (encoding, from, to) = {
+            let current = session.lock().unwrap();
+            if line_index >= current.line_count() {
+                anyhow::bail!("line index is no longer available");
+            }
+            (
+                current.effective_encoding,
+                current.offsets[line_index as usize],
+                current.offsets[line_index as usize + 1],
+            )
+        };
+        let len = (to - from) as usize;
+        let read_len = len.min(MAX_LINE_BYTES);
+        let mut raw = vec![0u8; read_len];
+        file.seek(SeekFrom::Start(from))?;
+        file.read_exact(&mut raw)?;
+        Self::trim_line_bytes(&mut raw, encoding, line_index == 0);
+        let (text, _, _) = encoding.decode(&raw);
+        Ok((text.into_owned(), len > MAX_LINE_BYTES))
+    }
+
+    pub fn apply_log_field_filter<F>(&self, build: LogFieldBuild, mut progress: F)
+    where
+        F: FnMut(LogFieldProgress),
+    {
+        let session_id = build.session_id.clone();
+        let generation = build.generation;
+        let total_lines = build.total_lines;
+        let session = build.session.clone();
+        let mut published_matches = build
+            .initial
+            .as_ref()
+            .map_or(0, |value| value.matched_lines.len());
+        let mut published_unparsed = build
+            .initial
+            .as_ref()
+            .map_or(0, |value| value.unparsed_lines.len());
+        let result = (|| -> anyhow::Result<Option<LogFieldScanResult>> {
+            let cache_path = session.lock().unwrap().cache_path.clone();
+            let mut file = File::open(cache_path)?;
+            let cancelled = || {
+                let current = session.lock().unwrap();
+                current.cancel.load(Ordering::Acquire) || current.field_generation != generation
+            };
+            if build.initial.is_some() {
+                extend_field_lines(
+                    total_lines,
+                    &build.request.layout,
+                    &build.request.conditions,
+                    build.initial,
+                    |line| Self::read_field_line_from(&mut file, &session, line),
+                    cancelled,
+                    |scanned, matched, unparsed| {
+                        let mut current = session.lock().unwrap();
+                        if current.field_generation != generation {
+                            return;
+                        }
+                        if let Some(state) = current.field_state.as_mut() {
+                            state
+                                .matched_original_lines
+                                .extend_from_slice(&matched[published_matches..]);
+                            state
+                                .unparsed_original_lines
+                                .extend_from_slice(&unparsed[published_unparsed..]);
+                            published_matches = matched.len();
+                            published_unparsed = unparsed.len();
+                            state.status.scanned_lines = scanned;
+                            state.status.matched_lines = matched.len() as u64;
+                            state.status.unparsed_lines = unparsed.len() as u64;
+                        }
+                        drop(current);
+                        progress(LogFieldProgress {
+                            session_id: session_id.clone(),
+                            generation,
+                            scanned_lines: scanned,
+                            matched_lines: matched.len() as u64,
+                            unparsed_lines: unparsed.len() as u64,
+                            total_lines,
+                            done: false,
+                            failed: false,
+                            error: None,
+                        });
+                    },
+                )
+            } else {
+                scan_field_lines(
+                    total_lines,
+                    &build.request.layout,
+                    &build.request.conditions,
+                    |line| Self::read_field_line_from(&mut file, &session, line),
+                    cancelled,
+                    |scanned, matched, unparsed| {
+                        let mut current = session.lock().unwrap();
+                        if current.field_generation != generation {
+                            return;
+                        }
+                        if let Some(state) = current.field_state.as_mut() {
+                            state
+                                .matched_original_lines
+                                .extend_from_slice(&matched[published_matches..]);
+                            state
+                                .unparsed_original_lines
+                                .extend_from_slice(&unparsed[published_unparsed..]);
+                            published_matches = matched.len();
+                            published_unparsed = unparsed.len();
+                            state.status.scanned_lines = scanned;
+                            state.status.matched_lines = matched.len() as u64;
+                            state.status.unparsed_lines = unparsed.len() as u64;
+                        }
+                        drop(current);
+                        progress(LogFieldProgress {
+                            session_id: session_id.clone(),
+                            generation,
+                            scanned_lines: scanned,
+                            matched_lines: matched.len() as u64,
+                            unparsed_lines: unparsed.len() as u64,
+                            total_lines,
+                            done: false,
+                            failed: false,
+                            error: None,
+                        });
+                    },
+                )
+            }
+        })();
+        match result {
+            Ok(Some(result)) => {
+                let mut current = session.lock().unwrap();
+                if current.field_generation != generation {
+                    return;
+                }
+                if let Some(state) = current.field_state.as_mut() {
+                    state.matched_original_lines = result.matched_lines;
+                    state.unparsed_original_lines = result.unparsed_lines;
+                    state.status.statistics = result.statistics;
+                    state.status.scanned_lines = result.scanned_lines;
+                    state.status.matched_lines = state.matched_original_lines.len() as u64;
+                    state.status.unparsed_lines = state.unparsed_original_lines.len() as u64;
+                    state.status.done = true;
+                }
+                let state = current.field_state.as_ref().unwrap();
+                let event = LogFieldProgress {
+                    session_id,
+                    generation,
+                    scanned_lines: state.status.scanned_lines,
+                    matched_lines: state.status.matched_lines,
+                    unparsed_lines: state.status.unparsed_lines,
+                    total_lines,
+                    done: true,
+                    failed: false,
+                    error: None,
+                };
+                drop(current);
+                progress(event);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let mut current = session.lock().unwrap();
+                if current.field_generation != generation {
+                    return;
+                }
+                let scanned_lines = if let Some(state) = current.field_state.as_mut() {
+                    state.matched_original_lines.clear();
+                    state.unparsed_original_lines.clear();
+                    state.status.done = true;
+                    state.status.failed = true;
+                    state.status.error = Some(error.to_string());
+                    state.status.matched_lines = 0;
+                    state.status.unparsed_lines = 0;
+                    state.status.scanned_lines
+                } else {
+                    0
+                };
+                drop(current);
+                progress(LogFieldProgress {
+                    session_id,
+                    generation,
+                    scanned_lines,
+                    matched_lines: 0,
+                    unparsed_lines: 0,
+                    total_lines,
+                    done: true,
+                    failed: true,
+                    error: Some(error.to_string()),
+                });
+            }
+        }
+    }
+
+    pub fn log_field_status(&self, session_id: &str) -> Option<LogFieldStatus> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .and_then(|session| session.lock().unwrap().field_state.as_ref().cloned())
+            .map(|state| state.status)
+    }
+
+    pub fn clear_log_field_filter(&self, session_id: &str) -> anyhow::Result<()> {
+        let session = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
+        let mut current = session.lock().unwrap();
+        current.field_generation = current.field_generation.saturating_add(1);
+        current.field_state = None;
+        Ok(())
+    }
+
+    fn compact_view_lines(state: &LogFieldSessionState, include_unparsed: bool) -> Vec<u64> {
+        if !include_unparsed {
+            return state.matched_original_lines.clone();
+        }
+        let mut lines = Vec::with_capacity(
+            state.matched_original_lines.len() + state.unparsed_original_lines.len(),
+        );
+        let (mut matched, mut unparsed) = (0usize, 0usize);
+        while matched < state.matched_original_lines.len()
+            || unparsed < state.unparsed_original_lines.len()
+        {
+            let next_match = state.matched_original_lines.get(matched).copied();
+            let next_unparsed = state.unparsed_original_lines.get(unparsed).copied();
+            match (next_match, next_unparsed) {
+                (Some(left), Some(right)) if left <= right => {
+                    lines.push(left);
+                    matched += 1;
+                }
+                (_, Some(right)) => {
+                    lines.push(right);
+                    unparsed += 1;
+                }
+                (Some(left), None) => {
+                    lines.push(left);
+                    matched += 1;
+                }
+                (None, None) => break,
+            }
+        }
+        lines
+    }
+
+    fn field_state_for_generation(
+        &self,
+        session_id: &str,
+        generation: u64,
+    ) -> anyhow::Result<Arc<Mutex<Session>>> {
+        let session = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
+        {
+            let current = session.lock().unwrap();
+            current
+                .field_state
+                .as_ref()
+                .filter(|state| state.status.generation == generation && !state.status.failed)
+                .ok_or_else(|| anyhow::anyhow!("field generation is not available"))?;
+        }
+        Ok(session)
+    }
+
+    pub fn read_filtered_lines(
+        &self,
+        session_id: &str,
+        generation: u64,
+        start: u64,
+        count: u64,
+        include_unparsed: bool,
+    ) -> anyhow::Result<Vec<LogLine>> {
+        let session = self.field_state_for_generation(session_id, generation)?;
+        let (cache_path, originals) = {
+            let current = session.lock().unwrap();
+            let state = current.field_state.as_ref().unwrap();
+            let take = count as usize;
+            let originals = if include_unparsed {
+                let mut merged = Vec::with_capacity(take);
+                let (mut left, mut right, mut skipped) = (0usize, 0usize, 0u64);
+                while merged.len() < take
+                    && (left < state.matched_original_lines.len()
+                        || right < state.unparsed_original_lines.len())
+                {
+                    let matched = state.matched_original_lines.get(left).copied();
+                    let unparsed = state.unparsed_original_lines.get(right).copied();
+                    let next = match (matched, unparsed) {
+                        (Some(a), Some(b)) if a <= b => {
+                            left += 1;
+                            a
+                        }
+                        (_, Some(b)) => {
+                            right += 1;
+                            b
+                        }
+                        (Some(a), None) => {
+                            left += 1;
+                            a
+                        }
+                        (None, None) => break,
+                    };
+                    if skipped < start {
+                        skipped += 1;
+                    } else {
+                        merged.push(next);
+                    }
+                }
+                merged
+            } else {
+                let from = (start as usize).min(state.matched_original_lines.len());
+                let to = from
+                    .saturating_add(take)
+                    .min(state.matched_original_lines.len());
+                state.matched_original_lines[from..to].to_vec()
+            };
+            (current.cache_path.clone(), originals)
+        };
+        let mut file = File::open(cache_path)?;
+        let mut lines = Vec::with_capacity(originals.len());
+        for original in originals {
+            let (content, truncated) = Self::read_field_line_from(&mut file, &session, original)?;
+            lines.push(LogLine {
+                line_no: original + 1,
+                content,
+                truncated,
+            });
+        }
+        Ok(lines)
+    }
+
+    pub fn read_lines_with_field_matches(
+        &self,
+        session_id: &str,
+        generation: u64,
+        start: u64,
+        count: u64,
+    ) -> anyhow::Result<Vec<LogFieldMarkedLine>> {
+        let session = self.field_state_for_generation(session_id, generation)?;
+        let lines = self.read_lines(session_id, start, count)?;
+        let current = session.lock().unwrap();
+        let state = current.field_state.as_ref().unwrap();
+        Ok(lines
+            .into_iter()
+            .map(|line| {
+                let original = line.line_no - 1;
+                LogFieldMarkedLine {
+                    field_matched: state
+                        .matched_original_lines
+                        .binary_search(&original)
+                        .is_ok(),
+                    field_unparsed: state
+                        .unparsed_original_lines
+                        .binary_search(&original)
+                        .is_ok(),
+                    line,
+                }
+            })
+            .collect())
+    }
+
+    pub fn locate_log_field_anchor(
+        &self,
+        session_id: &str,
+        generation: u64,
+        original_line_no: u64,
+        mode: LogFieldResultMode,
+        include_unparsed: bool,
+    ) -> anyhow::Result<Option<LogFieldAnchorResult>> {
+        let session = self.field_state_for_generation(session_id, generation)?;
+        let total = self.line_count(session_id);
+        if total == 0 {
+            return Ok(None);
+        }
+        let target = original_line_no.saturating_sub(1).min(total - 1);
+        if matches!(mode, LogFieldResultMode::Highlight) {
+            return Ok(Some(LogFieldAnchorResult {
+                view_index: target,
+                line_no: target + 1,
+            }));
+        }
+        let current = session.lock().unwrap();
+        let state = current.field_state.as_ref().unwrap();
+        let next_in = |lines: &[u64]| match lines.binary_search(&target) {
+            Ok(index) => lines.get(index).copied(),
+            Err(index) => lines.get(index).copied(),
+        };
+        let previous_in = |lines: &[u64]| match lines.binary_search(&target) {
+            Ok(index) => lines.get(index).copied(),
+            Err(0) => None,
+            Err(index) => lines.get(index - 1).copied(),
+        };
+        let matched_next = next_in(&state.matched_original_lines);
+        let unparsed_next = include_unparsed
+            .then(|| next_in(&state.unparsed_original_lines))
+            .flatten();
+        let selected = match (matched_next, unparsed_next) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (left, right) => left.or(right),
+        }
+        .or_else(|| {
+            let matched = previous_in(&state.matched_original_lines);
+            let unparsed = include_unparsed
+                .then(|| previous_in(&state.unparsed_original_lines))
+                .flatten();
+            match (matched, unparsed) {
+                (Some(left), Some(right)) => Some(left.max(right)),
+                (left, right) => left.or(right),
+            }
+        });
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        let matched_before = state
+            .matched_original_lines
+            .partition_point(|line| *line < selected);
+        let unparsed_before = if include_unparsed {
+            state
+                .unparsed_original_lines
+                .partition_point(|line| *line < selected)
+        } else {
+            0
+        };
+        Ok(Some(LogFieldAnchorResult {
+            view_index: (matched_before + unparsed_before) as u64,
+            line_no: selected + 1,
+        }))
+    }
+
     fn is_word_character(character: char) -> bool {
         character.is_alphanumeric() || character == '_'
     }
@@ -818,6 +1467,17 @@ impl SessionManager {
                 current.indexing,
             )
         };
+        let allowed_lines = match request.field_view.as_ref() {
+            Some(view) if matches!(view.mode, LogFieldResultMode::Compact) => {
+                let field_session = self.field_state_for_generation(session_id, view.generation)?;
+                let current = field_session.lock().unwrap();
+                Some(Self::compact_view_lines(
+                    current.field_state.as_ref().unwrap(),
+                    view.include_unparsed,
+                ))
+            }
+            _ => None,
+        };
         if indexed_lines == 0 {
             return Ok(LogSearchResult {
                 matched: None,
@@ -838,6 +1498,12 @@ impl SessionManager {
                             last_max: Option<u64>|
          -> anyhow::Result<Option<LogSearchMatch>> {
             for line in from_line..to_line {
+                if matches!(
+                    allowed_lines.as_ref(),
+                    Some(lines) if lines.binary_search(&line).is_err()
+                ) {
+                    continue;
+                }
                 let text = Self::read_search_line(file, &session, line, encoding)?;
                 let minimum = (line == from_line)
                     .then_some(first_min)
@@ -867,6 +1533,12 @@ impl SessionManager {
                             last_min: Option<u64>|
          -> anyhow::Result<Option<LogSearchMatch>> {
             for line in (to_line_inclusive..=from_line).rev() {
+                if matches!(
+                    allowed_lines.as_ref(),
+                    Some(lines) if lines.binary_search(&line).is_err()
+                ) {
+                    continue;
+                }
                 let text = Self::read_search_line(file, &session, line, encoding)?;
                 let maximum = (line == from_line).then_some(first_max).flatten();
                 let minimum = (line == to_line_inclusive)
@@ -1110,6 +1782,7 @@ mod tests {
             whole_word: false,
             case_sensitive: false,
             wrap: false,
+            field_view: None,
         }
     }
 
@@ -1241,6 +1914,236 @@ mod tests {
         assert_eq!(result.matched.unwrap().line_no, 1);
         assert!(result.indexing);
         assert_eq!(result.indexed_lines, 2);
+    }
+
+    fn field_request(manager: &SessionManager, session_id: &str) -> LogFieldFilterRequest {
+        let layout = manager
+            .analyze_log_field_layout(session_id, SamplingPhase::Quick)
+            .unwrap()
+            .layout
+            .unwrap();
+        LogFieldFilterRequest {
+            layout,
+            conditions: vec![
+                LogFieldCondition::Discrete {
+                    field_id: "field-2".into(),
+                    values: vec!["INFO".into()],
+                },
+                LogFieldCondition::Discrete {
+                    field_id: "field-3".into(),
+                    values: vec!["Main".into()],
+                },
+            ],
+        }
+    }
+
+    fn build_fields(
+        manager: &SessionManager,
+        session_id: &str,
+        request: LogFieldFilterRequest,
+    ) -> u64 {
+        let build = manager
+            .prepare_log_field_filter(session_id, request)
+            .unwrap();
+        let generation = build.generation();
+        manager.apply_log_field_filter(build, |_| {});
+        generation
+    }
+
+    #[test]
+    fn field_windows_preserve_compact_original_order_and_highlight_full_order() {
+        let source = concat!(
+            "[2026-06-05 10:00:00] [INFO] [Main] - first hit\n",
+            "    at stack frame\n",
+            "[2026-06-05 10:00:02] [WARN] [Worker] - hidden hit\n",
+            "[2026-06-05 10:00:03] [ERROR] [Main] - hidden hit\n",
+            "[2026-06-05 10:00:04] [info] [Main] - final hit"
+        );
+        let (manager, session_id, _) = indexed_manager(source.as_bytes().to_vec());
+        let generation = build_fields(&manager, &session_id, field_request(&manager, &session_id));
+        let compact = manager
+            .read_filtered_lines(&session_id, generation, 0, 20, false)
+            .unwrap();
+        assert_eq!(
+            compact.iter().map(|line| line.line_no).collect::<Vec<_>>(),
+            vec![1, 5]
+        );
+        let with_unparsed = manager
+            .read_filtered_lines(&session_id, generation, 0, 20, true)
+            .unwrap();
+        assert_eq!(
+            with_unparsed
+                .iter()
+                .map(|line| line.line_no)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 5]
+        );
+        let marked = manager
+            .read_lines_with_field_matches(&session_id, generation, 0, 20)
+            .unwrap();
+        assert_eq!(
+            marked
+                .iter()
+                .map(|line| line.line.line_no)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert!(marked[0].field_matched);
+        assert!(marked[1].field_unparsed);
+        assert!(!marked[2].field_matched);
+
+        let next = manager
+            .locate_log_field_anchor(
+                &session_id,
+                generation,
+                3,
+                LogFieldResultMode::Compact,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!((next.view_index, next.line_no), (1, 5));
+        let original = manager
+            .locate_log_field_anchor(
+                &session_id,
+                generation,
+                3,
+                LogFieldResultMode::Highlight,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!((original.view_index, original.line_no), (2, 3));
+    }
+
+    #[test]
+    fn keyword_search_scope_follows_compact_or_highlight_field_view() {
+        let source = concat!(
+            "[2026-06-05 10:00:00] [INFO] [Main] - first hit\n",
+            "[2026-06-05 10:00:01] [WARN] [Worker] - hidden hit\n",
+            "[2026-06-05 10:00:02] [INFO] [Main] - final hit"
+        );
+        let (manager, session_id, _) = indexed_manager(source.as_bytes().to_vec());
+        let generation = build_fields(&manager, &session_id, field_request(&manager, &session_id));
+        let mut request = search_request("hit");
+        request.start_line = 1;
+        request.field_view = Some(LogFieldSearchView {
+            generation,
+            mode: LogFieldResultMode::Compact,
+            include_unparsed: false,
+        });
+        assert_eq!(
+            manager
+                .search_log(&session_id, &request)
+                .unwrap()
+                .matched
+                .unwrap()
+                .line_no,
+            3
+        );
+        request.field_view.as_mut().unwrap().mode = LogFieldResultMode::Highlight;
+        assert_eq!(
+            manager
+                .search_log(&session_id, &request)
+                .unwrap()
+                .matched
+                .unwrap()
+                .line_no,
+            2
+        );
+    }
+
+    #[test]
+    fn latest_generation_wins_and_encoding_or_close_releases_field_state() {
+        let source =
+            "[2026-06-05 10:00:00] [INFO] [Main] - one\n[2026-06-05 10:00:01] [WARN] [Main] - two";
+        let (manager, session_id, _) = indexed_manager(source.as_bytes().to_vec());
+        let request = field_request(&manager, &session_id);
+        let stale = manager
+            .prepare_log_field_filter(&session_id, request.clone())
+            .unwrap();
+        let current = manager
+            .prepare_log_field_filter(&session_id, request)
+            .unwrap();
+        let current_generation = current.generation();
+        let mut stale_events = Vec::new();
+        manager.apply_log_field_filter(stale, |event| stale_events.push(event));
+        assert!(stale_events.is_empty());
+        manager.apply_log_field_filter(current, |_| {});
+        assert_eq!(
+            manager.log_field_status(&session_id).unwrap().generation,
+            current_generation
+        );
+
+        let change = manager
+            .prepare_encoding_change(&session_id, "UTF-8")
+            .unwrap();
+        assert!(manager.log_field_status(&session_id).is_none());
+        manager.apply_encoding_change(change, |_| {});
+
+        let request = field_request(&manager, &session_id);
+        let pending = manager
+            .prepare_log_field_filter(&session_id, request)
+            .unwrap();
+        manager.close(&session_id);
+        manager.apply_log_field_filter(pending, |_| panic!("closed build emitted progress"));
+        assert!(manager.log_field_status(&session_id).is_none());
+    }
+
+    #[test]
+    fn field_refresh_extends_the_same_generation_after_index_growth() {
+        let source = "[2026-06-05 10:00:00] [INFO] [Main] - one\n";
+        let (manager, session_id, _) = indexed_manager(source.as_bytes().to_vec());
+        let generation = build_fields(&manager, &session_id, field_request(&manager, &session_id));
+        let session = manager
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .cloned()
+            .unwrap();
+        let appended = b"[2026-06-05 10:00:01] [INFO] [Main] - two";
+        {
+            let current = session.lock().unwrap();
+            let _cache_guard = current.cache_io.lock().unwrap();
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&current.cache_path)
+                .unwrap();
+            file.write_all(appended).unwrap();
+            file.flush().unwrap();
+        }
+        {
+            let mut current = session.lock().unwrap();
+            let end = std::fs::metadata(&current.cache_path).unwrap().len();
+            current.offsets.push(end);
+        }
+        let refresh = manager.prepare_log_field_refresh(&session_id).unwrap();
+        assert_eq!(refresh.generation(), generation);
+        manager.apply_log_field_filter(refresh, |_| {});
+        let status = manager.log_field_status(&session_id).unwrap();
+        assert_eq!(status.scanned_lines, 2);
+        assert_eq!(status.matched_lines, 2);
+    }
+
+    #[test]
+    fn field_scan_failure_falls_back_without_publishing_partial_windows() {
+        let source = "[2026-06-05 10:00:00] [INFO] [Main] - one";
+        let (manager, session_id, _) = indexed_manager(source.as_bytes().to_vec());
+        let build = manager
+            .prepare_log_field_filter(&session_id, field_request(&manager, &session_id))
+            .unwrap();
+        let generation = build.generation();
+        let cache_path = build.session.lock().unwrap().cache_path.clone();
+        std::fs::remove_file(cache_path).unwrap();
+        let mut events = Vec::new();
+        manager.apply_log_field_filter(build, |event| events.push(event));
+        let status = manager.log_field_status(&session_id).unwrap();
+        assert!(status.failed);
+        assert!(events.last().unwrap().failed);
+        assert!(manager
+            .read_filtered_lines(&session_id, generation, 0, 10, false)
+            .is_err());
     }
 
     #[test]

@@ -8,8 +8,10 @@ pub const QUICK_SAMPLE_MAX_BYTES: usize = 256 * 1024;
 pub const BACKGROUND_SAMPLE_MAX_LINES: usize = 10_000;
 pub const BACKGROUND_SAMPLE_MAX_BYTES: usize = 8 * 1024 * 1024;
 pub const MAIN_LAYOUT_THRESHOLD: f64 = 0.70;
+pub const MAX_DISCRETE_VALUES: usize = 1_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SamplingPhase {
     Quick,
     Background,
@@ -58,7 +60,11 @@ pub struct LogFieldDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum LayoutPattern {
     Bracketed { segment_count: usize },
     Chromium,
@@ -75,7 +81,8 @@ pub struct LogFieldLayout {
     pub source: LayoutSource,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LayoutAnalysis {
     pub layout: Option<LogFieldLayout>,
     pub sampled_non_empty_lines: usize,
@@ -224,6 +231,341 @@ fn parse_line(line: &str) -> Option<ParsedLine> {
     parse_chromium(line)
         .or_else(|| parse_bracketed(line))
         .or_else(|| parse_android_logcat(line))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum LogFieldCondition {
+    Discrete {
+        field_id: String,
+        values: Vec<String>,
+    },
+    Time {
+        field_id: String,
+        start: Option<String>,
+        end: Option<String>,
+    },
+    Text {
+        field_id: String,
+        query: String,
+        case_sensitive: bool,
+    },
+}
+
+impl LogFieldCondition {
+    fn field_id(&self) -> &str {
+        match self {
+            Self::Discrete { field_id, .. }
+            | Self::Time { field_id, .. }
+            | Self::Text { field_id, .. } => field_id,
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        match self {
+            Self::Discrete { values, .. } => !values.is_empty(),
+            Self::Time { start, end, .. } => start.is_some() || end.is_some(),
+            Self::Text { query, .. } => !query.is_empty(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldCandidateValue {
+    pub value: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFieldStatistics {
+    pub field_id: String,
+    pub candidates: Vec<FieldCandidateValue>,
+    pub high_cardinality: bool,
+    pub min_time: Option<String>,
+    pub max_time: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogFieldScanResult {
+    /// Zero-based original line indexes, in source order.
+    pub matched_lines: Vec<u64>,
+    /// Zero-based original line indexes, in source order.
+    pub unparsed_lines: Vec<u64>,
+    pub statistics: Vec<LogFieldStatistics>,
+    pub scanned_lines: u64,
+}
+
+#[derive(Debug, Clone)]
+struct StatisticsAccumulator {
+    values: BTreeMap<String, u64>,
+    high_cardinality: bool,
+    min_time: Option<String>,
+    max_time: Option<String>,
+}
+
+impl StatisticsAccumulator {
+    fn new() -> Self {
+        Self {
+            values: BTreeMap::new(),
+            high_cardinality: false,
+            min_time: None,
+            max_time: None,
+        }
+    }
+}
+
+fn extracted_values(layout: &LogFieldLayout, line: &str) -> Option<Vec<String>> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let ranges = if layout.pattern == LayoutPattern::ManualColumns {
+        layout
+            .fields
+            .iter()
+            .map(|field| {
+                let start = field.boundary.start;
+                let end = field.boundary.end.unwrap_or(line.len()).min(line.len());
+                (start <= end && line.is_char_boundary(start) && line.is_char_boundary(end))
+                    .then_some((start, end))
+            })
+            .collect::<Option<Vec<_>>>()?
+    } else {
+        let parsed = parse_line(line)?;
+        if parsed.pattern != layout.pattern || parsed.fields.len() != layout.fields.len() {
+            return None;
+        }
+        parsed
+            .fields
+            .into_iter()
+            .map(|field| (field.start, field.end.unwrap_or(line.len()).min(line.len())))
+            .collect()
+    };
+    let values = ranges
+        .into_iter()
+        .map(|(start, end)| line[start..end].trim().to_string())
+        .collect::<Vec<_>>();
+    let valid_times = layout
+        .fields
+        .iter()
+        .zip(&values)
+        .all(|(field, value)| field.field_type != LogFieldType::Time || looks_like_time(value));
+    valid_times.then_some(values)
+}
+
+fn contains_text(value: &str, query: &str, case_sensitive: bool) -> bool {
+    if case_sensitive {
+        value.contains(query)
+    } else {
+        value.to_lowercase().contains(&query.to_lowercase())
+    }
+}
+
+fn line_matches(
+    layout: &LogFieldLayout,
+    values: &[String],
+    conditions: &[LogFieldCondition],
+) -> bool {
+    conditions
+        .iter()
+        .filter(|item| item.is_active())
+        .all(|condition| {
+            let Some(index) = layout
+                .fields
+                .iter()
+                .position(|field| field.id == condition.field_id())
+            else {
+                return false;
+            };
+            let field = &layout.fields[index];
+            let value = &values[index];
+            match condition {
+                LogFieldCondition::Discrete { values, .. } => {
+                    if field.field_type == LogFieldType::Level {
+                        let canonical = value.to_uppercase();
+                        values
+                            .iter()
+                            .any(|selected| selected.to_uppercase() == canonical)
+                    } else {
+                        values.iter().any(|selected| selected == value)
+                    }
+                }
+                LogFieldCondition::Time { start, end, .. } => {
+                    start.as_ref().map_or(true, |start| value >= start)
+                        && end.as_ref().map_or(true, |end| value <= end)
+                }
+                LogFieldCondition::Text {
+                    query,
+                    case_sensitive,
+                    ..
+                } => contains_text(value, query, *case_sensitive),
+            }
+        })
+}
+
+fn update_statistics(
+    layout: &LogFieldLayout,
+    values: &[String],
+    statistics: &mut [StatisticsAccumulator],
+) {
+    for ((field, value), accumulator) in layout.fields.iter().zip(values).zip(statistics) {
+        match field.field_type {
+            LogFieldType::Level | LogFieldType::Discrete => {
+                if accumulator.high_cardinality {
+                    continue;
+                }
+                let candidate = if field.field_type == LogFieldType::Level {
+                    value.to_uppercase()
+                } else {
+                    value.clone()
+                };
+                if !accumulator.values.contains_key(&candidate)
+                    && accumulator.values.len() == MAX_DISCRETE_VALUES
+                {
+                    accumulator.values.clear();
+                    accumulator.high_cardinality = true;
+                } else {
+                    *accumulator.values.entry(candidate).or_insert(0) += 1;
+                }
+            }
+            LogFieldType::Time => {
+                if accumulator
+                    .min_time
+                    .as_ref()
+                    .map_or(true, |current| value < current)
+                {
+                    accumulator.min_time = Some(value.clone());
+                }
+                if accumulator
+                    .max_time
+                    .as_ref()
+                    .map_or(true, |current| value > current)
+                {
+                    accumulator.max_time = Some(value.clone());
+                }
+            }
+            LogFieldType::Text => {}
+        }
+    }
+}
+
+/// Scan a bounded session source without retaining decoded lines. Returning `None` means the
+/// caller cancelled this generation. Reader errors are propagated so callers can fall back to the
+/// unfiltered source instead of publishing a partial result as complete.
+pub fn scan_field_lines<R, C, P>(
+    total_lines: u64,
+    layout: &LogFieldLayout,
+    conditions: &[LogFieldCondition],
+    read_line: R,
+    cancelled: C,
+    progress: P,
+) -> anyhow::Result<Option<LogFieldScanResult>>
+where
+    R: FnMut(u64) -> anyhow::Result<(String, bool)>,
+    C: FnMut() -> bool,
+    P: FnMut(u64, &[u64], &[u64]),
+{
+    extend_field_lines(
+        total_lines,
+        layout,
+        conditions,
+        None,
+        read_line,
+        cancelled,
+        progress,
+    )
+}
+
+pub fn extend_field_lines<R, C, P>(
+    total_lines: u64,
+    layout: &LogFieldLayout,
+    conditions: &[LogFieldCondition],
+    initial: Option<LogFieldScanResult>,
+    mut read_line: R,
+    mut cancelled: C,
+    mut progress: P,
+) -> anyhow::Result<Option<LogFieldScanResult>>
+where
+    R: FnMut(u64) -> anyhow::Result<(String, bool)>,
+    C: FnMut() -> bool,
+    P: FnMut(u64, &[u64], &[u64]),
+{
+    let start_line = initial.as_ref().map_or(0, |value| value.scanned_lines);
+    let mut matched_lines = initial
+        .as_ref()
+        .map_or_else(Vec::new, |value| value.matched_lines.clone());
+    let mut unparsed_lines = initial
+        .as_ref()
+        .map_or_else(Vec::new, |value| value.unparsed_lines.clone());
+    let mut statistics = initial.map_or_else(
+        || vec![StatisticsAccumulator::new(); layout.fields.len()],
+        |value| {
+            value
+                .statistics
+                .into_iter()
+                .map(|field| StatisticsAccumulator {
+                    values: field
+                        .candidates
+                        .into_iter()
+                        .map(|candidate| (candidate.value, candidate.count))
+                        .collect(),
+                    high_cardinality: field.high_cardinality,
+                    min_time: field.min_time,
+                    max_time: field.max_time,
+                })
+                .collect()
+        },
+    );
+    if statistics.len() != layout.fields.len() || start_line > total_lines {
+        anyhow::bail!("field scan state does not match the current layout");
+    }
+    for line_index in start_line..total_lines {
+        if cancelled() {
+            return Ok(None);
+        }
+        let (line, truncated) = read_line(line_index)?;
+        if truncated {
+            unparsed_lines.push(line_index);
+        } else if let Some(values) = extracted_values(layout, &line) {
+            update_statistics(layout, &values, &mut statistics);
+            if line_matches(layout, &values, conditions) {
+                matched_lines.push(line_index);
+            }
+        } else {
+            unparsed_lines.push(line_index);
+        }
+        let scanned = line_index + 1;
+        if scanned % 256 == 0 || scanned == total_lines {
+            progress(scanned, &matched_lines, &unparsed_lines);
+        }
+    }
+    let statistics = layout
+        .fields
+        .iter()
+        .zip(statistics)
+        .map(|(field, accumulator)| LogFieldStatistics {
+            field_id: field.id.clone(),
+            candidates: accumulator
+                .values
+                .into_iter()
+                .map(|(value, count)| FieldCandidateValue { value, count })
+                .collect(),
+            high_cardinality: accumulator.high_cardinality,
+            min_time: accumulator.min_time,
+            max_time: accumulator.max_time,
+        })
+        .collect();
+    Ok(Some(LogFieldScanResult {
+        matched_lines,
+        unparsed_lines,
+        statistics,
+        scanned_lines: total_lines,
+    }))
 }
 
 fn parsed_field(
@@ -903,5 +1245,134 @@ mod tests {
             confidence: 1.0,
             ..improved
         }));
+    }
+
+    #[test]
+    fn field_scan_applies_same_field_or_cross_field_and_and_closed_time_ranges() {
+        let lines = [
+            "[2026-06-05 10:00:00] [INFO] [Main] - first".to_string(),
+            "[2026-06-05 11:00:00] [warn] [Main] - second".to_string(),
+            "[2026-06-05 12:00:00] [ERROR] [Main] - third".to_string(),
+            "[2026-06-05 11:30:00] [INFO] [Worker] - fourth".to_string(),
+            "    at stack frame".to_string(),
+        ];
+        let layout = analyze_layout(4, SamplingPhase::Quick, |index| lines.get(index).cloned())
+            .layout
+            .unwrap();
+        let conditions = vec![
+            LogFieldCondition::Discrete {
+                field_id: "field-2".into(),
+                values: vec!["INFO".into(), "WARN".into()],
+            },
+            LogFieldCondition::Discrete {
+                field_id: "field-3".into(),
+                values: vec!["Main".into()],
+            },
+            LogFieldCondition::Time {
+                field_id: "field-1".into(),
+                start: Some("2026-06-05 10:00:00".into()),
+                end: Some("2026-06-05 11:00:00".into()),
+            },
+        ];
+        let result = scan_field_lines(
+            lines.len() as u64,
+            &layout,
+            &conditions,
+            |index| Ok((lines[index as usize].clone(), false)),
+            || false,
+            |_, _, _| {},
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.matched_lines, vec![0, 1]);
+        assert_eq!(result.unparsed_lines, vec![4]);
+        assert_eq!(result.statistics[1].candidates[0].value, "ERROR");
+        assert_eq!(result.statistics[1].candidates[1].value, "INFO");
+        assert_eq!(result.statistics[1].candidates[1].count, 2);
+        assert_eq!(
+            result.statistics[0].min_time.as_deref(),
+            Some("2026-06-05 10:00:00")
+        );
+        assert_eq!(
+            result.statistics[0].max_time.as_deref(),
+            Some("2026-06-05 12:00:00")
+        );
+    }
+
+    #[test]
+    fn high_cardinality_candidates_are_removed_instead_of_publishing_a_partial_list() {
+        let lines = (0..=MAX_DISCRETE_VALUES)
+            .map(|index| format!("[2026-06-05 10:00:00] [INFO] [Module-{index}] - message"))
+            .collect::<Vec<_>>();
+        let layout = analyze_layout(lines.len(), SamplingPhase::Quick, |index| {
+            lines.get(index).cloned()
+        })
+        .layout
+        .unwrap();
+        let result = scan_field_lines(
+            lines.len() as u64,
+            &layout,
+            &[],
+            |index| Ok((lines[index as usize].clone(), false)),
+            || false,
+            |_, _, _| {},
+        )
+        .unwrap()
+        .unwrap();
+        assert!(result.statistics[2].high_cardinality);
+        assert!(result.statistics[2].candidates.is_empty());
+    }
+
+    #[test]
+    fn field_scan_cancellation_and_reader_failure_never_return_partial_success() {
+        let lines = vec!["[2026-06-05 10:00:00] [INFO] [Main] - message".to_string(); 600];
+        let layout = analyze_lines(&lines, SamplingPhase::Quick).layout.unwrap();
+        let reads = std::cell::Cell::new(0usize);
+        let cancelled = scan_field_lines(
+            lines.len() as u64,
+            &layout,
+            &[],
+            |index| {
+                reads.set(reads.get() + 1);
+                Ok((lines[index as usize].clone(), false))
+            },
+            || reads.get() >= 10,
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert!(cancelled.is_none());
+
+        let failed = scan_field_lines(
+            lines.len() as u64,
+            &layout,
+            &[],
+            |index| {
+                if index == 4 {
+                    anyhow::bail!("injected read failure");
+                }
+                Ok((lines[index as usize].clone(), false))
+            },
+            || false,
+            |_, _, _| {},
+        );
+        assert!(failed.is_err());
+    }
+
+    #[test]
+    fn field_layout_and_conditions_use_the_typescript_camel_case_contract() {
+        let pattern = serde_json::to_value(LayoutPattern::Bracketed { segment_count: 3 }).unwrap();
+        assert_eq!(pattern["kind"], "bracketed");
+        assert_eq!(pattern["segmentCount"], 3);
+        let condition = serde_json::to_value(LogFieldCondition::Text {
+            field_id: "field-4".into(),
+            query: "Error".into(),
+            case_sensitive: true,
+        })
+        .unwrap();
+        assert_eq!(condition["kind"], "text");
+        assert_eq!(condition["fieldId"], "field-4");
+        assert_eq!(condition["caseSensitive"], true);
+        let decoded: LogFieldCondition = serde_json::from_value(condition).unwrap();
+        assert!(matches!(decoded, LogFieldCondition::Text { .. }));
     }
 }
