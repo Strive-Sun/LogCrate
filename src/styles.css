@@ -1140,10 +1140,21 @@ body.resizing {
   background: color-mix(in srgb, var(--accent) 14%, var(--bg));
 }
 .log-status-foot {
+  --log-status-control-gap: 24px;
+  --log-status-control-width: 120px;
+
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: var(--log-status-control-gap);
   min-width: 0;
+}
+.log-status-foot > .encoding-select,
+.log-field-mode-select,
+.log-field-unparsed-toggle,
+.log-field-foot-button,
+.log-layout-menu {
+  flex: 0 0 var(--log-status-control-width);
+  width: var(--log-status-control-width);
 }
 .log-filter-menu {
   display: contents;
@@ -1154,7 +1165,7 @@ body.resizing {
 .log-filter-menu > .log-filter-menu-content {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: var(--log-status-control-gap);
 }
 .log-filter-menu > .log-filter-menu-summary,
 .log-field-foot-button,
@@ -1181,8 +1192,12 @@ body.resizing {
 .log-field-unparsed-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 6px;
   white-space: nowrap;
+}
+.log-field-foot-button,
+.log-layout-menu summary {
+  text-align: left;
 }
 .log-layout-menu {
   position: relative;
