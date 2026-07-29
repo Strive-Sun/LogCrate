@@ -18,8 +18,25 @@ use crate::log_fields::{
 pub const MAX_UNCOMPRESSED: u64 = 2 * 1024 * 1024 * 1024;
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 const MAX_SESSIONS: usize = 5;
+const FIELD_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 static SESSION_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn should_publish_field_progress(
+    last_published: &mut Option<Instant>,
+    now: Instant,
+    scanned_lines: u64,
+    total_lines: u64,
+) -> bool {
+    let due = scanned_lines >= total_lines
+        || last_published
+            .map(|last| now.duration_since(last) >= FIELD_PROGRESS_INTERVAL)
+            .unwrap_or(true);
+    if due {
+        *last_published = Some(now);
+    }
+    due
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -166,6 +183,7 @@ struct LogFieldSessionState {
     status: LogFieldStatus,
     matched_original_lines: Vec<u64>,
     unparsed_original_lines: Vec<u64>,
+    scan_running: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -589,32 +607,47 @@ impl SessionManager {
 
         match result {
             Ok(indexed_lines) => {
-                let current = session.lock().unwrap();
-                let detected = current.detected_encoding.unwrap_or(encoding_rs::UTF_8);
+                let (detected_encoding, effective_encoding) = {
+                    let current = session.lock().unwrap();
+                    (
+                        Self::encoding_name(
+                            current.detected_encoding.unwrap_or(encoding_rs::UTF_8),
+                        ),
+                        Self::encoding_name(current.effective_encoding),
+                    )
+                };
                 progress(IndexProgress {
                     session_id: session_id.to_string(),
                     percent: 100,
                     indexed_lines,
                     done: true,
                     failed: false,
-                    detected_encoding: Self::encoding_name(detected),
-                    effective_encoding: Self::encoding_name(current.effective_encoding),
+                    detected_encoding,
+                    effective_encoding,
                     error: None,
                 });
             }
             Err(_) if cancel.load(Ordering::Acquire) => {}
             Err(error) => {
-                let mut current = session.lock().unwrap();
-                current.indexing = false;
-                let detected = current.detected_encoding.unwrap_or(encoding_rs::UTF_8);
+                let (indexed_lines, detected_encoding, effective_encoding) = {
+                    let mut current = session.lock().unwrap();
+                    current.indexing = false;
+                    (
+                        current.line_count(),
+                        Self::encoding_name(
+                            current.detected_encoding.unwrap_or(encoding_rs::UTF_8),
+                        ),
+                        Self::encoding_name(current.effective_encoding),
+                    )
+                };
                 progress(IndexProgress {
                     session_id: session_id.to_string(),
                     percent: 100,
-                    indexed_lines: current.line_count(),
+                    indexed_lines,
                     done: true,
                     failed: true,
-                    detected_encoding: Self::encoding_name(detected),
-                    effective_encoding: Self::encoding_name(current.effective_encoding),
+                    detected_encoding,
+                    effective_encoding,
                     error: Some(error.to_string()),
                 });
             }
@@ -842,6 +875,7 @@ impl SessionManager {
                 },
                 matched_original_lines: Vec::new(),
                 unparsed_original_lines: Vec::new(),
+                scan_running: true,
             });
             (generation, total_lines)
         };
@@ -885,10 +919,15 @@ impl SessionManager {
         let session = self.sessions.lock().unwrap().get(session_id).cloned()?;
         let mut current = session.lock().unwrap();
         let total_lines = current.line_count();
+        let indexing = current.indexing;
         let state = current.field_state.as_mut()?;
-        if !state.status.done || state.status.failed || state.status.scanned_lines >= total_lines {
+        if state.scan_running
+            || state.status.failed
+            || (state.status.scanned_lines >= total_lines && (indexing || state.status.done))
+        {
             return None;
         }
+        state.scan_running = true;
         state.status.done = false;
         state.status.total_lines = total_lines;
         let initial = LogFieldScanResult {
@@ -955,6 +994,7 @@ impl SessionManager {
             .initial
             .as_ref()
             .map_or(0, |value| value.unparsed_lines.len());
+        let mut last_progress_emit = None;
         let result = (|| -> anyhow::Result<Option<LogFieldScanResult>> {
             let cache_path = session.lock().unwrap().cache_path.clone();
             let mut file = File::open(cache_path)?;
@@ -989,17 +1029,24 @@ impl SessionManager {
                             state.status.unparsed_lines = unparsed.len() as u64;
                         }
                         drop(current);
-                        progress(LogFieldProgress {
-                            session_id: session_id.clone(),
-                            generation,
-                            scanned_lines: scanned,
-                            matched_lines: matched.len() as u64,
-                            unparsed_lines: unparsed.len() as u64,
+                        if should_publish_field_progress(
+                            &mut last_progress_emit,
+                            Instant::now(),
+                            scanned,
                             total_lines,
-                            done: false,
-                            failed: false,
-                            error: None,
-                        });
+                        ) {
+                            progress(LogFieldProgress {
+                                session_id: session_id.clone(),
+                                generation,
+                                scanned_lines: scanned,
+                                matched_lines: matched.len() as u64,
+                                unparsed_lines: unparsed.len() as u64,
+                                total_lines,
+                                done: false,
+                                failed: false,
+                                error: None,
+                            });
+                        }
                     },
                 )
             } else {
@@ -1028,17 +1075,24 @@ impl SessionManager {
                             state.status.unparsed_lines = unparsed.len() as u64;
                         }
                         drop(current);
-                        progress(LogFieldProgress {
-                            session_id: session_id.clone(),
-                            generation,
-                            scanned_lines: scanned,
-                            matched_lines: matched.len() as u64,
-                            unparsed_lines: unparsed.len() as u64,
+                        if should_publish_field_progress(
+                            &mut last_progress_emit,
+                            Instant::now(),
+                            scanned,
                             total_lines,
-                            done: false,
-                            failed: false,
-                            error: None,
-                        });
+                        ) {
+                            progress(LogFieldProgress {
+                                session_id: session_id.clone(),
+                                generation,
+                                scanned_lines: scanned,
+                                matched_lines: matched.len() as u64,
+                                unparsed_lines: unparsed.len() as u64,
+                                total_lines,
+                                done: false,
+                                failed: false,
+                                error: None,
+                            });
+                        }
                     },
                 )
             }
@@ -1049,6 +1103,8 @@ impl SessionManager {
                 if current.field_generation != generation {
                     return;
                 }
+                let fully_indexed =
+                    !current.indexing && result.scanned_lines >= current.line_count();
                 if let Some(state) = current.field_state.as_mut() {
                     state.matched_original_lines = result.matched_lines;
                     state.unparsed_original_lines = result.unparsed_lines;
@@ -1056,7 +1112,8 @@ impl SessionManager {
                     state.status.scanned_lines = result.scanned_lines;
                     state.status.matched_lines = state.matched_original_lines.len() as u64;
                     state.status.unparsed_lines = state.unparsed_original_lines.len() as u64;
-                    state.status.done = true;
+                    state.status.done = fully_indexed;
+                    state.scan_running = false;
                 }
                 let state = current.field_state.as_ref().unwrap();
                 let event = LogFieldProgress {
@@ -1066,7 +1123,7 @@ impl SessionManager {
                     matched_lines: state.status.matched_lines,
                     unparsed_lines: state.status.unparsed_lines,
                     total_lines,
-                    done: true,
+                    done: fully_indexed,
                     failed: false,
                     error: None,
                 };
@@ -1091,6 +1148,9 @@ impl SessionManager {
                 } else {
                     0
                 };
+                if let Some(state) = current.field_state.as_mut() {
+                    state.scan_running = false;
+                }
                 drop(current);
                 progress(LogFieldProgress {
                     session_id,
@@ -1732,6 +1792,33 @@ mod tests {
     }
 
     #[test]
+    fn field_progress_publication_is_time_bounded_and_always_publishes_completion() {
+        let started = Instant::now();
+        let mut last = None;
+        assert!(should_publish_field_progress(
+            &mut last, started, 256, 10_000
+        ));
+        assert!(!should_publish_field_progress(
+            &mut last,
+            started + Duration::from_millis(49),
+            9_000,
+            10_000,
+        ));
+        assert!(should_publish_field_progress(
+            &mut last,
+            started + Duration::from_millis(49),
+            10_000,
+            10_000,
+        ));
+        assert!(should_publish_field_progress(
+            &mut last,
+            started + Duration::from_millis(199),
+            10_001,
+            20_000,
+        ));
+    }
+
+    #[test]
     fn publishes_readable_lines_before_indexing_finishes() {
         let manager = Arc::new(SessionManager::default());
         let open = manager.prepare("test.log".into(), 12).unwrap();
@@ -1761,6 +1848,29 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].content, "two");
         assert_eq!(lines[1].content, "last");
+    }
+
+    #[test]
+    fn terminal_progress_callback_can_reenter_session_queries() {
+        let manager = Arc::new(SessionManager::default());
+        let open = manager.prepare("terminal.log".into(), 8).unwrap();
+        let session_id = open.session_id.clone();
+        let worker_manager = manager.clone();
+        let callback_manager = manager.clone();
+        let callback_session_id = session_id.clone();
+        let (tx, rx) = mpsc::channel();
+
+        let worker = std::thread::spawn(move || {
+            worker_manager.index(&session_id, 8, Cursor::new(b"one\ntwo\n"), |event| {
+                if event.done {
+                    tx.send(callback_manager.line_count(&callback_session_id))
+                        .unwrap();
+                }
+            });
+        });
+
+        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), 2);
+        worker.join().unwrap();
     }
 
     #[test]
@@ -2124,6 +2234,78 @@ mod tests {
         let status = manager.log_field_status(&session_id).unwrap();
         assert_eq!(status.scanned_lines, 2);
         assert_eq!(status.matched_lines, 2);
+    }
+
+    #[test]
+    fn field_progress_only_finishes_after_line_indexing_reaches_terminal_state() {
+        let source = "[2026-06-05 10:00:00] [INFO] [Main] - one\n";
+        let (manager, session_id, _) = indexed_manager(source.as_bytes().to_vec());
+        let session = manager
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .cloned()
+            .unwrap();
+        session.lock().unwrap().indexing = true;
+
+        let build = manager
+            .prepare_log_field_filter(&session_id, field_request(&manager, &session_id))
+            .unwrap();
+        let mut events = Vec::new();
+        manager.apply_log_field_filter(build, |event| events.push(event));
+        assert!(!events.last().unwrap().done);
+        assert!(!manager.log_field_status(&session_id).unwrap().done);
+
+        session.lock().unwrap().indexing = false;
+        let terminal = manager.prepare_log_field_refresh(&session_id).unwrap();
+        manager.apply_log_field_filter(terminal, |event| events.push(event));
+        assert!(events.last().unwrap().done);
+        assert!(manager.log_field_status(&session_id).unwrap().done);
+    }
+
+    #[test]
+    fn field_progress_does_not_finish_from_a_stale_index_snapshot() {
+        let source = "[2026-06-05 10:00:00] [INFO] [Main] - one\n";
+        let (manager, session_id, _) = indexed_manager(source.as_bytes().to_vec());
+        let build = manager
+            .prepare_log_field_filter(&session_id, field_request(&manager, &session_id))
+            .unwrap();
+        let session = manager
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .cloned()
+            .unwrap();
+        let appended = b"[2026-06-05 10:00:01] [INFO] [Main] - two";
+        {
+            let current = session.lock().unwrap();
+            let _cache_guard = current.cache_io.lock().unwrap();
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&current.cache_path)
+                .unwrap();
+            file.write_all(appended).unwrap();
+            file.flush().unwrap();
+        }
+        {
+            let mut current = session.lock().unwrap();
+            let end = std::fs::metadata(&current.cache_path).unwrap().len();
+            current.offsets.push(end);
+        }
+
+        let mut events = Vec::new();
+        manager.apply_log_field_filter(build, |event| events.push(event));
+        assert!(!events.last().unwrap().done);
+
+        let refresh = manager.prepare_log_field_refresh(&session_id).unwrap();
+        manager.apply_log_field_filter(refresh, |event| events.push(event));
+        assert!(events.last().unwrap().done);
+        assert_eq!(
+            manager.log_field_status(&session_id).unwrap().scanned_lines,
+            2
+        );
     }
 
     #[test]

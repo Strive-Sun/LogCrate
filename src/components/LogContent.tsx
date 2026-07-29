@@ -287,6 +287,11 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
       try {
         const generation = await api.setLogFieldFilter(entryKey, { layout, conditions });
         if (requestGeneration !== fieldRequestGeneration.current) return;
+        // Clearing at request start prevents the previous view from lingering, but that render can
+        // still enqueue another page read against the previous field generation. Advance the cache
+        // namespace again when the backend activates the new generation so that response cannot
+        // populate the new view.
+        clearLineCache();
         setFieldGeneration(generation);
         fieldUnsub.current = api.subscribeLogFieldProgress(entryKey, generation, (progress) => {
           if (requestGeneration !== fieldRequestGeneration.current) return;

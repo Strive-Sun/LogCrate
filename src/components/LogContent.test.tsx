@@ -530,6 +530,19 @@ test('late window responses cannot overwrite a newer cache generation', () => {
   );
   assert.notEqual(next, current);
   assert.equal(next.get(1)?.content, 'CURRENT view');
+
+  // A filter request clears once when it starts. The resulting render may enqueue another read
+  // against the previous field generation, so activating the backend generation advances the
+  // namespace a second time and rejects that intermediate response as well.
+  const oldGenerationRefetch = mergeLogLineWindow(
+    next,
+    0,
+    [{ lineNo: 1, content: 'OLD generation refetch', truncated: false }],
+    5,
+    6,
+  );
+  assert.equal(oldGenerationRefetch, next);
+  assert.equal(oldGenerationRefetch.get(0)?.content, 'NEW highlighted view');
 });
 
 test('Chinese field filtering labels are available', async () => {
