@@ -295,7 +295,10 @@ test('field bar uses real fields, multi-selects values, switches result mode, an
     assert.equal(condition?.kind, 'discrete');
     assert.deepEqual(condition?.kind === 'discrete' ? condition.values : [], ['INFO', 'WARN']);
   });
-  harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Highlight matches' }));
+  const resultMode = harness.screen.getByRole('combobox', { name: 'Filter result mode' });
+  assert.equal((resultMode as HTMLSelectElement).value, 'compact');
+  harness.fireEvent.change(resultMode, { target: { value: 'highlight' } });
+  assert.equal((resultMode as HTMLSelectElement).value, 'highlight');
   assert.equal(
     (harness.screen.getByRole('checkbox', { name: 'Show unparsed' }) as HTMLInputElement).disabled,
     true,
@@ -580,8 +583,12 @@ test('Chinese field filtering labels are available', async () => {
   api.subscribeLogFieldProgress = () => () => undefined;
   renderLog();
   await harness.waitFor(() => assert.ok(harness.screen.getByRole('button', { name: /^级别 ▾$/ })));
-  assert.ok(harness.screen.getByRole('button', { name: '仅显示匹配' }));
-  assert.ok(harness.screen.getByRole('button', { name: '高亮匹配' }));
+  const resultMode = harness.screen.getByRole('combobox', { name: '筛选结果模式' });
+  assert.equal((resultMode as HTMLSelectElement).value, 'compact');
+  assert.deepEqual(
+    Array.from((resultMode as HTMLSelectElement).options).map((option) => option.text),
+    ['仅显示匹配', '高亮匹配'],
+  );
   assert.ok(harness.screen.getByRole('checkbox', { name: '显示未解析' }));
   assert.ok(harness.screen.getByRole('button', { name: '清除筛选' }));
   assert.ok(harness.screen.getByText('有效的布局调整会自动保存。'));

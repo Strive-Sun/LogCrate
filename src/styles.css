@@ -1139,12 +1139,6 @@ body.resizing {
 .log-field-matched .ln {
   background: color-mix(in srgb, var(--accent) 14%, var(--bg));
 }
-.log-field-mode {
-  display: inline-flex;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-}
 .log-status-foot {
   display: flex;
   align-items: center;
@@ -1163,7 +1157,6 @@ body.resizing {
   gap: 16px;
 }
 .log-filter-menu > .log-filter-menu-summary,
-.log-field-mode button,
 .log-field-foot-button,
 .log-layout-menu summary,
 .log-layout-menu button {
@@ -1173,9 +1166,17 @@ body.resizing {
   font: inherit;
   cursor: pointer;
 }
-.log-field-mode button.active {
-  background: var(--accent);
-  color: white;
+.log-field-mode-select {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.log-field-mode-select:disabled {
+  cursor: default;
+  opacity: 0.65;
 }
 .log-field-unparsed-toggle {
   display: inline-flex;

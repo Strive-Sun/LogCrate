@@ -946,24 +946,16 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
             {fieldConditions.length > 0 ? ` (${fieldConditions.length})` : ''} ▾
           </button>
           <div className="log-filter-menu-content">
-            <div className="log-field-mode" aria-label={t('fields.resultMode')}>
-              <button
-                type="button"
-                className={fieldMode === 'compact' ? 'active' : ''}
-                disabled={!fieldLayout}
-                onClick={() => switchFieldMode('compact')}
-              >
-                {t('fields.compact')}
-              </button>
-              <button
-                type="button"
-                className={fieldMode === 'highlight' ? 'active' : ''}
-                disabled={!fieldLayout}
-                onClick={() => switchFieldMode('highlight')}
-              >
-                {t('fields.highlight')}
-              </button>
-            </div>
+            <select
+              className="log-field-mode-select"
+              aria-label={t('fields.resultMode')}
+              value={fieldMode}
+              disabled={!fieldLayout}
+              onChange={(event) => switchFieldMode(event.target.value as LogFieldResultMode)}
+            >
+              <option value="compact">{t('fields.compact')}</option>
+              <option value="highlight">{t('fields.highlight')}</option>
+            </select>
             <label
               className="log-field-unparsed-toggle"
               title={fieldMode === 'highlight' ? t('fields.unparsedHighlightHint') : undefined}
