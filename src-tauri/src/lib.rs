@@ -1,5 +1,6 @@
 mod archive;
 mod index;
+pub mod log_fields;
 mod macos_file_access;
 #[cfg(windows)]
 pub mod ntfs;
