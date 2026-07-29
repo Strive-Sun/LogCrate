@@ -38,6 +38,14 @@ function updatedLayout(layout: LogFieldLayout, fields: LogFieldDefinition[]): Lo
   return { ...layout, fields, pattern: { kind: 'manualColumns' }, source: 'manual', confidence: 1 };
 }
 
+function fieldTrackOffset(fields: LogFieldDefinition[], index: number) {
+  const field = fields[index];
+  const previous = fields[index - 1];
+  if (!previous) return field.boundary.start;
+  if (previous.boundary.end === null) return 0;
+  return Math.max(0, field.boundary.start - previous.boundary.end);
+}
+
 export function LogFieldFilterBar({
   layout,
   conditions,
@@ -142,18 +150,23 @@ export function LogFieldFilterBar({
       {dragBoundary !== null && (
         <span
           className="log-field-drag-guide"
-          style={{ left: `calc(84px + ${dragBoundary}ch - ${scrollLeft}px)` }}
+          style={{
+            left: `calc(var(--log-gutter-width) + ${dragBoundary}ch - ${scrollLeft}px)`,
+          }}
         />
       )}
       <div className="log-field-track" style={{ transform: `translateX(${-scrollLeft}px)` }}>
-        {layout.fields.map((field) => {
+        {layout.fields.map((field, index) => {
           const condition = conditionFor(conditions, field.id);
           const stats = statistics.find((item) => item.fieldId === field.id);
           const active = Boolean(condition);
           return (
             <div
               className={'log-field' + (active ? ' active' : '')}
-              style={{ width: `${Math.max(4, Math.min(80, field.displayWidth))}ch` }}
+              style={{
+                width: `${Math.max(4, field.displayWidth)}ch`,
+                marginLeft: `${fieldTrackOffset(layout.fields, index)}ch`,
+              }}
               key={field.id}
             >
               <button

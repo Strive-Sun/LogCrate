@@ -306,6 +306,9 @@ test('field bar uses real fields, multi-selects values, switches result mode, an
 
 test('field controls support text case, editing actions, keyboard resize, drag guide, and Escape', () => {
   const layout = fieldLayout();
+  layout.fields[0].boundary = { start: 1, end: 20 };
+  layout.fields[1].boundary = { start: 23, end: 28 };
+  layout.fields[2].boundary = { start: 31, end: null };
   const layoutChanges: Array<{ layout: LogFieldLayout; trigger: string }> = [];
   let conditions: LogFieldCondition[] = [];
   function ControlledBar() {
@@ -334,6 +337,17 @@ test('field controls support text case, editing actions, keyboard resize, drag g
   );
 
   assert.equal(view.container.querySelectorAll('.log-field').length, 3);
+  assert.deepEqual(
+    [...view.container.querySelectorAll<HTMLElement>('.log-field')].map((field) => ({
+      width: field.style.width,
+      marginLeft: field.style.marginLeft,
+    })),
+    [
+      { width: '19ch', marginLeft: '1ch' },
+      { width: '5ch', marginLeft: '3ch' },
+      { width: '40ch', marginLeft: '3ch' },
+    ],
+  );
   assert.equal(
     view.container.querySelector('.log-field-track')?.getAttribute('style'),
     'transform: translateX(-42px);',

@@ -991,6 +991,8 @@ body.resizing {
   display: flex;
 }
 .log-content-panel {
+  --log-gutter-width: 72px;
+  --log-font-size: 12px;
   flex: 1;
   position: relative;
 }
@@ -1003,7 +1005,7 @@ body.resizing {
   overflow: visible;
   border-bottom: 1px solid var(--border);
   background: var(--bg-elev);
-  font: 11px var(--log-font);
+  font: var(--log-font-size) / 18px var(--log-font);
   z-index: 8;
 }
 .log-field-bar.is-empty {
@@ -1011,8 +1013,8 @@ body.resizing {
   color: var(--fg-faint);
 }
 .log-field-gutter {
-  width: 84px;
-  flex: 0 0 84px;
+  width: var(--log-gutter-width);
+  flex: 0 0 var(--log-gutter-width);
   border-right: 1px solid var(--border);
 }
 .log-field-track {
@@ -1343,7 +1345,7 @@ body.resizing {
 }
 .log-line {
   display: flex;
-  font-size: 12px;
+  font-size: var(--log-font-size);
   line-height: 18px;
   white-space: pre;
 }
@@ -1355,7 +1357,7 @@ body.resizing {
 }
 .log-line .ln {
   flex-shrink: 0;
-  width: 72px;
+  width: var(--log-gutter-width);
   padding-right: 12px;
   text-align: right;
   color: var(--fg-faint);
