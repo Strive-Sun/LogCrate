@@ -378,34 +378,46 @@ test('field controls support text case, editing actions, keyboard resize, drag g
   dom.window.prompt = () => 'Timestamp';
   harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Time ▾$/ }));
   const startTrigger = harness.screen.getByRole('button', { name: 'Start (inclusive)' });
-  const startTime = harness.screen.getByLabelText('Calendar for Start (inclusive)');
-  assert.equal((startTime as HTMLInputElement).type, 'datetime-local');
-  assert.equal((startTime as HTMLInputElement).step, '60');
-  assert.equal((startTime as HTMLInputElement).value, '2026-07-01T07:59');
-  let pickerOpened = false;
-  (startTime as HTMLInputElement).showPicker = () => {
-    pickerOpened = true;
-  };
   harness.fireEvent.click(startTrigger);
-  assert.equal(pickerOpened, true);
-  harness.fireEvent.input(startTime, { target: { value: '2026-07-01T08:05' } });
+  const startCalendar = harness.screen.getByRole('dialog', {
+    name: 'Calendar for Start (inclusive)',
+  });
+  assert.ok(harness.screen.getByRole('button', { name: 'Previous month' }));
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Next month' }));
+  assert.match(startCalendar.textContent ?? '', /August 2026/);
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Previous month' }));
+  harness.fireEvent.click(harness.screen.getByRole('gridcell', { name: 'July 2, 2026' }));
+  harness.fireEvent.change(harness.screen.getByRole('combobox', { name: 'Hour' }), {
+    target: { value: '8' },
+  });
+  harness.fireEvent.change(harness.screen.getByRole('combobox', { name: 'Minute' }), {
+    target: { value: '5' },
+  });
   assert.deepEqual(conditions, [
-    { kind: 'time', fieldId: 'field-1', start: '2026-07-01 08:05', end: undefined },
+    { kind: 'time', fieldId: 'field-1', start: '2026-07-02 08:05', end: undefined },
   ]);
-  assert.equal(
-    harness.screen.getByRole('button', { name: 'Start (inclusive)' }).textContent,
-    '2026-07-01 08:05',
+  assert.ok(
+    harness.screen
+      .getByRole('button', { name: 'Start (inclusive)' })
+      .textContent?.includes('2026-07-02 08:05'),
   );
   harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Clear Start (inclusive)' }));
   assert.deepEqual(conditions, []);
-  const endTime = harness.screen.getByLabelText('Calendar for End (inclusive)');
-  harness.fireEvent.input(endTime, { target: { value: '2026-07-01T08:06' } });
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: 'End (inclusive)' }));
+  harness.fireEvent.click(harness.screen.getByRole('gridcell', { name: 'July 1, 2026' }));
+  harness.fireEvent.change(harness.screen.getByRole('combobox', { name: 'Hour' }), {
+    target: { value: '8' },
+  });
+  harness.fireEvent.change(harness.screen.getByRole('combobox', { name: 'Minute' }), {
+    target: { value: '6' },
+  });
   assert.deepEqual(conditions, [
     { kind: 'time', fieldId: 'field-1', start: undefined, end: '2026-07-01 08:06' },
   ]);
-  assert.equal(
-    harness.screen.getByRole('button', { name: 'End (inclusive)' }).textContent,
-    '2026-07-01 08:06',
+  assert.ok(
+    harness.screen
+      .getByRole('button', { name: 'End (inclusive)' })
+      .textContent?.includes('2026-07-01 08:06'),
   );
   harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Clear End (inclusive)' }));
   assert.deepEqual(conditions, []);
@@ -616,8 +628,11 @@ test('Chinese field filtering labels are available', async () => {
   renderLog();
   await harness.waitFor(() => assert.ok(harness.screen.getByRole('button', { name: /^级别 ▾$/ })));
   harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Time ▾$/ }));
-  assert.ok(harness.screen.getByRole('button', { name: '开始（包含）' }));
-  assert.ok(harness.screen.getByLabelText('「开始（包含）」日历'));
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '开始（包含）' }));
+  assert.ok(harness.screen.getByRole('dialog', { name: '「开始（包含）」日历' }));
+  assert.ok(harness.screen.getByRole('button', { name: '上个月' }));
+  assert.ok(harness.screen.getByRole('combobox', { name: '小时' }));
+  assert.ok(harness.screen.getByRole('combobox', { name: '分钟' }));
   const resultMode = harness.screen.getByRole('combobox', { name: '筛选结果模式' });
   assert.equal((resultMode as HTMLSelectElement).value, 'compact');
   assert.deepEqual(

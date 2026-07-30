@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useState } from 'react';
 import type {
   LogFieldCondition,
   LogFieldDefinition,
@@ -56,53 +56,138 @@ interface MinuteDateTimePickerProps {
   label: string;
   value?: string;
   placeholder?: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   onChange: (value?: string) => void;
 }
 
-function MinuteDateTimePicker({ label, value, placeholder, onChange }: MinuteDateTimePickerProps) {
-  const { t } = useI18n();
-  const inputRef = useRef<HTMLInputElement>(null);
+interface PickerMinuteParts {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+}
+
+function parsePickerMinute(value: string): PickerMinuteParts | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value);
+  if (!match) return null;
+  return {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hour: Number(match[4]),
+    minute: Number(match[5]),
+  };
+}
+
+function currentPickerMinute(): PickerMinuteParts {
+  const now = new Date();
+  return {
+    year: now.getFullYear(),
+    month: now.getMonth() + 1,
+    day: now.getDate(),
+    hour: now.getHours(),
+    minute: now.getMinutes(),
+  };
+}
+
+function pickerMinuteValue(parts: PickerMinuteParts) {
+  const pad = (part: number) => part.toString().padStart(2, '0');
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}T${pad(parts.hour)}:${pad(parts.minute)}`;
+}
+
+function calendarDates(year: number, month: number) {
+  const firstWeekday = (new Date(year, month - 1, 1).getDay() + 6) % 7;
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(year, month - 1, index - firstWeekday + 1);
+    return {
+      year: date.getFullYear(),
+      month: date.getMonth() + 1,
+      day: date.getDate(),
+      currentMonth: date.getMonth() === month - 1,
+    };
+  });
+}
+
+function CalendarIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M7 3v3m10-3v3M4.5 9h15M6 5h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" />
+      <path d="M8 13h2m4 0h2m-8 4h2m4 0h2" />
+    </svg>
+  );
+}
+
+function MinuteDateTimePicker({
+  label,
+  value,
+  placeholder,
+  open,
+  onOpenChange,
+  onChange,
+}: MinuteDateTimePickerProps) {
+  const { locale, t } = useI18n();
   const sample = value ?? placeholder;
   const pickerValue = toPickerMinute(value ?? placeholder);
   const displayValue = displayLogMinute(value);
+  const selected = parsePickerMinute(pickerValue) ?? currentPickerMinute();
+  const [viewMonth, setViewMonth] = useState(() => ({
+    year: selected.year,
+    month: selected.month,
+  }));
+  const localeName = locale === 'zh-CN' ? 'zh-CN' : 'en-US';
+  const days = calendarDates(viewMonth.year, viewMonth.month);
+  const today = currentPickerMinute();
+  const monthLabel = new Intl.DateTimeFormat(localeName, {
+    year: 'numeric',
+    month: 'long',
+  }).format(new Date(viewMonth.year, viewMonth.month - 1, 1));
+  const weekdays = Array.from({ length: 7 }, (_, index) =>
+    new Intl.DateTimeFormat(localeName, { weekday: 'short' }).format(new Date(2024, 0, index + 1)),
+  );
 
-  const openPicker = () => {
-    const input = inputRef.current;
-    if (!input) return;
-    try {
-      if (typeof input.showPicker === 'function') input.showPicker();
-      else input.click();
-    } catch {
-      input.focus();
-    }
+  const commit = (next: PickerMinuteParts) => {
+    const formatted = formatPickerMinute(pickerMinuteValue(next), sample);
+    if (formatted) onChange(formatted);
+  };
+
+  const changeMonth = (offset: number) => {
+    const date = new Date(viewMonth.year, viewMonth.month - 1 + offset, 1);
+    setViewMonth({ year: date.getFullYear(), month: date.getMonth() + 1 });
+  };
+
+  const openCalendar = () => {
+    setViewMonth({ year: selected.year, month: selected.month });
+    onOpenChange(!open);
   };
 
   return (
-    <div className="log-field-datetime" role="group" aria-label={label}>
-      <span className="log-field-datetime-label">{label}</span>
+    <div
+      className={'log-field-datetime' + (open ? ' is-open' : '')}
+      role="group"
+      aria-label={label}
+    >
       <div className="log-field-datetime-row">
         <button
           type="button"
           className="log-field-datetime-trigger"
           aria-haspopup="dialog"
+          aria-expanded={open}
           aria-label={label}
-          onClick={openPicker}
+          onClick={openCalendar}
         >
-          {displayValue ?? t('fields.chooseDateTime')}
+          <span className="log-field-datetime-icon">
+            <CalendarIcon />
+          </span>
+          <span className="log-field-datetime-copy">
+            <span className="log-field-datetime-label">{label}</span>
+            <strong>{displayValue ?? t('fields.chooseDateTime')}</strong>
+          </span>
+          <span className="log-field-datetime-chevron" aria-hidden="true">
+            {open ? '▴' : '▾'}
+          </span>
         </button>
-        <input
-          ref={inputRef}
-          className="log-field-native-datetime"
-          type="datetime-local"
-          step={60}
-          tabIndex={-1}
-          aria-label={t('fields.calendarFor', { label })}
-          value={pickerValue}
-          onInput={(event) => {
-            const next = formatPickerMinute(event.currentTarget.value, sample);
-            if (next) onChange(next);
-          }}
-        />
         {value && (
           <button
             type="button"
@@ -116,6 +201,127 @@ function MinuteDateTimePicker({ label, value, placeholder, onChange }: MinuteDat
       </div>
       {!value && placeholder && (
         <small className="log-field-datetime-hint">{displayLogMinute(placeholder)}</small>
+      )}
+      {open && (
+        <div
+          className="log-field-calendar"
+          role="dialog"
+          aria-label={t('fields.calendarFor', { label })}
+        >
+          <div className="log-field-calendar-head">
+            <button
+              type="button"
+              className="log-field-calendar-nav"
+              aria-label={t('fields.previousMonth')}
+              onClick={() => changeMonth(-1)}
+            >
+              ‹
+            </button>
+            <strong>{monthLabel}</strong>
+            <button
+              type="button"
+              className="log-field-calendar-nav"
+              aria-label={t('fields.nextMonth')}
+              onClick={() => changeMonth(1)}
+            >
+              ›
+            </button>
+          </div>
+          <div className="log-field-calendar-weekdays" aria-hidden="true">
+            {weekdays.map((weekday) => (
+              <span key={weekday}>{weekday}</span>
+            ))}
+          </div>
+          <div className="log-field-calendar-grid" role="grid">
+            {days.map((date) => {
+              const isSelected =
+                selected.year === date.year &&
+                selected.month === date.month &&
+                selected.day === date.day;
+              const isToday =
+                today.year === date.year && today.month === date.month && today.day === date.day;
+              const dateValue = new Date(date.year, date.month - 1, date.day);
+              return (
+                <button
+                  type="button"
+                  className={
+                    'log-field-calendar-day' +
+                    (date.currentMonth ? '' : ' is-adjacent') +
+                    (isSelected ? ' is-selected' : '') +
+                    (isToday ? ' is-today' : '')
+                  }
+                  aria-label={new Intl.DateTimeFormat(localeName, { dateStyle: 'long' }).format(
+                    dateValue,
+                  )}
+                  aria-selected={isSelected}
+                  role="gridcell"
+                  key={`${date.year}-${date.month}-${date.day}`}
+                  onClick={() => {
+                    setViewMonth({ year: date.year, month: date.month });
+                    commit({ ...selected, year: date.year, month: date.month, day: date.day });
+                  }}
+                >
+                  {date.day}
+                </button>
+              );
+            })}
+          </div>
+          <div className="log-field-calendar-time">
+            <span>{t('fields.timeOfDay')}</span>
+            <label>
+              <select
+                aria-label={t('fields.hour')}
+                value={selected.hour}
+                onChange={(event) =>
+                  commit({ ...selected, hour: Number(event.currentTarget.value) })
+                }
+              >
+                {Array.from({ length: 24 }, (_, hour) => (
+                  <option value={hour} key={hour}>
+                    {hour.toString().padStart(2, '0')}
+                  </option>
+                ))}
+              </select>
+              <span>{t('fields.hourUnit')}</span>
+            </label>
+            <span className="log-field-calendar-time-separator">:</span>
+            <label>
+              <select
+                aria-label={t('fields.minute')}
+                value={selected.minute}
+                onChange={(event) =>
+                  commit({ ...selected, minute: Number(event.currentTarget.value) })
+                }
+              >
+                {Array.from({ length: 60 }, (_, minute) => (
+                  <option value={minute} key={minute}>
+                    {minute.toString().padStart(2, '0')}
+                  </option>
+                ))}
+              </select>
+              <span>{t('fields.minuteUnit')}</span>
+            </label>
+          </div>
+          <div className="log-field-calendar-footer">
+            <button
+              type="button"
+              onClick={() => {
+                setViewMonth({ year: today.year, month: today.month });
+                commit(today);
+              }}
+            >
+              {t('fields.today')}
+            </button>
+            {value && (
+              <button type="button" onClick={() => onChange(undefined)}>
+                {t('fields.clearBoundaryShort')}
+              </button>
+            )}
+            <button type="button" className="is-primary" onClick={() => onOpenChange(false)}>
+              {t('fields.done')}
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -132,6 +338,7 @@ export function LogFieldFilterBar({
 }: Props) {
   const { t } = useI18n();
   const [openField, setOpenField] = useState<string | null>(null);
+  const [openTimeBoundary, setOpenTimeBoundary] = useState<string | null>(null);
   const [dragBoundary, setDragBoundary] = useState<number | null>(null);
   if (!layout) {
     return (
@@ -219,7 +426,10 @@ export function LogFieldFilterBar({
       className="log-field-bar"
       aria-label={t('fields.bar')}
       onKeyDown={(event) => {
-        if (event.key === 'Escape') setOpenField(null);
+        if (event.key === 'Escape') {
+          setOpenTimeBoundary(null);
+          setOpenField(null);
+        }
       }}
     >
       {dragBoundary !== null && (
@@ -253,19 +463,28 @@ export function LogFieldFilterBar({
                 title={field.name}
                 aria-expanded={openField === field.id}
                 onDoubleClick={() => rename(field)}
-                onClick={() => setOpenField(openField === field.id ? null : field.id)}
+                onClick={() => {
+                  setOpenTimeBoundary(null);
+                  setOpenField(openField === field.id ? null : field.id);
+                }}
               >
                 {field.name}
                 {condition?.kind === 'discrete' ? `: ${condition.values.length}` : ''} ▾
               </button>
               {openField === field.id && (
-                <div className="log-field-popover">
+                <div
+                  className={'log-field-popover' + (field.fieldType === 'time' ? ' is-time' : '')}
+                >
                   {field.fieldType === 'time' && (
                     <>
                       <MinuteDateTimePicker
                         label={t('fields.start')}
                         value={condition?.kind === 'time' ? condition.start : undefined}
                         placeholder={stats?.minTime}
+                        open={openTimeBoundary === `${field.id}:start`}
+                        onOpenChange={(open) =>
+                          setOpenTimeBoundary(open ? `${field.id}:start` : null)
+                        }
                         onChange={(start) => {
                           const end = condition?.kind === 'time' ? condition.end : undefined;
                           onConditionsChange(
@@ -281,6 +500,10 @@ export function LogFieldFilterBar({
                         label={t('fields.end')}
                         value={condition?.kind === 'time' ? condition.end : undefined}
                         placeholder={stats?.maxTime}
+                        open={openTimeBoundary === `${field.id}:end`}
+                        onOpenChange={(open) =>
+                          setOpenTimeBoundary(open ? `${field.id}:end` : null)
+                        }
                         onChange={(end) => {
                           const start = condition?.kind === 'time' ? condition.start : undefined;
                           onConditionsChange(

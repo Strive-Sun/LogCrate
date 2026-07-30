@@ -1110,6 +1110,15 @@ body.resizing {
   box-shadow: 0 8px 24px rgb(0 0 0 / 22%);
   font-family: var(--ui-font);
 }
+.log-field-popover.is-time {
+  gap: 8px;
+  width: min(360px, calc(100vw - 24px));
+  max-height: min(620px, calc(100vh - 90px));
+  padding: 12px;
+  overflow: auto;
+  border-radius: 12px;
+  box-shadow: 0 14px 40px rgb(0 0 0 / 28%);
+}
 .log-field-popover label {
   display: grid;
   gap: 3px;
@@ -1120,42 +1129,258 @@ body.resizing {
 }
 .log-field-datetime {
   display: grid;
-  gap: 3px;
-}
-.log-field-datetime-label {
-  font-size: 12px;
+  gap: 5px;
 }
 .log-field-datetime-row {
   position: relative;
   display: flex;
-  gap: 4px;
+  gap: 6px;
 }
 .log-field-datetime-trigger {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   min-width: 0;
+  min-height: 52px;
   flex: 1;
   overflow: hidden;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 86%, var(--accent));
+  border-radius: 9px;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--bg-panel) 92%, var(--accent)) 0%,
+    var(--bg-elev) 100%
+  );
   text-align: left;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+.log-field-datetime-trigger:hover,
+.log-field-datetime.is-open .log-field-datetime-trigger {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.log-field-datetime-trigger:active {
+  transform: translateY(1px);
+}
+.log-field-datetime-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+.log-field-datetime-icon svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+.log-field-datetime-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+.log-field-datetime-label {
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+.log-field-datetime-copy strong {
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.log-field-native-datetime {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  border: 0;
-  opacity: 0;
-  pointer-events: none;
+.log-field-datetime-chevron {
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+  font-size: 11px;
 }
 .log-field-datetime-clear {
-  flex: 0 0 26px;
+  flex: 0 0 30px;
   padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg-dim);
+  background: var(--bg-panel);
+  font-size: 16px;
+}
+.log-field-datetime-clear:hover {
+  border-color: var(--error);
+  color: var(--error);
+  background: color-mix(in srgb, var(--error) 9%, transparent);
 }
 .log-field-datetime-hint {
   overflow: hidden;
+  padding: 0 4px;
   color: var(--fg-dim);
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.log-field-calendar {
+  display: grid;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 88%, var(--accent));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--bg-panel) 90%, var(--accent));
+  animation: log-field-calendar-enter 130ms ease-out;
+}
+@keyframes log-field-calendar-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.log-field-calendar-head {
+  display: grid;
+  grid-template-columns: 32px 1fr 32px;
+  align-items: center;
+  gap: 6px;
+}
+.log-field-calendar-head strong {
+  text-align: center;
+  letter-spacing: 0.01em;
+}
+.log-field-calendar-nav {
+  width: 32px;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--fg-dim);
+  font-size: 22px;
+  line-height: 1;
+}
+.log-field-calendar-nav:hover {
+  border-color: var(--border);
+  color: var(--accent);
+  background: var(--hover);
+}
+.log-field-calendar button:focus-visible,
+.log-field-datetime-trigger:focus-visible,
+.log-field-datetime-clear:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.log-field-calendar-weekdays,
+.log-field-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 3px;
+}
+.log-field-calendar-weekdays span {
+  padding: 2px 0 4px;
+  color: var(--fg-faint);
+  font-size: 10px;
+  font-weight: 600;
+  text-align: center;
+  text-transform: uppercase;
+}
+.log-field-calendar-day {
+  aspect-ratio: 1;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--fg);
+  font-size: 12px;
+}
+.log-field-calendar-day:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--hover);
+}
+.log-field-calendar-day.is-adjacent {
+  color: var(--fg-faint);
+}
+.log-field-calendar-day.is-today {
+  border-color: var(--accent);
+}
+.log-field-calendar-day.is-selected {
+  border-color: var(--accent);
+  color: white;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 82%, white), var(--accent));
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 28%, transparent);
+  font-weight: 700;
+}
+.log-field-calendar-time {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-elev);
+}
+.log-field-calendar-time > span:first-child {
+  margin-right: auto;
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-weight: 600;
+}
+.log-field-calendar-time label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-dim);
+  font-size: 10px;
+}
+.log-field-calendar-time select {
+  width: 54px;
+  height: 30px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--fg);
+  background: var(--bg-panel);
+  font-variant-numeric: tabular-nums;
+}
+.log-field-calendar-time select:focus {
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.log-field-calendar-time-separator {
+  color: var(--fg-dim);
+  font-weight: 700;
+}
+.log-field-calendar-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-top: 2px;
+}
+.log-field-calendar-footer button {
+  min-width: 56px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg-dim);
+  background: var(--bg-elev);
+}
+.log-field-calendar-footer button:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+.log-field-calendar-footer button.is-primary {
+  border-color: var(--accent);
+  color: white;
+  background: var(--accent);
 }
 .log-field-choice {
   grid-template-columns: auto 1fr auto !important;
