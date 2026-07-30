@@ -375,8 +375,13 @@ test('field controls support text case, editing actions, keyboard resize, drag g
     false,
   );
 
-  dom.window.prompt = () => 'Timestamp';
   harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Time ▾$/ }));
+  assert.ok(harness.screen.getByLabelText('Field settings'));
+  assert.equal(harness.screen.getAllByRole('radio').length, 4);
+  assert.equal(
+    harness.screen.getByRole('radio', { name: 'Time' }).getAttribute('aria-checked'),
+    'true',
+  );
   const startTrigger = harness.screen.getByRole('button', { name: 'Start (inclusive)' });
   harness.fireEvent.click(startTrigger);
   const startCalendar = harness.screen.getByRole('dialog', {
@@ -421,10 +426,11 @@ test('field controls support text case, editing actions, keyboard resize, drag g
   );
   harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Clear End (inclusive)' }));
   assert.deepEqual(conditions, []);
-  harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Rename' }));
-  harness.fireEvent.change(harness.screen.getByRole('combobox', { name: 'Field type' }), {
-    target: { value: 'text' },
+  harness.fireEvent.input(harness.screen.getByRole('textbox', { name: 'Field name' }), {
+    target: { value: 'Timestamp' },
   });
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Rename' }));
+  harness.fireEvent.click(harness.screen.getByRole('radio', { name: 'Text' }));
   harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Split' }));
   harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Merge right' }));
   const resizer = harness.screen.getByRole('button', { name: 'Resize Time' });
@@ -433,6 +439,7 @@ test('field controls support text case, editing actions, keyboard resize, drag g
     layoutChanges.map((change) => change.trigger),
     ['name', 'type', 'split', 'merge', 'boundary'],
   );
+  assert.equal(layoutChanges[0]?.layout.fields[0]?.name, 'Timestamp');
 
   harness.fireEvent.pointerDown(resizer, { clientX: 100 });
   harness.fireEvent.pointerMove(window, { clientX: 114 });

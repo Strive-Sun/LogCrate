@@ -1100,7 +1100,7 @@ body.resizing {
   z-index: 20;
   display: grid;
   gap: 6px;
-  width: max(230px, 100%);
+  width: max(300px, 100%);
   max-height: 340px;
   overflow: auto;
   padding: 9px;
@@ -1391,12 +1391,223 @@ body.resizing {
   align-items: center;
   gap: 5px !important;
 }
-.log-field-actions {
+.log-field-settings {
+  display: grid;
+  gap: 9px;
+  margin-top: 3px;
+  padding: 11px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, var(--accent));
+  border-radius: 11px;
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--bg-panel) 94%, var(--accent)) 0%,
+    var(--bg-elev) 72%
+  );
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 5%, transparent);
+}
+.log-field-settings-head {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+  padding-bottom: 2px;
+}
+.log-field-settings-head > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+.log-field-settings-head strong {
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 650;
+}
+.log-field-settings-head small,
+.log-field-structure-actions small {
+  color: var(--fg-dim);
+  font-size: 10px;
+  font-weight: 400;
+}
+.log-field-settings-icon,
+.log-field-action-icon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+.log-field-settings-icon {
+  width: 30px;
+  height: 30px;
+}
+.log-field-settings-icon svg,
+.log-field-action-icon svg,
+.log-field-control-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+.log-field-settings-label {
+  color: var(--fg-dim);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.log-field-rename-control {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-elev);
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+.log-field-rename-control:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.log-field-control-icon {
+  display: grid;
+  place-items: center;
+  color: var(--fg-dim);
+}
+.log-field-rename-control input {
+  width: 100%;
+  height: 34px;
+  padding: 0 5px;
+  border: 0;
+  color: var(--fg);
+  background: transparent;
+  outline: 0;
+  font-size: 12px;
+}
+.log-field-rename-control button {
+  align-self: stretch;
+  margin: 3px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  color: white;
+  background: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+.log-field-rename-control button:disabled {
+  color: var(--fg-faint);
+  background: var(--hover);
+}
+.log-field-type-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 5px;
-  padding-top: 5px;
+}
+.log-field-type-grid button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg-dim);
+  background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
+  font-size: 11px;
+  text-align: left;
+  transition:
+    border-color 120ms ease,
+    color 120ms ease,
+    background 120ms ease,
+    transform 120ms ease;
+}
+.log-field-type-grid button:hover {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
+  color: var(--fg);
+  background: var(--hover);
+}
+.log-field-type-grid button:active {
+  transform: translateY(1px);
+}
+.log-field-type-grid button.is-selected {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-elev));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+  font-weight: 600;
+}
+.log-field-type-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+.log-field-type-grid button.is-selected .log-field-type-dot {
+  border: 2px solid color-mix(in srgb, var(--accent) 22%, var(--bg-elev));
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.log-field-structure-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding-top: 9px;
   border-top: 1px solid var(--border);
+}
+.log-field-structure-actions > button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 48px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--fg);
+  background: var(--bg-elev);
+  text-align: left;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    transform 120ms ease;
+}
+.log-field-structure-actions > button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
+  background: var(--hover);
+  transform: translateY(-1px);
+}
+.log-field-structure-actions > button:focus-visible,
+.log-field-type-grid button:focus-visible,
+.log-field-rename-control button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.log-field-structure-actions > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+.log-field-structure-actions > button > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+.log-field-structure-actions strong {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.log-field-action-icon {
+  width: 28px;
+  height: 28px;
 }
 .log-field-empty {
   position: sticky;

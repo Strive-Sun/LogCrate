@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import type { ReactNode } from 'react';
 import type {
   LogFieldCondition,
   LogFieldDefinition,
@@ -115,6 +116,27 @@ function CalendarIcon() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M7 3v3m10-3v3M4.5 9h15M6 5h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" />
       <path d="M8 13h2m4 0h2m-8 4h2m4 0h2" />
+    </svg>
+  );
+}
+
+type FieldSettingsIconKind = 'settings' | 'rename' | 'split' | 'merge';
+
+function FieldSettingsIcon({ kind }: { kind: FieldSettingsIconKind }) {
+  const paths = {
+    settings: (
+      <>
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" />
+      </>
+    ),
+    rename: <path d="m4 16-.8 4 4-.8L18 8.4 15.6 6 4 16Zm9.8-8.2 2.4 2.4M13 20h8" />,
+    split: <path d="M5 4v16M19 4v16M9 8l3 4-3 4m6-8-3 4 3 4" />,
+    merge: <path d="M5 5v4a3 3 0 0 0 3 3h8m-11 7v-4a3 3 0 0 1 3-3m5-4 4 4-4 4" />,
+  } satisfies Record<FieldSettingsIconKind, ReactNode>;
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      {paths[kind]}
     </svg>
   );
 }
@@ -340,6 +362,7 @@ export function LogFieldFilterBar({
   const [openField, setOpenField] = useState<string | null>(null);
   const [openTimeBoundary, setOpenTimeBoundary] = useState<string | null>(null);
   const [dragBoundary, setDragBoundary] = useState<number | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
   if (!layout) {
     return (
       <div className="log-field-bar is-empty" role="status">
@@ -351,8 +374,8 @@ export function LogFieldFilterBar({
   const fieldControlWidth = commonFieldControlWidth(layout.fields);
 
   const rename = (field: LogFieldDefinition) => {
-    const name = window.prompt(t('fields.renamePrompt'), field.name)?.trim();
-    if (!name) return;
+    const name = renameDraft.trim();
+    if (!name || name === field.name) return;
     onLayoutChange(
       updatedLayout(
         layout,
@@ -462,9 +485,9 @@ export function LogFieldFilterBar({
                 className="log-field-button"
                 title={field.name}
                 aria-expanded={openField === field.id}
-                onDoubleClick={() => rename(field)}
                 onClick={() => {
                   setOpenTimeBoundary(null);
+                  setRenameDraft(field.name);
                   setOpenField(openField === field.id ? null : field.id);
                 }}
               >
@@ -595,41 +618,105 @@ export function LogFieldFilterBar({
                       </label>
                     </>
                   )}
-                  <div className="log-field-actions">
-                    <button type="button" onClick={() => rename(field)}>
-                      {t('fields.rename')}
-                    </button>
-                    <select
-                      aria-label={t('fields.type')}
-                      value={field.fieldType}
-                      onChange={(event) => {
-                        const fields = layout.fields.map((item) =>
-                          item.id === field.id
-                            ? {
-                                ...item,
-                                fieldType: event.target.value as LogFieldDefinition['fieldType'],
-                              }
-                            : item,
-                        );
-                        onLayoutChange(updatedLayout(layout, fields), 'type');
-                      }}
+                  <div className="log-field-settings" aria-label={t('fields.settings')}>
+                    <div className="log-field-settings-head">
+                      <span className="log-field-settings-icon">
+                        <FieldSettingsIcon kind="settings" />
+                      </span>
+                      <span>
+                        <strong>{t('fields.settings')}</strong>
+                        <small>{t('fields.settingsHint')}</small>
+                      </span>
+                    </div>
+                    <label className="log-field-settings-label" htmlFor={`field-name-${field.id}`}>
+                      {t('fields.renamePrompt')}
+                    </label>
+                    <div className="log-field-rename-control">
+                      <span className="log-field-control-icon">
+                        <FieldSettingsIcon kind="rename" />
+                      </span>
+                      <input
+                        id={`field-name-${field.id}`}
+                        value={renameDraft}
+                        onInput={(event) => setRenameDraft(event.currentTarget.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            rename(field);
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="is-primary"
+                        disabled={!renameDraft.trim() || renameDraft.trim() === field.name}
+                        onClick={() => rename(field)}
+                      >
+                        {t('fields.rename')}
+                      </button>
+                    </div>
+                    <span className="log-field-settings-label" id={`field-type-${field.id}`}>
+                      {t('fields.type')}
+                    </span>
+                    <div
+                      className="log-field-type-grid"
+                      role="radiogroup"
+                      aria-labelledby={`field-type-${field.id}`}
                     >
                       {(['time', 'level', 'discrete', 'text'] as const).map((type) => (
-                        <option key={type} value={type}>
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked={field.fieldType === type}
+                          className={field.fieldType === type ? 'is-selected' : ''}
+                          key={type}
+                          onClick={() => {
+                            if (field.fieldType === type) return;
+                            const fields = layout.fields.map((item) =>
+                              item.id === field.id ? { ...item, fieldType: type } : item,
+                            );
+                            onLayoutChange(updatedLayout(layout, fields), 'type');
+                          }}
+                        >
+                          <span className="log-field-type-dot" />
                           {t(`fields.type.${type}`)}
-                        </option>
+                        </button>
                       ))}
-                    </select>
-                    <button type="button" onClick={() => split(field)}>
-                      {t('fields.split')}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={field === layout.fields.at(-1)}
-                      onClick={() => mergeRight(field)}
-                    >
-                      {t('fields.mergeRight')}
-                    </button>
+                    </div>
+                    <div className="log-field-structure-actions">
+                      <button
+                        type="button"
+                        aria-label={t('fields.split')}
+                        disabled={
+                          (field.boundary.end ?? field.boundary.start + field.displayWidth) -
+                            field.boundary.start <
+                          2
+                        }
+                        onClick={() => split(field)}
+                      >
+                        <span className="log-field-action-icon">
+                          <FieldSettingsIcon kind="split" />
+                        </span>
+                        <span>
+                          <strong>{t('fields.split')}</strong>
+                          <small>{t('fields.splitHint')}</small>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={t('fields.mergeRight')}
+                        disabled={field === layout.fields.at(-1)}
+                        onClick={() => mergeRight(field)}
+                      >
+                        <span className="log-field-action-icon">
+                          <FieldSettingsIcon kind="merge" />
+                        </span>
+                        <span>
+                          <strong>{t('fields.mergeRight')}</strong>
+                          <small>{t('fields.mergeHint')}</small>
+                        </span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
