@@ -73,4 +73,36 @@ describe('界面模板偏好', () => {
     assert.doesNotMatch(templateRules, /--log-font-size|--log-gutter-width/);
     assert.doesNotMatch(templateRules, /font-family:\s*var\(--log-font\)/);
   });
+
+  it('让日志选项卡与字段筛选模块呈现模板专属材质且不改变几何', () => {
+    const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+    const moduleStart = css.indexOf('/* ===== 丰富模板：日志选项卡与字段筛选模块 ===== */');
+    const moduleEnd = css.indexOf('/* ===== 应用整体三栏 + 顶栏 ===== */', moduleStart);
+    const moduleRules = css.slice(moduleStart, moduleEnd);
+
+    assert.notEqual(moduleStart, -1);
+    assert.notEqual(moduleEnd, -1);
+    assert.match(moduleRules, /:root\[data-ui-template='aurora'\] \.app \.log-tab\.active\s*\{/);
+    assert.match(
+      moduleRules,
+      /:root\[data-ui-template='aurora'\] \.app \.log-field\.active \.log-field-button\s*\{/,
+    );
+    assert.match(
+      moduleRules,
+      /:root\[data-ui-template='aurora'\] \.app \.log-field-choice\.is-selected\s*\{/,
+    );
+    assert.match(moduleRules, /:root\[data-ui-template='amber'\] \.app \.log-tab\.active\s*\{/);
+    assert.match(
+      moduleRules,
+      /:root\[data-ui-template='amber'\] \.app \.log-field\.active \.log-field-button\s*\{/,
+    );
+    assert.match(
+      moduleRules,
+      /:root\[data-ui-template='amber'\] \.app \.log-field-choice\.is-selected\s*\{/,
+    );
+    assert.doesNotMatch(
+      moduleRules,
+      /(?:^|[;{]\s*)(?:width|height|padding|margin|flex|font-size|font-family|line-height)\s*:/m,
+    );
+  });
 });
