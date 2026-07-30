@@ -120,7 +120,7 @@ function CalendarIcon() {
   );
 }
 
-type FieldSettingsIconKind = 'settings' | 'rename' | 'split' | 'merge';
+type FieldSettingsIconKind = 'settings' | 'rename' | 'split' | 'merge' | 'values' | 'text';
 
 function FieldSettingsIcon({ kind }: { kind: FieldSettingsIconKind }) {
   const paths = {
@@ -133,6 +133,13 @@ function FieldSettingsIcon({ kind }: { kind: FieldSettingsIconKind }) {
     rename: <path d="m4 16-.8 4 4-.8L18 8.4 15.6 6 4 16Zm9.8-8.2 2.4 2.4M13 20h8" />,
     split: <path d="M5 4v16M19 4v16M9 8l3 4-3 4m6-8-3 4 3 4" />,
     merge: <path d="M5 5v4a3 3 0 0 0 3 3h8m-11 7v-4a3 3 0 0 1 3-3m5-4 4 4-4 4" />,
+    values: <path d="M5 7h.01M9 7h10M5 12h.01M9 12h10M5 17h.01M9 17h10" />,
+    text: (
+      <>
+        <circle cx="10.5" cy="10.5" r="5.5" />
+        <path d="m14.5 14.5 5 5" />
+      </>
+    ),
   } satisfies Record<FieldSettingsIconKind, ReactNode>;
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -464,10 +471,12 @@ export function LogFieldFilterBar({
         />
       )}
       <div className="log-field-track">
-        {layout.fields.map((field) => {
+        {layout.fields.map((field, fieldIndex) => {
           const condition = conditionFor(conditions, field.id);
           const stats = statistics.find((item) => item.fieldId === field.id);
           const active = Boolean(condition);
+          const selectedValueCount = condition?.kind === 'discrete' ? condition.values.length : 0;
+          const alignPopoverRight = fieldIndex >= Math.ceil(layout.fields.length / 2);
           return (
             <div
               className={'log-field' + (active ? ' active' : '')}
@@ -496,7 +505,11 @@ export function LogFieldFilterBar({
               </button>
               {openField === field.id && (
                 <div
-                  className={'log-field-popover' + (field.fieldType === 'time' ? ' is-time' : '')}
+                  className={
+                    'log-field-popover' +
+                    (field.fieldType === 'time' ? ' is-time' : '') +
+                    (alignPopoverRight ? ' align-right' : '')
+                  }
                 >
                   {field.fieldType === 'time' && (
                     <>
@@ -542,65 +555,117 @@ export function LogFieldFilterBar({
                   )}
                   {(field.fieldType === 'level' ||
                     (field.fieldType === 'discrete' && !stats?.highCardinality)) &&
-                    stats?.candidates.map((candidate) => {
-                      const selected =
-                        condition?.kind === 'discrete' &&
-                        condition.values.includes(candidate.value);
-                      return (
-                        <label className="log-field-choice" key={candidate.value}>
+                    stats && (
+                      <section
+                        className="log-field-filter-card"
+                        aria-label={t('fields.valueOptions')}
+                      >
+                        <div className="log-field-filter-card-head">
+                          <span className="log-field-filter-icon">
+                            <FieldSettingsIcon kind="values" />
+                          </span>
+                          <span>
+                            <strong>{t('fields.valueOptions')}</strong>
+                            <small>{t('fields.valueOptionsHint')}</small>
+                          </span>
+                          <span className="log-field-selection-count">
+                            {t('fields.selectedValues', {
+                              selected: selectedValueCount,
+                              total: stats.candidates.length,
+                            })}
+                          </span>
+                        </div>
+                        <div className="log-field-choice-list">
+                          {stats.candidates.length ? (
+                            stats.candidates.map((candidate) => {
+                              const selected =
+                                condition?.kind === 'discrete' &&
+                                condition.values.includes(candidate.value);
+                              return (
+                                <label
+                                  className={'log-field-choice' + (selected ? ' is-selected' : '')}
+                                  key={candidate.value}
+                                  title={candidate.value}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={selected}
+                                    onChange={() => {
+                                      const previous =
+                                        condition?.kind === 'discrete' ? condition.values : [];
+                                      const values = selected
+                                        ? previous.filter((value) => value !== candidate.value)
+                                        : [...previous, candidate.value];
+                                      onConditionsChange(
+                                        replaceCondition(
+                                          conditions,
+                                          field.id,
+                                          values.length
+                                            ? { kind: 'discrete', fieldId: field.id, values }
+                                            : null,
+                                        ),
+                                      );
+                                    }}
+                                  />
+                                  <span>{candidate.value}</span>
+                                  <small>{candidate.count}</small>
+                                </label>
+                              );
+                            })
+                          ) : (
+                            <span className="log-field-no-values">{t('fields.noValues')}</span>
+                          )}
+                        </div>
+                      </section>
+                    )}
+                  {(field.fieldType === 'text' || stats?.highCardinality) && (
+                    <section className="log-field-filter-card" aria-label={t('fields.textFilter')}>
+                      <div className="log-field-filter-card-head">
+                        <span className="log-field-filter-icon">
+                          <FieldSettingsIcon kind="text" />
+                        </span>
+                        <span>
+                          <strong>{t('fields.textFilter')}</strong>
+                          <small>{t('fields.textFilterHint')}</small>
+                        </span>
+                      </div>
+                      <label className="log-field-text-label">
+                        <span>{t('fields.contains')}</span>
+                        <span className="log-field-text-control">
+                          <FieldSettingsIcon kind="text" />
                           <input
-                            type="checkbox"
-                            checked={selected}
-                            onChange={() => {
-                              const previous =
-                                condition?.kind === 'discrete' ? condition.values : [];
-                              const values = selected
-                                ? previous.filter((value) => value !== candidate.value)
-                                : [...previous, candidate.value];
+                            aria-label={t('fields.contains')}
+                            placeholder={t('fields.textPlaceholder')}
+                            value={condition?.kind === 'text' ? condition.query : ''}
+                            onInput={(event) => {
+                              const query = event.currentTarget.value;
                               onConditionsChange(
                                 replaceCondition(
                                   conditions,
                                   field.id,
-                                  values.length
-                                    ? { kind: 'discrete', fieldId: field.id, values }
+                                  query
+                                    ? {
+                                        kind: 'text',
+                                        fieldId: field.id,
+                                        query,
+                                        caseSensitive:
+                                          condition?.kind === 'text' && condition.caseSensitive,
+                                      }
                                     : null,
                                 ),
                               );
                             }}
                           />
-                          <span>{candidate.value}</span>
-                          <small>{candidate.count}</small>
-                        </label>
-                      );
-                    })}
-                  {(field.fieldType === 'text' || stats?.highCardinality) && (
-                    <>
-                      <label>
-                        {t('fields.contains')}
-                        <input
-                          value={condition?.kind === 'text' ? condition.query : ''}
-                          onInput={(event) => {
-                            const query = event.currentTarget.value;
-                            onConditionsChange(
-                              replaceCondition(
-                                conditions,
-                                field.id,
-                                query
-                                  ? {
-                                      kind: 'text',
-                                      fieldId: field.id,
-                                      query,
-                                      caseSensitive:
-                                        condition?.kind === 'text' && condition.caseSensitive,
-                                    }
-                                  : null,
-                              ),
-                            );
-                          }}
-                        />
+                        </span>
                       </label>
-                      <label className="log-field-inline-option">
+                      <label className="log-field-switch-row">
+                        <span>
+                          <strong>{t('fields.caseSensitive')}</strong>
+                          <small>{t('fields.caseSensitiveHint')}</small>
+                        </span>
                         <input
+                          className="log-field-switch-input"
+                          aria-label={t('fields.caseSensitive')}
                           type="checkbox"
                           checked={condition?.kind === 'text' && condition.caseSensitive}
                           disabled={condition?.kind !== 'text'}
@@ -614,9 +679,9 @@ export function LogFieldFilterBar({
                             );
                           }}
                         />
-                        {t('fields.caseSensitive')}
+                        <span className="log-field-switch" aria-hidden="true" />
                       </label>
-                    </>
+                    </section>
                   )}
                   <div className="log-field-settings" aria-label={t('fields.settings')}>
                     <div className="log-field-settings-head">

@@ -285,9 +285,12 @@ test('field bar uses real fields, multi-selects values, switches result mode, an
   assert.equal(view.container.querySelectorAll('.log-field').length, 3);
   harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Level ▾$/ }));
   await harness.waitFor(() => assert.ok(harness.screen.getByText('INFO')));
+  assert.ok(harness.screen.getByLabelText('Available values'));
+  assert.ok(harness.screen.getByText('0/2 selected'));
   harness.fireEvent.click(harness.screen.getByRole('checkbox', { name: /INFO/ }));
   await harness.waitFor(() => {
     assert.equal(requests.at(-1)?.conditions[0]?.kind, 'discrete');
+    assert.ok(harness.screen.getByText('1/2 selected'));
   });
   harness.fireEvent.click(harness.screen.getByRole('checkbox', { name: /WARN/ }));
   await harness.waitFor(() => {
@@ -448,6 +451,13 @@ test('field controls support text case, editing actions, keyboard resize, drag g
   assert.equal(view.container.querySelector('.log-field-drag-guide'), null);
 
   harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Body ▾$/ }));
+  assert.ok(harness.screen.getByLabelText('Text filter'));
+  const bodyPopover = harness.screen.getByLabelText('Text filter').closest('.log-field-popover');
+  assert.ok(bodyPopover?.classList.contains('align-right'));
+  assert.equal(
+    harness.screen.getByRole('textbox', { name: 'Contains text' }).getAttribute('placeholder'),
+    'Enter text to match',
+  );
   harness.fireEvent.input(harness.screen.getByRole('textbox', { name: /Contains text/ }), {
     target: { value: 'Failure' },
   });

@@ -1100,8 +1100,8 @@ body.resizing {
   z-index: 20;
   display: grid;
   gap: 6px;
-  width: max(300px, 100%);
-  max-height: 340px;
+  width: min(max(360px, 100%), calc(100vw - 24px));
+  max-height: min(620px, calc(100vh - 90px));
   overflow: auto;
   padding: 9px;
   border: 1px solid var(--border);
@@ -1109,6 +1109,10 @@ body.resizing {
   background: var(--bg-elev);
   box-shadow: 0 8px 24px rgb(0 0 0 / 22%);
   font-family: var(--ui-font);
+}
+.log-field-popover.align-right {
+  right: 0;
+  left: auto;
 }
 .log-field-popover.is-time {
   gap: 8px;
@@ -1382,14 +1386,242 @@ body.resizing {
   color: white;
   background: var(--accent);
 }
-.log-field-choice {
-  grid-template-columns: auto 1fr auto !important;
-  align-items: center;
+.log-field-filter-card {
+  display: grid;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 86%, var(--accent));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--bg-panel) 94%, var(--accent));
 }
-.log-field-inline-option {
+.log-field-filter-card-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.log-field-filter-card-head > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 1px;
+}
+.log-field-filter-card-head strong {
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 650;
+}
+.log-field-filter-card-head small,
+.log-field-switch-row small {
+  color: var(--fg-dim);
+  font-size: 10px;
+  font-weight: 400;
+}
+.log-field-filter-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+.log-field-filter-icon svg,
+.log-field-text-control > svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+.log-field-selection-count {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 999px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.log-field-choice-list {
+  display: grid;
+  max-height: 210px;
+  gap: 4px;
+  overflow-y: auto;
+  padding-right: 3px;
+  scrollbar-width: thin;
+}
+.log-field-choice {
+  display: grid !important;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 32px;
+  gap: 8px !important;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--fg-dim);
+  background: color-mix(in srgb, var(--bg-elev) 86%, transparent);
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    color 120ms ease,
+    background 120ms ease;
+}
+.log-field-choice:hover {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  color: var(--fg);
+  background: var(--hover);
+}
+.log-field-choice.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 64%, var(--border));
+  color: var(--fg);
+  background: color-mix(in srgb, var(--accent) 11%, var(--bg-elev));
+}
+.log-field-choice input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.log-field-choice > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.log-field-choice small {
+  min-width: 24px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--fg-dim);
+  background: var(--hover);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.log-field-choice.is-selected small {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.log-field-no-values {
+  padding: 16px 8px;
+  color: var(--fg-faint);
+  font-size: 11px;
+  text-align: center;
+}
+.log-field-text-label {
+  display: grid !important;
+  gap: 5px !important;
+  color: var(--fg-dim);
+  font-size: 10px;
+  font-weight: 600;
+}
+.log-field-text-control {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--fg-dim);
+  background: var(--bg-elev);
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+.log-field-text-control:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.log-field-text-control > svg {
+  justify-self: center;
+}
+.log-field-text-control input {
+  width: 100%;
+  height: 34px;
+  padding: 0 8px 0 2px;
+  border: 0;
+  color: var(--fg);
+  background: transparent;
+  outline: 0;
+  font-size: 12px;
+  font-weight: 400;
+}
+.log-field-text-control input::placeholder {
+  color: var(--fg-faint);
+}
+.log-field-switch-row {
+  position: relative;
   display: flex !important;
   align-items: center;
-  gap: 5px !important;
+  gap: 10px !important;
+  min-height: 38px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-elev);
+  cursor: pointer;
+}
+.log-field-switch-row > span:first-child {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 1px;
+}
+.log-field-switch-row strong {
+  color: var(--fg);
+  font-size: 11px;
+  font-weight: 600;
+}
+.log-field-switch-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.log-field-switch {
+  position: relative;
+  width: 34px;
+  height: 19px;
+  flex: 0 0 34px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--hover);
+  transition:
+    border-color 120ms ease,
+    background 120ms ease;
+}
+.log-field-switch::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--fg-faint);
+  content: '';
+  transition:
+    transform 120ms ease,
+    background 120ms ease;
+}
+.log-field-switch-input:checked + .log-field-switch {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.log-field-switch-input:checked + .log-field-switch::after {
+  background: var(--accent);
+  transform: translateX(15px);
+}
+.log-field-switch-input:focus-visible + .log-field-switch {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.log-field-switch-input:disabled + .log-field-switch {
+  opacity: 0.42;
 }
 .log-field-settings {
   display: grid;
