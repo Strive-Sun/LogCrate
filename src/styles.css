@@ -1118,6 +1118,45 @@ body.resizing {
 .log-field-popover select {
   min-width: 0;
 }
+.log-field-datetime {
+  display: grid;
+  gap: 3px;
+}
+.log-field-datetime-label {
+  font-size: 12px;
+}
+.log-field-datetime-row {
+  position: relative;
+  display: flex;
+  gap: 4px;
+}
+.log-field-datetime-trigger {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.log-field-native-datetime {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.log-field-datetime-clear {
+  flex: 0 0 26px;
+  padding: 0;
+}
+.log-field-datetime-hint {
+  overflow: hidden;
+  color: var(--fg-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .log-field-choice {
   grid-template-columns: auto 1fr auto !important;
   align-items: center;

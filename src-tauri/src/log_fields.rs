@@ -366,6 +366,81 @@ fn contains_text(value: &str, query: &str, case_sensitive: bool) -> bool {
     }
 }
 
+fn parse_two_digits(bytes: &[u8], start: usize) -> Option<u8> {
+    let tens = *bytes.get(start)?;
+    let ones = *bytes.get(start + 1)?;
+    (tens.is_ascii_digit() && ones.is_ascii_digit()).then_some((tens - b'0') * 10 + ones - b'0')
+}
+
+fn valid_minute_components(month: u8, day: u8, hour: u8, minute: u8) -> bool {
+    (1..=12).contains(&month) && (1..=31).contains(&day) && hour < 24 && minute < 60
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct MinuteKey {
+    year: Option<u16>,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+}
+
+fn minute_key(value: &str) -> Option<MinuteKey> {
+    let value = value.trim();
+    let bytes = value.as_bytes();
+    if bytes.len() >= 16
+        && matches!(bytes[4], b'-' | b'/')
+        && bytes[7] == bytes[4]
+        && matches!(bytes[10], b' ' | b'T')
+        && bytes[13] == b':'
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+    {
+        let month = parse_two_digits(bytes, 5)?;
+        let day = parse_two_digits(bytes, 8)?;
+        let hour = parse_two_digits(bytes, 11)?;
+        let minute = parse_two_digits(bytes, 14)?;
+        let year = value[..4].parse().ok()?;
+        return valid_minute_components(month, day, hour, minute).then_some(MinuteKey {
+            year: Some(year),
+            month,
+            day,
+            hour,
+            minute,
+        });
+    }
+    if bytes.len() >= 11
+        && matches!(bytes[2], b'-' | b'/')
+        && matches!(bytes[5], b' ' | b'T')
+        && bytes[8] == b':'
+    {
+        let month = parse_two_digits(bytes, 0)?;
+        let day = parse_two_digits(bytes, 3)?;
+        let hour = parse_two_digits(bytes, 6)?;
+        let minute = parse_two_digits(bytes, 9)?;
+        return valid_minute_components(month, day, hour, minute).then_some(MinuteKey {
+            year: None,
+            month,
+            day,
+            hour,
+            minute,
+        });
+    }
+    if bytes.len() >= 9 && bytes[4] == b'/' {
+        let month = parse_two_digits(bytes, 0)?;
+        let day = parse_two_digits(bytes, 2)?;
+        let hour = parse_two_digits(bytes, 5)?;
+        let minute = parse_two_digits(bytes, 7)?;
+        return valid_minute_components(month, day, hour, minute).then_some(MinuteKey {
+            year: None,
+            month,
+            day,
+            hour,
+            minute,
+        });
+    }
+    None
+}
+
 fn line_matches(
     layout: &LogFieldLayout,
     values: &[String],
@@ -396,8 +471,16 @@ fn line_matches(
                     }
                 }
                 LogFieldCondition::Time { start, end, .. } => {
-                    start.as_ref().map_or(true, |start| value >= start)
-                        && end.as_ref().map_or(true, |end| value <= end)
+                    let Some(value) = minute_key(value) else {
+                        return false;
+                    };
+                    start.as_ref().map_or(
+                        true,
+                        |start| matches!(minute_key(start), Some(start) if value.year.is_some() == start.year.is_some() && value >= start),
+                    ) && end.as_ref().map_or(
+                        true,
+                        |end| matches!(minute_key(end), Some(end) if value.year.is_some() == end.year.is_some() && value <= end),
+                    )
                 }
                 LogFieldCondition::Text {
                     query,
@@ -1297,6 +1380,53 @@ mod tests {
             result.statistics[0].max_time.as_deref(),
             Some("2026-06-05 12:00:00")
         );
+    }
+
+    #[test]
+    fn time_conditions_compare_at_minute_precision_without_seconds() {
+        let with_year = MinuteKey {
+            year: Some(2026),
+            month: 7,
+            day: 28,
+            hour: 17,
+            minute: 18,
+        };
+        let without_year = MinuteKey {
+            year: None,
+            ..with_year
+        };
+        assert_eq!(minute_key("2026-07-28 17:18:41.181"), Some(with_year));
+        assert_eq!(minute_key("07-28 17:18:59.999"), Some(without_year));
+        assert_eq!(minute_key("0728/171859"), Some(without_year));
+        assert_eq!(minute_key("2026-07-28 24:00"), None);
+
+        let lines = [
+            "[2026-07-28 17:17:59.999] [INFO] - before".to_string(),
+            "[2026-07-28 17:18:00.000] [INFO] - first".to_string(),
+            "[2026-07-28 17:18:59.999] [INFO] - last".to_string(),
+            "[2026-07-28 17:19:00.000] [INFO] - after".to_string(),
+        ];
+        let layout = analyze_layout(lines.len(), SamplingPhase::Quick, |index| {
+            lines.get(index).cloned()
+        })
+        .layout
+        .unwrap();
+        let conditions = [LogFieldCondition::Time {
+            field_id: "field-1".into(),
+            start: Some("2026-07-28 17:18".into()),
+            end: Some("2026-07-28 17:18".into()),
+        }];
+        let result = scan_field_lines(
+            lines.len() as u64,
+            &layout,
+            &conditions,
+            |index| Ok((lines[index as usize].clone(), false)),
+            || false,
+            |_, _, _| {},
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.matched_lines, vec![1, 2]);
     }
 
     #[test]

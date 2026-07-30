@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type {
   LogFieldCondition,
   LogFieldDefinition,
@@ -6,6 +6,7 @@ import type {
   LogFieldStatistics,
 } from '../api';
 import { useI18n } from '../i18n/I18nProvider';
+import { displayLogMinute, formatPickerMinute, toPickerMinute } from '../util/logFieldDateTime';
 
 interface Props {
   layout: LogFieldLayout | null;
@@ -49,6 +50,75 @@ function commonFieldControlWidth(fields: LogFieldDefinition[]) {
   const fieldWidth = Math.max(4, ...fields.map((field) => field.displayWidth));
   const labelWidth = Math.max(...fields.map((field) => fieldNameDisplayWidth(field.name))) + 2;
   return `max(${fieldWidth}ch, calc(${labelWidth}ch + 16px))`;
+}
+
+interface MinuteDateTimePickerProps {
+  label: string;
+  value?: string;
+  placeholder?: string;
+  onChange: (value?: string) => void;
+}
+
+function MinuteDateTimePicker({ label, value, placeholder, onChange }: MinuteDateTimePickerProps) {
+  const { t } = useI18n();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const sample = value ?? placeholder;
+  const pickerValue = toPickerMinute(value ?? placeholder);
+  const displayValue = displayLogMinute(value);
+
+  const openPicker = () => {
+    const input = inputRef.current;
+    if (!input) return;
+    try {
+      if (typeof input.showPicker === 'function') input.showPicker();
+      else input.click();
+    } catch {
+      input.focus();
+    }
+  };
+
+  return (
+    <div className="log-field-datetime" role="group" aria-label={label}>
+      <span className="log-field-datetime-label">{label}</span>
+      <div className="log-field-datetime-row">
+        <button
+          type="button"
+          className="log-field-datetime-trigger"
+          aria-haspopup="dialog"
+          aria-label={label}
+          onClick={openPicker}
+        >
+          {displayValue ?? t('fields.chooseDateTime')}
+        </button>
+        <input
+          ref={inputRef}
+          className="log-field-native-datetime"
+          type="datetime-local"
+          step={60}
+          tabIndex={-1}
+          aria-label={t('fields.calendarFor', { label })}
+          value={pickerValue}
+          onInput={(event) => {
+            const next = formatPickerMinute(event.currentTarget.value, sample);
+            if (next) onChange(next);
+          }}
+        />
+        {value && (
+          <button
+            type="button"
+            className="log-field-datetime-clear"
+            aria-label={t('fields.clearBoundary', { label })}
+            onClick={() => onChange(undefined)}
+          >
+            ×
+          </button>
+        )}
+      </div>
+      {!value && placeholder && (
+        <small className="log-field-datetime-hint">{displayLogMinute(placeholder)}</small>
+      )}
+    </div>
+  );
 }
 
 export function LogFieldFilterBar({
@@ -192,46 +262,36 @@ export function LogFieldFilterBar({
                 <div className="log-field-popover">
                   {field.fieldType === 'time' && (
                     <>
-                      <label>
-                        {t('fields.start')}
-                        <input
-                          value={condition?.kind === 'time' ? (condition.start ?? '') : ''}
-                          placeholder={stats?.minTime}
-                          onInput={(event) => {
-                            const start = event.currentTarget.value || undefined;
-                            const end = condition?.kind === 'time' ? condition.end : undefined;
-                            onConditionsChange(
-                              replaceCondition(
-                                conditions,
-                                field.id,
-                                start || end
-                                  ? { kind: 'time', fieldId: field.id, start, end }
-                                  : null,
-                              ),
-                            );
-                          }}
-                        />
-                      </label>
-                      <label>
-                        {t('fields.end')}
-                        <input
-                          value={condition?.kind === 'time' ? (condition.end ?? '') : ''}
-                          placeholder={stats?.maxTime}
-                          onInput={(event) => {
-                            const end = event.currentTarget.value || undefined;
-                            const start = condition?.kind === 'time' ? condition.start : undefined;
-                            onConditionsChange(
-                              replaceCondition(
-                                conditions,
-                                field.id,
-                                start || end
-                                  ? { kind: 'time', fieldId: field.id, start, end }
-                                  : null,
-                              ),
-                            );
-                          }}
-                        />
-                      </label>
+                      <MinuteDateTimePicker
+                        label={t('fields.start')}
+                        value={condition?.kind === 'time' ? condition.start : undefined}
+                        placeholder={stats?.minTime}
+                        onChange={(start) => {
+                          const end = condition?.kind === 'time' ? condition.end : undefined;
+                          onConditionsChange(
+                            replaceCondition(
+                              conditions,
+                              field.id,
+                              start || end ? { kind: 'time', fieldId: field.id, start, end } : null,
+                            ),
+                          );
+                        }}
+                      />
+                      <MinuteDateTimePicker
+                        label={t('fields.end')}
+                        value={condition?.kind === 'time' ? condition.end : undefined}
+                        placeholder={stats?.maxTime}
+                        onChange={(end) => {
+                          const start = condition?.kind === 'time' ? condition.start : undefined;
+                          onConditionsChange(
+                            replaceCondition(
+                              conditions,
+                              field.id,
+                              start || end ? { kind: 'time', fieldId: field.id, start, end } : null,
+                            ),
+                          );
+                        }}
+                      />
                     </>
                   )}
                   {(field.fieldType === 'level' ||
