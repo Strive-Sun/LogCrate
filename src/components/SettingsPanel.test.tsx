@@ -48,6 +48,8 @@ function renderSettings(overrides: Partial<ComponentProps<typeof SettingsPanel>>
     searchFeature: { currentEnabled: false, nextLaunchEnabled: false },
     searchPreferenceSaving: false,
     onSearchEnabledChange: () => undefined,
+    uiTemplate: 'native',
+    onUiTemplateChange: () => undefined,
     ...overrides,
   };
   return harness.render(
@@ -79,6 +81,40 @@ test('pending next-launch state is visible and saving disables the toggle', () =
   );
 });
 
+test('settings shows three template previews and switches through click or arrow keys', () => {
+  const requested: string[] = [];
+  renderSettings({ onUiTemplateChange: (template) => requested.push(template) });
+
+  const group = harness.screen.getByRole('radiogroup', { name: 'Interface template' });
+  const radios = harness.within(group).getAllByRole('radio');
+  assert.equal(radios.length, 3);
+  assert.equal((radios[0] as HTMLInputElement).checked, true);
+  assert.ok(harness.screen.getByText('Aurora'));
+  assert.ok(harness.screen.getByText('Amber'));
+
+  harness.fireEvent.click(radios[1]);
+  assert.equal(requested.at(-1), 'aurora');
+  radios[0].focus();
+  harness.fireEvent.keyDown(radios[0], { key: 'ArrowLeft' });
+  assert.equal(requested.at(-1), 'amber');
+  assert.equal(document.activeElement, radios[2]);
+});
+
+test('template choices remain available in a narrow settings viewport', () => {
+  const originalWidth = window.innerWidth;
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 360 });
+  try {
+    renderSettings({ uiTemplate: 'amber' });
+    assert.equal(harness.screen.getAllByRole('radio').length, 3);
+    assert.equal(
+      (harness.screen.getByRole('radio', { name: /Amber/ }) as HTMLInputElement).checked,
+      true,
+    );
+  } finally {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
+  }
+});
+
 test('disabled search entry cannot be clicked and exposes its settings hint on hover', () => {
   let opened = 0;
   const props: ComponentProps<typeof TopBar> = {
@@ -87,6 +123,8 @@ test('disabled search entry cannot be clicked and exposes its settings hint on h
     searchFeature: { currentEnabled: false, nextLaunchEnabled: false },
     searchPreferenceSaving: false,
     onSearchEnabledChange: () => undefined,
+    uiTemplate: 'native',
+    onUiTemplateChange: () => undefined,
     theme: 'light',
     onToggleTheme: () => undefined,
     count: 0,
@@ -127,6 +165,8 @@ test('enabled search entry opens only through normal button activation without s
     searchFeature: { currentEnabled: true, nextLaunchEnabled: true },
     searchPreferenceSaving: false,
     onSearchEnabledChange: () => undefined,
+    uiTemplate: 'native',
+    onUiTemplateChange: () => undefined,
     theme: 'light',
     onToggleTheme: () => undefined,
     count: 0,

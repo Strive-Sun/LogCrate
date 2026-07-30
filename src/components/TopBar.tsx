@@ -3,6 +3,7 @@ import type { AppUpdateInfo, AppUpdateProgress, FileSearchFeatureState, NewLogIt
 import type { UpdateStatus } from '../util/update';
 import { SettingsPanel } from './SettingsPanel';
 import { useI18n } from '../i18n/I18nProvider';
+import type { UiTemplate } from '../util/uiTemplate';
 
 interface Props {
   onOpenSearch: () => void;
@@ -10,6 +11,8 @@ interface Props {
   searchFeature: FileSearchFeatureState | null;
   searchPreferenceSaving: boolean;
   onSearchEnabledChange: (enabled: boolean) => void;
+  uiTemplate: UiTemplate;
+  onUiTemplateChange: (template: UiTemplate) => void;
   theme: 'dark' | 'light';
   onToggleTheme: () => void;
   count: number;
@@ -168,6 +171,8 @@ export function TopBar(props: Props) {
             searchFeature={props.searchFeature}
             searchPreferenceSaving={props.searchPreferenceSaving}
             onSearchEnabledChange={props.onSearchEnabledChange}
+            uiTemplate={props.uiTemplate}
+            onUiTemplateChange={props.onUiTemplateChange}
           />
         </>
       )}

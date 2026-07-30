@@ -43,7 +43,12 @@ import {
 import { planFileDrop, singleDroppedPath } from './util/fileDrop';
 import { nextSearchOpen, searchRestartNoticeKey } from './util/searchFeature';
 import { installAutoHideScrollbars } from './util/autoHideScrollbars';
-import { applyUiTemplate, loadUiTemplate } from './util/uiTemplate';
+import {
+  applyUiTemplate,
+  loadUiTemplate,
+  saveUiTemplate,
+  type UiTemplate,
+} from './util/uiTemplate';
 import { useI18n } from './i18n/I18nProvider';
 import { localizeKnownError } from './i18n/errors';
 import {
@@ -126,7 +131,7 @@ export function App() {
     [t],
   );
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
-  const [uiTemplate] = useState(() => loadUiTemplate(localStorage));
+  const [uiTemplate, setUiTemplate] = useState(() => loadUiTemplate(localStorage));
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [fileSearchMounted, setFileSearchMounted] = useState(false);
   const [searchFeature, setSearchFeature] = useState<FileSearchFeatureState | null>(null);
@@ -285,6 +290,11 @@ export function App() {
   const changeAutoCheckUpdates = useCallback((enabled: boolean) => {
     setAutoCheckUpdates(enabled);
     saveAutoCheck(localStorage, enabled);
+  }, []);
+
+  const changeUiTemplate = useCallback((template: UiTemplate) => {
+    setUiTemplate(template);
+    saveUiTemplate(localStorage, template);
   }, []);
 
   const skipUpdate = useCallback(() => {
@@ -1217,6 +1227,8 @@ export function App() {
         searchFeature={searchFeature}
         searchPreferenceSaving={searchPreferenceSaving}
         onSearchEnabledChange={(enabled) => void changeSearchEnabled(enabled)}
+        uiTemplate={uiTemplate}
+        onUiTemplateChange={changeUiTemplate}
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
         count={count}

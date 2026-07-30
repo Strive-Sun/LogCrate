@@ -1,6 +1,7 @@
 import type { AppUpdateInfo, AppUpdateProgress, FileSearchFeatureState } from '../api';
 import { formatBytes, type UpdateStatus } from '../util/update';
 import { useI18n } from '../i18n/I18nProvider';
+import type { UiTemplate } from '../util/uiTemplate';
 
 interface Props {
   currentVersion: string;
@@ -19,9 +20,28 @@ interface Props {
   searchFeature: FileSearchFeatureState | null;
   searchPreferenceSaving: boolean;
   onSearchEnabledChange: (enabled: boolean) => void;
+  uiTemplate: UiTemplate;
+  onUiTemplateChange: (template: UiTemplate) => void;
 }
 
 const busyStatuses: UpdateStatus[] = ['checking', 'downloading', 'installing'];
+const templateOptions = [
+  {
+    value: 'native',
+    nameKey: 'settings.template.native',
+    hintKey: 'settings.template.nativeHint',
+  },
+  {
+    value: 'aurora',
+    nameKey: 'settings.template.aurora',
+    hintKey: 'settings.template.auroraHint',
+  },
+  {
+    value: 'amber',
+    nameKey: 'settings.template.amber',
+    hintKey: 'settings.template.amberHint',
+  },
+] as const;
 
 export function SettingsPanel(props: Props) {
   const { preference, setPreference, t } = useI18n();
@@ -31,6 +51,23 @@ export function SettingsPanel(props: Props) {
       ? `${formatBytes(props.progress.downloadedBytes)} / ${formatBytes(props.progress.totalBytes)}`
       : t('update.downloaded', { size: formatBytes(props.progress.downloadedBytes) })
     : '';
+
+  const onTemplateKeyDown = (event: React.KeyboardEvent<HTMLInputElement>, index: number) => {
+    const direction =
+      event.key === 'ArrowRight' || event.key === 'ArrowDown'
+        ? 1
+        : event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+          ? -1
+          : 0;
+    if (!direction) return;
+    event.preventDefault();
+    const nextIndex = (index + direction + templateOptions.length) % templateOptions.length;
+    props.onUiTemplateChange(templateOptions[nextIndex].value);
+    const inputs = event.currentTarget
+      .closest('.ui-template-options')
+      ?.querySelectorAll<HTMLInputElement>('input[type="radio"]');
+    inputs?.[nextIndex]?.focus();
+  };
 
   return (
     <div className="pop settings-pop" role="dialog" aria-label={t('settings.title')}>
@@ -101,6 +138,52 @@ export function SettingsPanel(props: Props) {
             onChange={(event) => props.onSearchEnabledChange(event.target.checked)}
           />
         </label>
+      </div>
+
+      <div className="settings-section settings-template-section">
+        <div className="settings-template-heading">
+          <div className="settings-label">{t('settings.template')}</div>
+          <div className="settings-hint">{t('settings.templateHint')}</div>
+        </div>
+        <div className="ui-template-options" role="radiogroup" aria-label={t('settings.template')}>
+          {templateOptions.map((option, index) => {
+            const selected = props.uiTemplate === option.value;
+            return (
+              <label
+                className={'ui-template-card' + (selected ? ' is-selected' : '')}
+                key={option.value}
+              >
+                <input
+                  className="ui-template-input"
+                  type="radio"
+                  name="ui-template"
+                  value={option.value}
+                  checked={selected}
+                  onChange={() => props.onUiTemplateChange(option.value)}
+                  onKeyDown={(event) => onTemplateKeyDown(event, index)}
+                />
+                <span className={`ui-template-preview is-${option.value}`} aria-hidden="true">
+                  <span className="ui-template-preview-top" />
+                  <span className="ui-template-preview-body">
+                    <i />
+                    <span>
+                      <i />
+                      <i />
+                      <i />
+                    </span>
+                  </span>
+                </span>
+                <span className="ui-template-card-copy">
+                  <strong>{t(option.nameKey)}</strong>
+                  <small>{t(option.hintKey)}</small>
+                </span>
+                <span className="ui-template-check" aria-hidden="true">
+                  {selected ? '✓' : ''}
+                </span>
+              </label>
+            );
+          })}
+        </div>
       </div>
 
       {props.macOsFileAccessSupported && (
