@@ -4,6 +4,7 @@ use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::windows::io::{FromRawHandle, RawHandle};
+use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, sleep};
@@ -12,7 +13,7 @@ use widestring::U16CString;
 use windows_service::service::{ServiceAccess, ServiceState};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
+    CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -23,6 +24,8 @@ use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
+use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 
 pub const SERVICE_NAME: &str = "LogCrateIndex";
 pub const PIPE_NAME: &str = r"\\.\pipe\LogCrate.Index.v2";
@@ -34,6 +37,11 @@ const MAX_BATCH_RECORDS: usize = 131_072;
 const MAX_CONCURRENT_CLIENTS: usize = 4;
 const PIPE_BUFFER_SIZE: u32 = 1024 * 1024;
 const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
+const ERROR_ACCESS_DENIED: i32 = 5;
+const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
+const ERROR_CANCELLED: i32 = 1223;
+const REPAIR_EXECUTABLE_NAME: &str = "logcrate_index_service.exe";
+const REPAIR_ARGUMENTS: &str = "--install";
 
 const REQUEST_HELLO: u16 = 1;
 const REQUEST_ENUMERATE_MFT: u16 = 2;
@@ -74,6 +82,53 @@ pub enum Response {
     UsnComplete(UsnReadSummary),
     Error { code: u32, message: String },
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceFailureCode {
+    Missing,
+    AccessDenied,
+    StartFailed,
+    NotReady,
+    ProtocolMismatch,
+    ElevationCancelled,
+    RepairExecutableMissing,
+    RepairFailed,
+}
+
+impl ServiceFailureCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::AccessDenied => "accessDenied",
+            Self::StartFailed => "startFailed",
+            Self::NotReady => "notReady",
+            Self::ProtocolMismatch => "protocolMismatch",
+            Self::ElevationCancelled => "elevationCancelled",
+            Self::RepairExecutableMissing => "repairExecutableMissing",
+            Self::RepairFailed => "repairFailed",
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("[{code}] {message}", code = .code.as_str())]
+pub struct ServiceFailure {
+    pub code: ServiceFailureCode,
+    pub message: String,
+}
+
+impl ServiceFailure {
+    fn new(code: ServiceFailureCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("IPC 协议版本不兼容: {0}")]
+struct ProtocolVersionMismatch(u16);
 
 pub fn enumerate_mft_via_service<F>(volume: char, mut on_batch: F) -> anyhow::Result<MftEnumeration>
 where
@@ -131,18 +186,41 @@ where
     }
 }
 
-pub fn repair_service() -> anyhow::Result<()> {
+pub fn repair_service() -> Result<(), ServiceFailure> {
+    let executable = repair_executable_path(&std::env::current_exe().map_err(|error| {
+        ServiceFailure::new(
+            ServiceFailureCode::RepairFailed,
+            format!("无法确定 LogCrate 安装位置: {error}"),
+        )
+    })?)?;
+    validate_repair_executable(&executable)?;
+    let exit_code = run_elevated_repair(&executable)?;
+    interpret_repair_exit_code(exit_code)?;
     start_installed_service()?;
-    connect_and_handshake().map(|_| ())
+    connect_and_handshake_diagnostic().map(|_| ())
 }
 
 fn connect_and_handshake() -> anyhow::Result<File> {
+    connect_and_handshake_diagnostic().map_err(anyhow::Error::new)
+}
+
+fn connect_and_handshake_diagnostic() -> Result<File, ServiceFailure> {
     let mut pipe = connect()?;
-    write_request(&mut pipe, &Request::Hello)?;
-    match read_response(&mut pipe)? {
+    write_request(&mut pipe, &Request::Hello).map_err(handshake_failure)?;
+    match read_response(&mut pipe).map_err(handshake_failure)? {
         Response::Hello { protocol } if protocol == PROTOCOL_VERSION => Ok(pipe),
-        Response::Error { code, message } => bail!("索引服务错误 {code}: {message}"),
-        response => bail!("索引服务握手响应无效: {response:?}"),
+        Response::Hello { protocol } => Err(ServiceFailure::new(
+            ServiceFailureCode::ProtocolMismatch,
+            format!("索引服务协议版本不兼容: {protocol}"),
+        )),
+        Response::Error { code, message } => Err(ServiceFailure::new(
+            ServiceFailureCode::NotReady,
+            format!("索引服务握手失败 {code}: {message}"),
+        )),
+        response => Err(ServiceFailure::new(
+            ServiceFailureCode::ProtocolMismatch,
+            format!("索引服务握手响应不兼容: {response:?}"),
+        )),
     }
 }
 
@@ -322,9 +400,13 @@ fn write_service_error(pipe: &mut File, error: &anyhow::Error) -> anyhow::Result
     )
 }
 
-fn connect() -> anyhow::Result<File> {
-    if let Ok(pipe) = open_pipe() {
-        return Ok(pipe);
+fn connect() -> Result<File, ServiceFailure> {
+    match open_pipe() {
+        Ok(pipe) => return Ok(pipe),
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+            return Err(pipe_open_failure(error));
+        }
+        Err(_) => {}
     }
     start_installed_service()?;
     let started = Instant::now();
@@ -334,30 +416,199 @@ fn connect() -> anyhow::Result<File> {
     while started.elapsed() < Duration::from_secs(60) {
         match open_pipe() {
             Ok(pipe) => return Ok(pipe),
+            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+                return Err(pipe_open_failure(error));
+            }
             Err(_) => sleep(Duration::from_millis(50)),
         }
     }
-    open_pipe().context("LogCrate Index Service 已启动但 named pipe 未就绪")
+    open_pipe().map_err(pipe_open_failure)
 }
 
 fn open_pipe() -> io::Result<File> {
     OpenOptions::new().read(true).write(true).open(PIPE_NAME)
 }
 
-fn start_installed_service() -> anyhow::Result<()> {
+fn pipe_open_failure(error: io::Error) -> ServiceFailure {
+    let code = if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) {
+        ServiceFailureCode::AccessDenied
+    } else {
+        ServiceFailureCode::NotReady
+    };
+    ServiceFailure::new(
+        code,
+        format!("无法连接 LogCrate Index Service named pipe: {error}"),
+    )
+}
+
+fn start_installed_service() -> Result<(), ServiceFailure> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-        .context("无法连接 Windows Service Control Manager")?;
+        .map_err(|error| classify_service_error("连接 Windows Service Control Manager", error))?;
     let service = manager
         .open_service(
             SERVICE_NAME,
             ServiceAccess::START | ServiceAccess::QUERY_STATUS,
         )
-        .context("LogCrate Index Service 未安装或当前用户无权启动")?;
-    let state = service.query_status()?.current_state;
+        .map_err(|error| classify_service_error("打开 LogCrate Index Service", error))?;
+    let state = service
+        .query_status()
+        .map_err(|error| classify_service_error("查询 LogCrate Index Service 状态", error))?
+        .current_state;
     if !matches!(state, ServiceState::Running | ServiceState::StartPending) {
-        service.start::<&str>(&[])?;
+        service
+            .start::<&str>(&[])
+            .map_err(|error| classify_service_error("启动 LogCrate Index Service", error))?;
     }
     Ok(())
+}
+
+fn classify_service_error(stage: &str, error: windows_service::Error) -> ServiceFailure {
+    let raw_code = match &error {
+        windows_service::Error::Winapi(error) => error.raw_os_error(),
+        _ => None,
+    };
+    let code = classify_service_win32_code(raw_code);
+    let detail = raw_code
+        .map(|raw| format!("Win32 {raw}"))
+        .unwrap_or_else(|| error.to_string());
+    ServiceFailure::new(code, format!("{stage}失败（{detail}）"))
+}
+
+fn classify_service_win32_code(raw_code: Option<i32>) -> ServiceFailureCode {
+    match raw_code {
+        Some(ERROR_SERVICE_DOES_NOT_EXIST) => ServiceFailureCode::Missing,
+        Some(ERROR_ACCESS_DENIED) => ServiceFailureCode::AccessDenied,
+        _ => ServiceFailureCode::StartFailed,
+    }
+}
+
+fn handshake_failure(error: anyhow::Error) -> ServiceFailure {
+    if let Some(mismatch) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ProtocolVersionMismatch>())
+    {
+        return ServiceFailure::new(ServiceFailureCode::ProtocolMismatch, mismatch.to_string());
+    }
+    ServiceFailure::new(
+        ServiceFailureCode::NotReady,
+        format!("索引服务 IPC 握手未就绪: {error:#}"),
+    )
+}
+
+fn repair_executable_path(gui_executable: &Path) -> Result<PathBuf, ServiceFailure> {
+    let directory = gui_executable.parent().ok_or_else(|| {
+        ServiceFailure::new(
+            ServiceFailureCode::RepairExecutableMissing,
+            "LogCrate 可执行文件没有可用的安装目录",
+        )
+    })?;
+    Ok(directory.join(REPAIR_EXECUTABLE_NAME))
+}
+
+fn validate_repair_executable(executable: &Path) -> Result<(), ServiceFailure> {
+    if executable.is_file() {
+        return Ok(());
+    }
+    Err(ServiceFailure::new(
+        ServiceFailureCode::RepairExecutableMissing,
+        format!("修复程序不存在: {}", executable.display()),
+    ))
+}
+
+fn interpret_repair_exit_code(exit_code: u32) -> Result<(), ServiceFailure> {
+    if exit_code == 0 {
+        return Ok(());
+    }
+    Err(ServiceFailure::new(
+        ServiceFailureCode::RepairFailed,
+        format!("索引服务重新注册程序退出码为 {exit_code}"),
+    ))
+}
+
+fn run_elevated_repair(executable: &Path) -> Result<u32, ServiceFailure> {
+    let verb = U16CString::from_str("runas").expect("runas does not contain NUL");
+    let parameters =
+        U16CString::from_str(REPAIR_ARGUMENTS).expect("fixed repair arguments do not contain NUL");
+    let executable_wide = U16CString::from_os_str(executable.as_os_str()).map_err(|error| {
+        ServiceFailure::new(
+            ServiceFailureCode::RepairFailed,
+            format!("修复程序路径无效: {error}"),
+        )
+    })?;
+    let directory_wide = executable
+        .parent()
+        .map(|directory| U16CString::from_os_str(directory.as_os_str()))
+        .transpose()
+        .map_err(|error| {
+            ServiceFailure::new(
+                ServiceFailureCode::RepairFailed,
+                format!("修复程序工作目录无效: {error}"),
+            )
+        })?;
+    let mut execute = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: verb.as_ptr(),
+        lpFile: executable_wide.as_ptr(),
+        lpParameters: parameters.as_ptr(),
+        lpDirectory: directory_wide
+            .as_ref()
+            .map_or(std::ptr::null(), |directory| directory.as_ptr()),
+        nShow: 1,
+        ..Default::default()
+    };
+    if unsafe { ShellExecuteExW(&mut execute) } == 0 {
+        let error = io::Error::last_os_error();
+        return Err(classify_elevation_launch_error(error));
+    }
+    if execute.hProcess.is_null() {
+        return Err(ServiceFailure::new(
+            ServiceFailureCode::RepairFailed,
+            "提升权限的索引服务修复程序未返回进程句柄",
+        ));
+    }
+    let process = OwnedHandle(execute.hProcess);
+    let wait = unsafe { WaitForSingleObject(process.0, INFINITE) };
+    if wait == WAIT_FAILED {
+        return Err(ServiceFailure::new(
+            ServiceFailureCode::RepairFailed,
+            format!(
+                "等待提升权限的索引服务修复程序失败: {}",
+                io::Error::last_os_error()
+            ),
+        ));
+    }
+    if wait != WAIT_OBJECT_0 {
+        return Err(ServiceFailure::new(
+            ServiceFailureCode::RepairFailed,
+            format!("等待提升权限的索引服务修复程序返回异常状态 {wait}"),
+        ));
+    }
+    let mut exit_code = 0;
+    if unsafe { GetExitCodeProcess(process.0, &mut exit_code) } == 0 {
+        return Err(ServiceFailure::new(
+            ServiceFailureCode::RepairFailed,
+            format!(
+                "读取索引服务修复程序退出码失败: {}",
+                io::Error::last_os_error()
+            ),
+        ));
+    }
+    Ok(exit_code)
+}
+
+fn classify_elevation_launch_error(error: io::Error) -> ServiceFailure {
+    if error.raw_os_error() == Some(ERROR_CANCELLED) {
+        ServiceFailure::new(
+            ServiceFailureCode::ElevationCancelled,
+            "用户取消了索引服务修复授权",
+        )
+    } else {
+        ServiceFailure::new(
+            ServiceFailureCode::RepairFailed,
+            format!("无法启动提升权限的索引服务修复程序: {error}"),
+        )
+    }
 }
 
 fn write_request(writer: &mut impl Write, request: &Request) -> anyhow::Result<()> {
@@ -403,7 +654,7 @@ fn read_frame(reader: &mut impl Read) -> anyhow::Result<(u16, Vec<u8>)> {
     }
     let protocol = u16::from_le_bytes([header[4], header[5]]);
     if protocol != PROTOCOL_VERSION {
-        bail!("IPC 协议版本不兼容: {protocol}");
+        return Err(ProtocolVersionMismatch(protocol).into());
     }
     let kind = u16::from_le_bytes([header[6], header[7]]);
     let body_len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
@@ -636,6 +887,16 @@ impl Drop for OwnedPipe {
     }
 }
 
+struct OwnedHandle(HANDLE);
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
 struct OwnedSecurityDescriptor(*mut c_void);
 
 impl Drop for OwnedSecurityDescriptor {
@@ -718,6 +979,7 @@ mod tests {
     use super::*;
     use crate::ntfs::FileId;
     use std::io::Cursor;
+    use std::path::Path;
 
     fn record() -> MftRecord {
         MftRecord {
@@ -728,6 +990,86 @@ mod tests {
             reason: 0,
             usn: 99,
         }
+    }
+
+    #[test]
+    fn service_failure_codes_are_stable_and_stage_specific() {
+        assert_eq!(
+            classify_service_win32_code(Some(ERROR_SERVICE_DOES_NOT_EXIST)),
+            ServiceFailureCode::Missing
+        );
+        assert_eq!(
+            classify_service_win32_code(Some(ERROR_ACCESS_DENIED)),
+            ServiceFailureCode::AccessDenied
+        );
+        assert_eq!(
+            classify_service_win32_code(Some(1053)),
+            ServiceFailureCode::StartFailed
+        );
+        assert_eq!(ServiceFailureCode::Missing.as_str(), "missing");
+        assert_eq!(ServiceFailureCode::AccessDenied.as_str(), "accessDenied");
+        assert_eq!(ServiceFailureCode::StartFailed.as_str(), "startFailed");
+        assert_eq!(ServiceFailureCode::NotReady.as_str(), "notReady");
+        assert_eq!(
+            ServiceFailureCode::ProtocolMismatch.as_str(),
+            "protocolMismatch"
+        );
+        assert_eq!(
+            ServiceFailureCode::ElevationCancelled.as_str(),
+            "elevationCancelled"
+        );
+        assert_eq!(
+            ServiceFailureCode::RepairExecutableMissing.as_str(),
+            "repairExecutableMissing"
+        );
+        assert_eq!(ServiceFailureCode::RepairFailed.as_str(), "repairFailed");
+    }
+
+    #[test]
+    fn repair_target_and_arguments_are_fixed_to_the_gui_sibling() {
+        let gui = Path::new(r"C:\Program Files\LogCrate\logcrate.exe");
+        assert_eq!(
+            repair_executable_path(gui).unwrap(),
+            Path::new(r"C:\Program Files\LogCrate\logcrate_index_service.exe")
+        );
+        assert_eq!(REPAIR_EXECUTABLE_NAME, "logcrate_index_service.exe");
+        assert_eq!(REPAIR_ARGUMENTS, "--install");
+    }
+
+    #[test]
+    fn repair_launch_and_exit_failures_keep_distinct_categories() {
+        let cancelled =
+            classify_elevation_launch_error(io::Error::from_raw_os_error(ERROR_CANCELLED));
+        assert_eq!(cancelled.code, ServiceFailureCode::ElevationCancelled);
+
+        let launch_failed =
+            classify_elevation_launch_error(io::Error::from_raw_os_error(ERROR_ACCESS_DENIED));
+        assert_eq!(launch_failed.code, ServiceFailureCode::RepairFailed);
+
+        let missing = validate_repair_executable(Path::new(
+            r"C:\definitely-missing\logcrate_index_service.exe",
+        ))
+        .unwrap_err();
+        assert_eq!(missing.code, ServiceFailureCode::RepairExecutableMissing);
+        assert_eq!(
+            interpret_repair_exit_code(7).unwrap_err().code,
+            ServiceFailureCode::RepairFailed
+        );
+        assert!(interpret_repair_exit_code(0).is_ok());
+    }
+
+    #[test]
+    fn handshake_failures_distinguish_protocol_from_readiness() {
+        let mismatch = handshake_failure(ProtocolVersionMismatch(99).into());
+        assert_eq!(mismatch.code, ServiceFailureCode::ProtocolMismatch);
+
+        let unavailable = handshake_failure(anyhow!(io::Error::from_raw_os_error(2)));
+        assert_eq!(unavailable.code, ServiceFailureCode::NotReady);
+
+        let pipe_denied = pipe_open_failure(io::Error::from_raw_os_error(ERROR_ACCESS_DENIED));
+        assert_eq!(pipe_denied.code, ServiceFailureCode::AccessDenied);
+        let pipe_missing = pipe_open_failure(io::Error::from_raw_os_error(2));
+        assert_eq!(pipe_missing.code, ServiceFailureCode::NotReady);
     }
 
     #[test]
