@@ -43,6 +43,7 @@ import {
 import { planFileDrop, singleDroppedPath } from './util/fileDrop';
 import { nextSearchOpen, searchRestartNoticeKey } from './util/searchFeature';
 import { installAutoHideScrollbars } from './util/autoHideScrollbars';
+import { applyUiTemplate, loadUiTemplate } from './util/uiTemplate';
 import { useI18n } from './i18n/I18nProvider';
 import { localizeKnownError } from './i18n/errors';
 import {
@@ -125,6 +126,7 @@ export function App() {
     [t],
   );
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
+  const [uiTemplate] = useState(() => loadUiTemplate(localStorage));
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [fileSearchMounted, setFileSearchMounted] = useState(false);
   const [searchFeature, setSearchFeature] = useState<FileSearchFeatureState | null>(null);
@@ -376,6 +378,10 @@ export function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  useEffect(() => {
+    applyUiTemplate(document.documentElement, uiTemplate);
+  }, [uiTemplate]);
 
   useEffect(() => installAutoHideScrollbars(document), []);
 
