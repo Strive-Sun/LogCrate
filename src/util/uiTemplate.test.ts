@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { JSDOM } from 'jsdom';
 import {
@@ -57,5 +58,19 @@ describe('界面模板偏好', () => {
     applyUiTemplate(root, 'amber');
     assert.equal(root.dataset.uiTemplate, 'amber');
     assert.equal(root.dataset.theme, 'dark');
+  });
+
+  it('为两套丰富模板提供深浅变量、全局材质和减少动态效果降级', () => {
+    const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+    assert.match(css, /:root\[data-ui-template='aurora'\]/);
+    assert.match(css, /:root\[data-theme='light'\]\[data-ui-template='aurora'\]/);
+    assert.match(css, /:root\[data-ui-template='amber'\]/);
+    assert.match(css, /:root\[data-theme='light'\]\[data-ui-template='amber'\]/);
+    assert.match(css, /--ui-template-accent-gradient:/);
+    assert.match(css, /prefers-reduced-motion: reduce/);
+
+    const templateRules = css.slice(css.indexOf('/* ===== 极光 / 琥珀全局组件材质 ===== */'));
+    assert.doesNotMatch(templateRules, /--log-font-size|--log-gutter-width/);
+    assert.doesNotMatch(templateRules, /font-family:\s*var\(--log-font\)/);
   });
 });
