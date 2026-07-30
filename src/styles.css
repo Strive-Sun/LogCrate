@@ -440,6 +440,17 @@ button {
 .file-search-provider .file-search-provider-metrics {
   color: var(--muted);
 }
+.file-search-repair-feedback {
+  display: block;
+  margin-top: 8px;
+  line-height: 1.45;
+}
+.file-search-repair-feedback.success {
+  color: var(--info);
+}
+.file-search-repair-feedback.error {
+  color: var(--error);
+}
 .file-search-root-list code,
 .file-search-path-list code {
   overflow: hidden;

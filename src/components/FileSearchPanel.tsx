@@ -6,10 +6,13 @@ import type {
   FileSearchConfig,
   FileSearchFilter,
   FileSearchResult,
+  FileSearchServiceErrorCode,
   FileSearchStatus,
 } from '../api';
 import { useI18n } from '../i18n/I18nProvider';
+import type { MessageKey } from '../i18n/messages';
 import { localizeKnownError } from '../i18n/errors';
+import { normalizeFileSearchServiceRepairError } from '../util/fileSearchServiceRepair';
 import { fmtNum, fmtSize } from '../util/format';
 import {
   mergeSearchResults,
@@ -23,6 +26,17 @@ import { ContextMenu } from './ContextMenu';
 
 const PAGE_SIZE = 200;
 const MAX_VISIBLE_RESULTS = 1_000;
+
+const SERVICE_REPAIR_ERROR_KEYS: Record<FileSearchServiceErrorCode, MessageKey> = {
+  missing: 'search.repairError.missing',
+  accessDenied: 'search.repairError.accessDenied',
+  startFailed: 'search.repairError.startFailed',
+  notReady: 'search.repairError.notReady',
+  protocolMismatch: 'search.repairError.protocolMismatch',
+  elevationCancelled: 'search.repairError.elevationCancelled',
+  repairExecutableMissing: 'search.repairError.repairExecutableMissing',
+  repairFailed: 'search.repairError.repairFailed',
+};
 
 const INITIAL_SEARCH_STATUS: FileSearchStatus = {
   phase: 'scanning',
@@ -117,6 +131,10 @@ export function FileSearchPanel({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [clearArmed, setClearArmed] = useState(false);
   const [repairingService, setRepairingService] = useState(false);
+  const [repairFeedback, setRepairFeedback] = useState<{
+    kind: 'success' | 'error';
+    message: string;
+  } | null>(null);
   const [macOsFileAccessSupported, setMacOsFileAccessSupported] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number; item: FileSearchResult } | null>(null);
   const [archive, setArchive] = useState<ArchiveView | null>(null);
@@ -124,7 +142,30 @@ export function FileSearchPanel({
   const programmaticFocus = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const queryGeneration = useRef(0);
+  const repairInFlight = useRef(false);
   const progressRefreshKey = searchProgressRefreshKey(status);
+
+  const repairService = async () => {
+    if (repairInFlight.current) return;
+    if (!window.confirm(t('search.repairConfirm'))) return;
+    repairInFlight.current = true;
+    setRepairingService(true);
+    setRepairFeedback(null);
+    try {
+      await api.repairFileSearchService();
+      await api.startFileSearchIndex(false);
+      setRepairFeedback({ kind: 'success', message: t('search.repairSucceeded') });
+    } catch (reason) {
+      const failure = normalizeFileSearchServiceRepairError(reason);
+      setRepairFeedback({
+        kind: 'error',
+        message: t(SERVICE_REPAIR_ERROR_KEYS[failure.code], { detail: failure.message }),
+      });
+    } finally {
+      repairInFlight.current = false;
+      setRepairingService(false);
+    }
+  };
 
   const virtualizer = useVirtualizer({
     count: items.length,
@@ -497,20 +538,17 @@ export function FileSearchPanel({
           {status.providers.some(
             (provider) => provider.provider === 'folderScan' && provider.fallbackReason,
           ) && (
-            <button
-              disabled={repairingService}
-              onClick={() => {
-                setRepairingService(true);
-                setError(null);
-                void api
-                  .repairFileSearchService()
-                  .then(() => api.startFileSearchIndex(false))
-                  .catch((reason) => setError(String(reason)))
-                  .finally(() => setRepairingService(false));
-              }}
-            >
+            <button disabled={repairingService} onClick={() => void repairService()}>
               {t(repairingService ? 'search.repairingService' : 'search.repairService')}
             </button>
+          )}
+          {repairFeedback && (
+            <small
+              className={`file-search-repair-feedback ${repairFeedback.kind}`}
+              role={repairFeedback.kind === 'error' ? 'alert' : 'status'}
+            >
+              {repairFeedback.message}
+            </small>
           )}
           <label>{t('search.exclusions')}</label>
           <div className="file-search-path-list">

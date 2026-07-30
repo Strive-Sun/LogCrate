@@ -599,20 +599,44 @@ async fn set_file_search_exclusions(
 
 #[cfg(desktop)]
 #[tauri::command]
-async fn repair_file_search_service(state: State<'_, AppState>) -> Result<(), String> {
+async fn repair_file_search_service(
+    state: State<'_, AppState>,
+) -> Result<(), FileSearchServiceRepairError> {
     let state = state.ready().await;
-    let _search = ready_search(state).await?;
+    let _search = ready_search(state)
+        .await
+        .map_err(|message| FileSearchServiceRepairError {
+            code: "repairFailed",
+            message,
+        })?;
     #[cfg(windows)]
     {
         tauri::async_runtime::spawn_blocking(crate::ntfs::ipc::repair_service)
             .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())
+            .map_err(|error| FileSearchServiceRepairError {
+                code: "repairFailed",
+                message: format!("索引服务修复后台任务失败: {error}"),
+            })?
+            .map_err(|error| FileSearchServiceRepairError {
+                code: error.code.as_str(),
+                message: error.message,
+            })
     }
     #[cfg(not(windows))]
     {
-        Err("NTFS 快速索引服务仅适用于 Windows".into())
+        Err(FileSearchServiceRepairError {
+            code: "repairFailed",
+            message: "NTFS 快速索引服务仅适用于 Windows".into(),
+        })
     }
+}
+
+#[cfg(desktop)]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileSearchServiceRepairError {
+    code: &'static str,
+    message: String,
 }
 
 #[cfg(desktop)]
@@ -1503,6 +1527,18 @@ pub fn run() {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+
+    #[cfg(desktop)]
+    #[test]
+    fn file_search_service_repair_errors_serialize_stable_code_and_message() {
+        let value = serde_json::to_value(FileSearchServiceRepairError {
+            code: "accessDenied",
+            message: "Win32 5".into(),
+        })
+        .unwrap();
+        assert_eq!(value["code"], "accessDenied");
+        assert_eq!(value["message"], "Win32 5");
+    }
 
     #[test]
     fn file_revision_reports_changes_and_missing_sources() {

@@ -9,6 +9,7 @@ import { relaunch } from '@tauri-apps/plugin-process';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import { IndexProgressStore } from '../util/indexProgress';
 import { exportSnapshotAfterSelection } from '../util/snapshotExport';
+import { normalizeFileSearchServiceRepairError } from '../util/fileSearchServiceRepair';
 import { downloadPercent, updateFailureMessage } from '../util/update';
 import type {
   AppUpdateInfo,
@@ -574,7 +575,11 @@ export const tauriApi = {
   },
 
   async repairFileSearchService(): Promise<void> {
-    await invoke('repair_file_search_service');
+    try {
+      await invoke('repair_file_search_service');
+    } catch (reason) {
+      throw normalizeFileSearchServiceRepairError(reason);
+    }
   },
 
   searchFiles(

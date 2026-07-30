@@ -297,6 +297,16 @@ export interface FileSearchStatus {
   error?: string;
 }
 
+export type FileSearchServiceErrorCode =
+  | 'missing'
+  | 'accessDenied'
+  | 'startFailed'
+  | 'notReady'
+  | 'protocolMismatch'
+  | 'elevationCancelled'
+  | 'repairExecutableMissing'
+  | 'repairFailed';
+
 export type FileSearchFilter = 'all' | 'log' | 'archive';
 
 export interface FileSearchResult {

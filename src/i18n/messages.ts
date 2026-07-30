@@ -52,6 +52,20 @@ export const en = {
   'search.stage.multiple': 'Multiple volume stages are running',
   'search.repairService': 'Repair NTFS index service',
   'search.repairingService': 'Repairing index service…',
+  'search.repairConfirm':
+    'Windows will ask for administrator approval to re-register the fixed LogCrate index service. Continue?',
+  'search.repairSucceeded': 'The index service was repaired. Indexing has restarted.',
+  'search.repairError.missing': 'The service is still not registered. {detail}',
+  'search.repairError.accessDenied': 'Windows denied access to the index service. {detail}',
+  'search.repairError.startFailed': 'The index service could not start. {detail}',
+  'search.repairError.notReady': 'The index service started, but IPC is not ready. {detail}',
+  'search.repairError.protocolMismatch':
+    'The installed index service protocol is incompatible with this LogCrate version. {detail}',
+  'search.repairError.elevationCancelled':
+    'Service repair was cancelled. Compatible folder scanning remains available.',
+  'search.repairError.repairExecutableMissing':
+    'The index service repair program is missing. Reinstall LogCrate. {detail}',
+  'search.repairError.repairFailed': 'The index service could not be repaired. {detail}',
   'search.exclusions': 'Excluded folders',
   'search.noExclusions': 'No excluded folders',
   'search.addExclusion': 'Exclude a folder',
@@ -355,6 +369,18 @@ export const zhCN: MessageDictionary = {
   'search.stage.multiple': '多个磁盘正在执行不同阶段',
   'search.repairService': '修复 NTFS 索引服务',
   'search.repairingService': '正在修复索引服务…',
+  'search.repairConfirm':
+    'Windows 将请求管理员授权，以固定的 LogCrate 索引服务程序重新注册服务。是否继续？',
+  'search.repairSucceeded': '索引服务已修复，并已重新开始索引。',
+  'search.repairError.missing': '服务仍未注册。{detail}',
+  'search.repairError.accessDenied': 'Windows 拒绝访问索引服务。{detail}',
+  'search.repairError.startFailed': '索引服务无法启动。{detail}',
+  'search.repairError.notReady': '索引服务已启动，但 IPC 尚未就绪。{detail}',
+  'search.repairError.protocolMismatch': '已安装索引服务的协议与当前 LogCrate 版本不兼容。{detail}',
+  'search.repairError.elevationCancelled': '服务修复已取消，兼容目录扫描仍可继续使用。',
+  'search.repairError.repairExecutableMissing':
+    '索引服务修复程序缺失，请重新安装 LogCrate。{detail}',
+  'search.repairError.repairFailed': '索引服务修复失败。{detail}',
   'search.exclusions': '排除的目录',
   'search.noExclusions': '没有排除目录',
   'search.addExclusion': '排除一个目录',
