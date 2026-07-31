@@ -17,26 +17,75 @@ const [nsis, wix, tauriConfigText, windowsConfigText, cargoManifest] = await Pro
 const tauriConfig = JSON.parse(tauriConfigText);
 const windowsConfig = JSON.parse(windowsConfigText);
 
+function macroBody(source, name) {
+  const match = source.match(new RegExp(`!macro ${name}\\r?\\n([\\s\\S]*?)!macroend`));
+  assert(match, `NSIS must define ${name}`);
+  return match[1];
+}
+
+const nsisPreinstall = macroBody(nsis, 'NSIS_HOOK_PREINSTALL');
+const nsisPostinstall = macroBody(nsis, 'NSIS_HOOK_POSTINSTALL');
+
 assert(
-  nsis.includes('nsExec::ExecToLog \'"$INSTDIR\\logcrate_index_service.exe" --install\''),
+  nsisPreinstall.includes(
+    '!insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"',
+  ),
+  'NSIS must confirm the application is closed before changing the existing service',
+);
+assert(
+  nsisPreinstall.includes(
+    'IfFileExists "$INSTDIR\\logcrate_index_service.exe" 0 logcrate_preinstall_done',
+  ),
+  'NSIS must inspect the existing service executable before copying the replacement',
+);
+assert(
+  nsisPreinstall.includes('nsExec::ExecToLog \'"$SYSDIR\\sc.exe" query "LogCrateIndex"\''),
+  'NSIS must check whether the existing index service is registered',
+);
+assert(
+  nsisPreinstall.includes(
+    'nsExec::ExecToLog \'"$INSTDIR\\logcrate_index_service.exe" --uninstall\'',
+  ),
+  'NSIS must stop and remove the registered old service before replacing its executable',
+);
+assert(
+  nsisPreinstall.includes('${If} $0 == "error"') && nsisPreinstall.includes('${ElseIf} $0 != 0'),
+  'NSIS pre-install must handle service stop execution and non-zero failures',
+);
+assert(
+  (nsisPreinstall.match(/MessageBox MB_OK\|MB_ICONSTOP/g) ?? []).length === 2 &&
+    (nsisPreinstall.match(/^\s*Abort\s*$/gm) ?? []).length === 2,
+  'NSIS pre-install service stop failures must block file replacement',
+);
+
+assert(
+  nsisPostinstall.includes(
+    'nsExec::ExecToLog \'"$INSTDIR\\logcrate_index_service.exe" --install\'',
+  ),
   'NSIS must execute the installed index service with the fixed --install argument',
 );
-assert(nsis.includes('${If} $0 == "error"'), 'NSIS must handle service installer execution errors');
-assert(nsis.includes('${ElseIf} $0 != 0'), 'NSIS must handle non-zero service installer results');
 assert(
-  (nsis.match(/MessageBox MB_OK\|MB_ICONSTOP/g) ?? []).length >= 2,
+  nsisPostinstall.includes('${If} $0 == "error"'),
+  'NSIS must handle service installer execution errors',
+);
+assert(
+  nsisPostinstall.includes('${ElseIf} $0 != 0'),
+  'NSIS must handle non-zero service installer results',
+);
+assert(
+  (nsisPostinstall.match(/MessageBox MB_OK\|MB_ICONSTOP/g) ?? []).length === 2,
   'NSIS failure branches must display blocking error messages',
 );
 assert(
-  (nsis.match(/^\s*Abort\s*$/gm) ?? []).length === 2,
-  'Only the two NSIS failure branches may abort installation',
+  (nsisPostinstall.match(/^\s*Abort\s*$/gm) ?? []).length === 2,
+  'Both NSIS post-install failure branches must abort installation',
 );
 assert(
-  /\$\{EndIf\}\r?\n!macroend/.test(nsis),
+  /\$\{EndIf\}\r?\n$/.test(nsisPostinstall),
   'A zero service installer result must complete the NSIS post-install hook successfully',
 );
 assert(
-  !/\$0 != 0[\s\S]{0,200}DetailPrint[^\n]*\r?\n\s*\$\{EndIf\}/.test(nsis),
+  !/\$0 != 0[\s\S]{0,200}DetailPrint[^\n]*\r?\n\s*\$\{EndIf\}/.test(nsisPostinstall),
   'NSIS must not silently continue after only logging a non-zero result',
 );
 
