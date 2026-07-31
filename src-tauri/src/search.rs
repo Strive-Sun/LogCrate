@@ -270,6 +270,33 @@ pub struct SearchProviderStatus {
     pub fallback_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexScopeSnapshot {
+    pub scope_key: String,
+    pub provider: String,
+    pub phase: String,
+    pub discovered_records: u64,
+    pub searchable_files: u64,
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexOperationSnapshot {
+    pub operation_id: String,
+    pub generation: u64,
+    pub started_ms: u64,
+    pub query_ready_ms: Option<u64>,
+    pub persistence_completed_ms: Option<u64>,
+    pub event_handoff_completed_ms: Option<u64>,
+    pub converged_ms: Option<u64>,
+    pub final_phase: String,
+    pub error: Option<String>,
+    pub scopes: Vec<IndexScopeSnapshot>,
+}
+
 pub(crate) trait SearchStatusSink: Clone + Send + Sync + 'static {
     fn emit_search_status(&self, status: SearchStatus);
 }
@@ -372,6 +399,7 @@ pub struct FileSearchManager {
     query_index_staged: AtomicBool,
     persistence_recovery: AtomicBool,
     operation: Mutex<()>,
+    operation_snapshot: Mutex<Option<IndexOperationSnapshot>>,
 }
 
 impl FileSearchManager {
@@ -422,6 +450,7 @@ impl FileSearchManager {
             query_index_staged: AtomicBool::new(false),
             persistence_recovery: AtomicBool::new(false),
             operation: Mutex::new(()),
+            operation_snapshot: Mutex::new(None),
         });
         match database_state {
             Err(error) => manager.status.lock().unwrap().error = Some(error.to_string()),
@@ -485,6 +514,33 @@ impl FileSearchManager {
         rebuild: bool,
     ) -> anyhow::Result<()> {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let now_ms = system_time_ms(SystemTime::now()).unwrap_or(0);
+        let scopes = self
+            .runtime_config()
+            .roots
+            .into_iter()
+            .map(|scope_key| IndexScopeSnapshot {
+                scope_key,
+                provider: "pending".into(),
+                phase: "pending".into(),
+                discovered_records: 0,
+                searchable_files: 0,
+                elapsed_ms: 0,
+                error: None,
+            })
+            .collect();
+        *self.operation_snapshot.lock().unwrap() = Some(IndexOperationSnapshot {
+            operation_id: format!("search-{generation}"),
+            generation,
+            started_ms: now_ms,
+            query_ready_ms: None,
+            persistence_completed_ms: None,
+            event_handoff_completed_ms: None,
+            converged_ms: None,
+            final_phase: "scanning".into(),
+            error: None,
+            scopes,
+        });
         self.cancel.store(false, Ordering::SeqCst);
         self.stop_watcher();
         {
@@ -571,6 +627,12 @@ impl FileSearchManager {
                         let mut status = manager.status.lock().unwrap();
                         status.phase = "ready".into();
                         status.error = None;
+                    }
+                    if let Some(snapshot) = manager.operation_snapshot.lock().unwrap().as_mut() {
+                        let now = system_time_ms(SystemTime::now()).unwrap_or(0);
+                        snapshot.query_ready_ms = Some(now);
+                        snapshot.final_phase = "ready".into();
+                        snapshot.converged_ms = Some(now);
                     }
                     manager.emit_status(&app);
                     eprintln!(
@@ -1310,6 +1372,11 @@ impl FileSearchManager {
         status.phase = "error".into();
         status.error = Some(error.to_string());
         drop(status);
+        if let Some(snapshot) = self.operation_snapshot.lock().unwrap().as_mut() {
+            snapshot.final_phase = "error".into();
+            snapshot.converged_ms = Some(system_time_ms(SystemTime::now()).unwrap_or(0));
+            snapshot.error = Some(error.to_string());
+        }
         self.emit_status(app);
     }
 
@@ -1320,6 +1387,28 @@ impl FileSearchManager {
             status.clone()
         };
         app.emit_search_status(snapshot);
+    }
+
+    fn sync_operation_scopes(&self) {
+        let providers = self.status.lock().unwrap().providers.clone();
+        let mut operation = self.operation_snapshot.lock().unwrap();
+        let Some(snapshot) = operation.as_mut() else {
+            return;
+        };
+        for provider in providers {
+            if let Some(scope) = snapshot
+                .scopes
+                .iter_mut()
+                .find(|scope| scope.scope_key == provider.root)
+            {
+                scope.provider = provider.provider;
+                scope.phase = provider.phase;
+                scope.discovered_records = provider.discovered_records;
+                scope.searchable_files = provider.searchable_files;
+                scope.elapsed_ms = provider.elapsed_ms;
+                scope.error = provider.fallback_reason;
+            }
+        }
     }
 
     fn refresh_counts(&self) {
@@ -1721,6 +1810,7 @@ fn set_provider_stage<S: SearchStatusSink>(
         now,
     );
     drop(status);
+    manager.sync_operation_scopes();
     manager.emit_status(app);
 }
 
@@ -1761,6 +1851,7 @@ fn add_provider_progress<S: SearchStatusSink>(
     }
     refresh_provider_totals(&mut status);
     drop(status);
+    manager.sync_operation_scopes();
     if let Some(elapsed_ms) = first_searchable {
         eprintln!("[search-index] root={root} first-searchable-batch elapsed_ms={elapsed_ms}");
     }
