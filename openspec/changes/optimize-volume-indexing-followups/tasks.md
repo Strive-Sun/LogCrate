@@ -39,4 +39,5 @@
   - **判定**：provider 生命周期和持久化中位数未稳定超过五分钟，本 change 不实施性能优化，详见 `performance-decision.md`。
 - [x] 5.2 对每个实际优化使用同一夹具完成前后三轮比较，确认结果、权限、UI 响应、其它 scope 查询和回滚语义无回退。
   - **判定**：5.1 未实施实际优化，本项无前后优化样本；现有三轮基线和可靠性测试继续作为回归证据。
-- [ ] 5.3 运行 Rust 测试、Clippy、格式、前端测试、构建和 `openspec validate optimize-volume-indexing-followups --strict`。
+- [x] 5.3 运行 Rust 测试、Clippy、格式、前端测试、构建和 `openspec validate optimize-volume-indexing-followups --strict`。
+  - **验证结果**：Rust 175 passed/9 ignored，Clippy `-D warnings`、Rust 格式、前端 111 passed、TypeScript/Vite build、ESLint 和 OpenSpec strict validation 均通过。
