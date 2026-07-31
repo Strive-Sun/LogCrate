@@ -615,6 +615,12 @@ impl FileSearchManager {
                         manager.finish_with_error(&app, generation, error);
                         return;
                     }
+                    if let Some(snapshot) = manager.operation_snapshot.lock().unwrap().as_mut() {
+                        let now = system_time_ms(SystemTime::now()).unwrap_or(0);
+                        snapshot.persistence_completed_ms = Some(now);
+                        snapshot.event_handoff_completed_ms = Some(now);
+                        snapshot.converged_ms = Some(now);
+                    }
                     manager.persistence_recovery.store(false, Ordering::Release);
                     if manager.is_cancelled(generation) {
                         manager.stop_watcher();
@@ -1338,6 +1344,11 @@ impl FileSearchManager {
                 scope.error = provider.fallback_reason;
             }
         }
+    }
+
+    #[cfg(test)]
+    fn operation_snapshot_for_report(&self) -> Option<IndexOperationSnapshot> {
+        self.operation_snapshot.lock().unwrap().clone()
     }
 
     fn refresh_counts(&self) {
@@ -5797,6 +5808,10 @@ mod tests {
                     c_query.as_millis(),
                     d_query.as_millis(),
                     final_status.providers,
+                );
+                eprintln!(
+                    "NTFS_OPERATION_SNAPSHOT {:?}",
+                    manager.operation_snapshot_for_report()
                 );
                 assert!(c_page
                     .items
