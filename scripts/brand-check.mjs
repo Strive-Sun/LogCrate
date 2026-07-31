@@ -6,7 +6,10 @@ const root = path.resolve(import.meta.dirname, '..');
 const read = (file) => readFile(path.join(root, file), 'utf8');
 const readBinary = (file) => readFile(path.join(root, file));
 const canonicalRepository = 'https://github.com/Strive-Sun/LogCrate';
-const canonicalUpdaterEndpoint = `${canonicalRepository}/releases/latest/download/latest.json`;
+const canonicalUpdaterEndpoints = [
+  'https://logcrate-updates.pages.dev/latest.json',
+  `${canonicalRepository}/releases/latest/download/latest.json`,
+];
 const expectedUpdaterPublicKey =
   'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERENDUwNDlCNzE0OEI3RjYKUldUMnQwaHhtd1JGM2NObzJSVE9nRFA0d0JMdk9nSVIrOGR2TVpGeHY5ZW5ZeUwzQmpIS1dWQ3UK';
 const assert = (condition, message) => {
@@ -87,9 +90,8 @@ assert(/^name = "logcrate"$/m.test(cargoManifest), 'Cargo package name must be l
 assert(/^name = "logcrate_lib"$/m.test(cargoManifest), 'Rust library name must be logcrate_lib');
 assert(npmManifest.name === 'logcrate', 'npm package name must be logcrate');
 assert(
-  config.plugins.updater.endpoints.length === 1 &&
-    config.plugins.updater.endpoints[0] === canonicalUpdaterEndpoint,
-  'New builds must use the canonical LogCrate updater endpoint',
+  JSON.stringify(config.plugins.updater.endpoints) === JSON.stringify(canonicalUpdaterEndpoints),
+  'New builds must use the Pages-first and GitHub-fallback updater endpoints in canonical order',
 );
 assert(
   config.plugins.updater.pubkey === expectedUpdaterPublicKey,
