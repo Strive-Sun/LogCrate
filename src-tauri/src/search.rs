@@ -743,8 +743,6 @@ impl FileSearchManager {
                             })
                         }
                     };
-                    let mut all_succeeded = true;
-                    let mut fallback_roots = Vec::new();
                     let resume_result = run_ntfs_volume_tasks(
                         ntfs_roots,
                         &work,
@@ -794,17 +792,15 @@ impl FileSearchManager {
                                 Err(error) => Err(error),
                             };
                             if let Err(error) = applied {
-                                all_succeeded = false;
                                 set_provider_status(
                                     &manager,
                                     &app,
                                     &root,
-                                    "folderScan",
-                                    "fallback",
+                                    "windowsNtfs",
+                                    "error",
                                     Some(error.to_string()),
                                 );
-                                fallback_roots.push(root);
-                                return Ok(());
+                                return Err(error);
                             }
                             if !recover_persistence {
                                 manager.drain_query_index_changes()?;
@@ -837,24 +833,11 @@ impl FileSearchManager {
                         manager.stop_watcher();
                         return;
                     }
-                    if !fallback_roots.is_empty() {
-                        if let Err(error) = replace_roots_with_folder_scan(
-                            &manager,
-                            &app,
-                            generation,
-                            &config,
-                            &fallback_roots,
-                        ) {
-                            manager.finish_with_error(&app, generation, error);
-                            return;
-                        }
-                        all_succeeded = true;
-                    }
                     if manager.is_cancelled(generation) {
                         manager.stop_watcher();
                         return;
                     }
-                    if recover_persistence && all_succeeded {
+                    if recover_persistence {
                         if let Err(error) = finish_bulk_index(&manager.db_path) {
                             manager.finish_with_error(&app, generation, error);
                             return;
@@ -1772,11 +1755,11 @@ fn scan_with_providers<S: SearchStatusSink>(
                             manager,
                             app,
                             &root,
-                            "folderScan",
-                            "fallback",
+                            "windowsNtfs",
+                            "error",
                             Some(error.to_string()),
                         );
-                        folder_roots.push(root);
+                        return Err(error);
                     }
                     Err(_) => {}
                 }
@@ -3013,26 +2996,6 @@ fn scan_folder_roots<S: SearchStatusSink>(
         set_provider_status(manager, app, root, "folderScan", "ready", fallback_reason);
     }
     Ok(())
-}
-
-#[cfg(windows)]
-fn replace_roots_with_folder_scan<S: SearchStatusSink>(
-    manager: &Arc<FileSearchManager>,
-    app: &S,
-    generation: u64,
-    config: &SearchConfig,
-    roots: &[String],
-) -> anyhow::Result<()> {
-    let mut connection = open_database(&manager.db_path)?;
-    let transaction = connection.transaction()?;
-    for root in roots {
-        transaction.execute("DELETE FROM files WHERE root = ?1", params![root])?;
-        transaction.execute("DELETE FROM ntfs_nodes WHERE root = ?1", params![root])?;
-        transaction.execute("DELETE FROM search_volumes WHERE root = ?1", params![root])?;
-    }
-    transaction.commit()?;
-    scan_folder_roots(manager, app, generation, config, roots)?;
-    manager.rebuild_query_index_from_database()
 }
 
 fn apply_event_paths(
