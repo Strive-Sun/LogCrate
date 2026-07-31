@@ -236,6 +236,17 @@ impl<R: tauri::Runtime> SearchStatusSink for tauri::AppHandle<R> {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct RecordingSearchStatusSink(Arc<Mutex<Vec<SearchStatus>>>);
+
+#[cfg(test)]
+impl SearchStatusSink for RecordingSearchStatusSink {
+    fn emit_search_status(&self, status: SearchStatus) {
+        self.0.lock().unwrap().push(status);
+    }
+}
+
 #[cfg(all(test, windows))]
 #[derive(Clone, Copy)]
 struct NoopSearchStatusSink;
@@ -4403,6 +4414,48 @@ mod tests {
         assert!(diagnostic.contains("staging=false"));
         assert!(diagnostic.contains("previous=false"));
         assert!(diagnostic.contains("concurrent_queries=0"));
+        drop(manager);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_switch_preserves_old_query_and_reports_ui_error_context() {
+        let directory = test_directory("query-switch-ui-error");
+        let manager = FileSearchManager::new(directory.clone());
+        manager
+            .query_index
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .add_batch(&[SearchIndexEntry {
+                path: "C:\\stable.log".into(),
+                name: "stable.log".into(),
+                scope_key: "C:\\".into(),
+                is_log: true,
+                is_archive: false,
+            }])
+            .unwrap();
+        manager.commit_query_index().unwrap();
+        manager.query_index_ready.store(true, Ordering::Release);
+        let error = manager
+            .activate_staged_query_index()
+            .unwrap_err()
+            .to_string();
+        let (_, total) = manager
+            .query_tantivy(&["stable".into()], "", 0, 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(total, 1);
+        let sink = RecordingSearchStatusSink::default();
+        manager.finish_with_error(
+            &sink,
+            manager.generation.load(Ordering::Acquire),
+            anyhow::anyhow!(error),
+        );
+        let status = sink.0.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(status.phase, "error");
+        assert!(status.error.unwrap().contains("operation_id="));
         drop(manager);
         fs::remove_dir_all(directory).unwrap();
     }
