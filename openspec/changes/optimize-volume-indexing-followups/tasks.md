@@ -20,7 +20,7 @@
 
 - [x] 3.1 为 `SearchIndexEntry` 和 Tantivy schema 增加规范化 exact `scope_key`，实现按 scope 删除和重建。
   - **自测标准**：整卷/目录根、同名路径、大小写规范化、删除隔离和 merge 后语义测试通过。
-- [ ] 3.2 实现可回滚的 schema 迁移及 active/staging/previous 原子发布，切换前核对逐 scope 计数和代表性查询。
+- [x] 3.2 实现可回滚的 schema 迁移及 active/staging/previous 原子发布，切换前核对逐 scope 计数和代表性查询。
   - **自测标准**：迁移、计数不一致拒绝发布、staging/切换失败和 previous 回滚测试通过，旧 active 与 SQLite 保持可用。
 - [ ] 3.3 在当前 HEAD 上重测单范围启动恢复；只有实测未达标时才实施进一步优化。
   - **自测标准**：固定快照连续三轮，目标范围无旧路径、无受影响范围丢失，并记录完整 operation 报告。

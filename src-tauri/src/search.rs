@@ -1030,7 +1030,8 @@ impl FileSearchManager {
             .unwrap()
             .as_ref()
             .is_some_and(|index| index.num_docs() > 0);
-        if has_complete_snapshot {
+        let needs_new_schema = self.query_index.lock().unwrap().is_none();
+        if has_complete_snapshot || needs_new_schema {
             let mut staging = SearchIndex::open(&staging_path)?;
             staging.begin_bulk()?;
             *self.staged_query_index.lock().unwrap() = Some(staging);
@@ -1047,6 +1048,10 @@ impl FileSearchManager {
         if self.query_index_staged.load(Ordering::Acquire) {
             if let Some(mut staging) = self.staged_query_index.lock().unwrap().take() {
                 staging.finish_bulk()?;
+                if let Err(error) = self.validate_query_index_scopes(&staging) {
+                    let _ = staging.close();
+                    return Err(error);
+                }
                 staging.close()?;
             }
             self.activate_staged_query_index()?;
@@ -1056,6 +1061,29 @@ impl FileSearchManager {
         self.query_index_bulk.store(false, Ordering::Release);
         self.query_index_staged.store(false, Ordering::Release);
         self.query_index_ready.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn validate_query_index_scopes(&self, index: &SearchIndex) -> anyhow::Result<()> {
+        let connection = open_database(&self.db_path)?;
+        let mut statement =
+            connection.prepare("SELECT root, COUNT(*) FROM files GROUP BY root ORDER BY root")?;
+        let expected = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (scope_key, expected_count) in expected {
+            let actual_count = index.num_docs_for_scope(&scope_key)?;
+            if actual_count != expected_count {
+                anyhow::bail!(
+                    "query-index scope count mismatch scope={} expected={} actual={}",
+                    scope_key,
+                    expected_count,
+                    actual_count
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1195,11 +1223,34 @@ impl FileSearchManager {
 
     fn rebuild_query_index_from_database(&self) -> anyhow::Result<()> {
         self.query_index_ready.store(false, Ordering::Release);
+        if self.query_index.lock().unwrap().is_none() {
+            self.begin_query_index_bulk()?;
+            let result = {
+                let mut guard = self.staged_query_index.lock().unwrap();
+                let Some(index) = guard.as_mut() else {
+                    anyhow::bail!("query-index migration did not create a staging index");
+                };
+                self.populate_query_index_from_database(index)
+            };
+            if let Err(error) = result {
+                let _ = self.clear_query_index();
+                return Err(error);
+            }
+            self.finish_query_index_bulk()?;
+            return Ok(());
+        }
         let mut guard = self.query_index.lock().unwrap();
         let Some(index) = guard.as_mut() else {
             return Ok(());
         };
         index.begin_bulk()?;
+        self.populate_query_index_from_database(index)?;
+        index.finish_bulk()?;
+        self.query_index_ready.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn populate_query_index_from_database(&self, index: &mut SearchIndex) -> anyhow::Result<()> {
         let connection = open_database(&self.db_path)?;
         let mut statement = connection
             .prepare("SELECT path, name, root, is_log, is_archive FROM files ORDER BY rowid")?;
@@ -1221,8 +1272,6 @@ impl FileSearchManager {
         if !batch.is_empty() {
             index.add_batch(&batch)?;
         }
-        index.finish_bulk()?;
-        self.query_index_ready.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -5397,6 +5446,47 @@ mod tests {
         assert_eq!(items[0].path, recoverable_path);
         drop(manager);
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn query_snapshot_scope_count_mismatch_is_rejected() {
+        let directory = test_directory("scope-count-mismatch");
+        let db = directory.join("file-search.sqlite3");
+        initialize_database(&db).unwrap();
+        let manager = FileSearchManager::new(directory.clone());
+        let mut connection = open_database(&db).unwrap();
+        write_batch(
+            &mut connection,
+            &[IndexedFile {
+                path: "C:\\logs\\expected.log".into(),
+                name: "expected.log".into(),
+                root: "C:\\".into(),
+                size: 1,
+                modified_ms: None,
+                is_log: true,
+                is_archive: false,
+                file_id: None,
+                parent_id: None,
+            }],
+        )
+        .unwrap();
+        drop(connection);
+        let mut index = manager.query_index.lock().unwrap().take().unwrap();
+        index
+            .add_batch(&[SearchIndexEntry {
+                path: "D:\\logs\\wrong.log".into(),
+                name: "wrong.log".into(),
+                scope_key: "D:\\".into(),
+                is_log: true,
+                is_archive: false,
+            }])
+            .unwrap();
+        index.commit().unwrap();
+        let error = manager.validate_query_index_scopes(&index).unwrap_err();
+        assert!(error.to_string().contains("scope count mismatch"));
+        drop(index);
+        drop(manager);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

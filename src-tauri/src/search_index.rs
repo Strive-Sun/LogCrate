@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
-use tantivy::collector::TopDocs;
+use tantivy::collector::{Count, TopDocs};
 use tantivy::directory::MmapDirectory;
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::{
@@ -390,6 +390,17 @@ impl SearchIndex {
         self.reader.searcher().num_docs()
     }
 
+    pub fn num_docs_for_scope(&self, scope_key: &str) -> anyhow::Result<u64> {
+        let query = TermQuery::new(
+            Term::from_field_bytes(
+                self.scope_key_field,
+                normalize_scope_key(scope_key).as_bytes(),
+            ),
+            IndexRecordOption::Basic,
+        );
+        Ok(self.reader.searcher().search(&query, &Count)? as u64)
+    }
+
     fn search_tokenize(&self, value: &str) -> String {
         let value = normalize_search_text(value);
         if value.is_ascii() {
@@ -685,8 +696,12 @@ mod tests {
             ])
             .unwrap();
         index.commit().unwrap();
+        assert_eq!(index.num_docs_for_scope("C:\\").unwrap(), 1);
+        assert_eq!(index.num_docs_for_scope("D:\\").unwrap(), 1);
         index.delete_scope("C:\\");
         index.commit().unwrap();
+        assert_eq!(index.num_docs_for_scope("C:\\").unwrap(), 0);
+        assert_eq!(index.num_docs_for_scope("D:\\").unwrap(), 1);
         let (items, total) = index.search(&["same".into()], "", 0, 20).unwrap();
         assert_eq!(total, 1);
         assert_eq!(items[0].path, "D:\\logs\\same.log");
