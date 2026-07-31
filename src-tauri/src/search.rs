@@ -6,6 +6,11 @@ use crate::ntfs::{
     FILE_ATTRIBUTE_DIRECTORY,
 };
 use crate::search_index::{SearchIndex, SearchIndexEntry};
+use crate::search_query_store::{
+    previous_path as query_index_previous_path,
+    recover_directories as recover_query_index_directories, retry_fs as retry_query_index_fs,
+    staging_path as query_index_staging_path,
+};
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -32,8 +37,6 @@ const EVENT_HANDOFF_MAX_BATCHES: usize = 4;
 const EVENT_HANDOFF_MAX_DURATION: Duration = Duration::from_millis(500);
 const QUERY_LIMIT_MAX: u32 = 500;
 const METADATA_WORKERS_MAX: usize = 4;
-const QUERY_INDEX_FS_RETRIES: usize = 20;
-const QUERY_INDEX_FS_RETRY_DELAY: Duration = Duration::from_millis(50);
 #[cfg(windows)]
 const MAX_USN_REPLAY_RECORDS: usize = 1_000_000;
 #[cfg(windows)]
@@ -45,80 +48,6 @@ const PERSISTENCE_USN_REPLAY_MAX_DURATION: Duration = Duration::from_secs(30);
 const PERSISTENCE_USN_REPLAY_MAX_RANGE: i64 = 0;
 #[cfg(windows)]
 const NTFS_VOLUME_WORKERS_MAX: usize = 4;
-
-fn query_index_staging_path(active: &Path) -> PathBuf {
-    let mut value = active.as_os_str().to_os_string();
-    value.push(".next");
-    PathBuf::from(value)
-}
-
-fn query_index_previous_path(active: &Path) -> PathBuf {
-    let mut value = active.as_os_str().to_os_string();
-    value.push(".previous");
-    PathBuf::from(value)
-}
-
-fn recover_query_index_directories(active: &Path) -> anyhow::Result<()> {
-    let staging = query_index_staging_path(active);
-    let previous = query_index_previous_path(active);
-    if !active.exists() {
-        if previous.exists() {
-            retry_query_index_fs("recover-previous", &previous, Some(active), || {
-                fs::rename(&previous, active)
-            })?;
-        } else if staging.exists() {
-            retry_query_index_fs("recover-staging", &staging, Some(active), || {
-                fs::rename(&staging, active)
-            })?;
-        }
-    }
-    if active.exists() && previous.exists() {
-        retry_query_index_fs("remove-recovered-previous", &previous, None, || {
-            fs::remove_dir_all(&previous)
-        })?;
-    }
-    if active.exists() && staging.exists() {
-        retry_query_index_fs("remove-interrupted-staging", &staging, None, || {
-            fs::remove_dir_all(&staging)
-        })?;
-    }
-    Ok(())
-}
-
-fn retry_query_index_fs<T, F>(
-    stage: &str,
-    source: &Path,
-    destination: Option<&Path>,
-    mut operation: F,
-) -> anyhow::Result<T>
-where
-    F: FnMut() -> std::io::Result<T>,
-{
-    let mut attempts = 0;
-    loop {
-        match operation() {
-            Ok(value) => return Ok(value),
-            Err(error) => {
-                let retryable = cfg!(windows)
-                    && matches!(error.raw_os_error(), Some(5 | 32 | 33))
-                    && attempts < QUERY_INDEX_FS_RETRIES;
-                if retryable {
-                    attempts += 1;
-                    std::thread::sleep(QUERY_INDEX_FS_RETRY_DELAY);
-                    continue;
-                }
-                let target = destination
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "<none>".into());
-                return Err(anyhow::anyhow!(
-                    "query-index stage={stage} source={} target={target} attempts={}: {error}",
-                    source.display(),
-                    attempts + 1
-                ));
-            }
-        }
-    }
-}
 
 const CREATE_FTS_TRIGGERS: &str =
     "CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN

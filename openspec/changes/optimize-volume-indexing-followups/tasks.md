@@ -4,7 +4,7 @@
 
 - [x] 1.1 定义 `IndexOperation` 和逐 scope 生命周期快照，统一 operation ID、阶段、计数、错误和终态。
   - **自测标准**：成功、取消、单 scope 失败和持久化中断均能生成字段完整且无负耗时/终态漂移的报告。
-- [ ] 1.2 将 active/staging/previous 查询索引生命周期抽取到 query store，保持现有行为和载荷兼容。该项可在 1.1 和基线完成后实施。
+- [x] 1.2 将 active/staging/previous 查询索引生命周期抽取到 query store，保持现有行为和载荷兼容。该项可在 1.1 和基线完成后实施。
   - **自测标准**：打开、部分查询、完整切换、遗留目录恢复和失败回滚测试通过。
 - [ ] 1.3 根据基线和维护收益决定是否继续拆 persistence、recovery、coordinator；不以“全部拆完”作为前置条件。
   - **自测标准**：每个实际拆分均有边界测试、Rust/前端测试、格式和 Clippy 证据。

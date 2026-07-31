@@ -11,6 +11,8 @@ mod search;
 #[cfg(desktop)]
 mod search_index;
 #[cfg(desktop)]
+mod search_query_store;
+#[cfg(desktop)]
 mod startup;
 mod startup_trace;
 mod watcher;
