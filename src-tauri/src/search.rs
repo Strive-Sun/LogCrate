@@ -1202,15 +1202,16 @@ impl FileSearchManager {
         index.begin_bulk()?;
         let connection = open_database(&self.db_path)?;
         let mut statement = connection
-            .prepare("SELECT path, name, is_log, is_archive FROM files ORDER BY rowid")?;
+            .prepare("SELECT path, name, root, is_log, is_archive FROM files ORDER BY rowid")?;
         let mut rows = statement.query([])?;
         let mut batch = Vec::with_capacity(SCAN_WRITE_BATCH);
         while let Some(row) = rows.next()? {
             batch.push(SearchIndexEntry {
                 path: row.get(0)?,
                 name: row.get(1)?,
-                is_log: row.get(2)?,
-                is_archive: row.get(3)?,
+                scope_key: row.get(2)?,
+                is_log: row.get(3)?,
+                is_archive: row.get(4)?,
             });
             if batch.len() == SCAN_WRITE_BATCH {
                 index.add_batch(&batch)?;
@@ -1257,15 +1258,16 @@ impl FileSearchManager {
                     .collect::<Vec<_>>()
                     .join(",");
                 let sql = format!(
-                    "SELECT path, name, is_log, is_archive FROM files WHERE path IN ({placeholders})"
+                    "SELECT path, name, root, is_log, is_archive FROM files WHERE path IN ({placeholders})"
                 );
                 let mut load = connection.prepare(&sql)?;
                 let rows = load.query_map(params_from_iter(path_chunk.iter()), |row| {
                     Ok(SearchIndexEntry {
                         path: row.get(0)?,
                         name: row.get(1)?,
-                        is_log: row.get(2)?,
-                        is_archive: row.get(3)?,
+                        scope_key: row.get(2)?,
+                        is_log: row.get(3)?,
+                        is_archive: row.get(4)?,
                     })
                 })?;
                 upserts.extend(rows.collect::<Result<Vec<_>, _>>()?);
@@ -1580,6 +1582,7 @@ fn search_index_entry(file: &IndexedFile) -> SearchIndexEntry {
     SearchIndexEntry {
         path: file.path.clone(),
         name: file.name.clone(),
+        scope_key: file.root.clone(),
         is_log: file.is_log,
         is_archive: file.is_archive,
     }
@@ -4080,6 +4083,7 @@ mod tests {
             .add_batch(&[SearchIndexEntry {
                 path: "D:\\logs\\stable-old.log".into(),
                 name: "stable-old.log".into(),
+                scope_key: String::new(),
                 is_log: true,
                 is_archive: false,
             }])
@@ -4189,6 +4193,7 @@ mod tests {
             .add_batch(&[SearchIndexEntry {
                 path: "C:\\old.log".into(),
                 name: "old.log".into(),
+                scope_key: String::new(),
                 is_log: true,
                 is_archive: false,
             }])
@@ -4242,6 +4247,7 @@ mod tests {
             .add_batch(&[SearchIndexEntry {
                 path: "C:\\restored.log".into(),
                 name: "restored.log".into(),
+                scope_key: String::new(),
                 is_log: true,
                 is_archive: false,
             }])
@@ -4271,6 +4277,7 @@ mod tests {
             .add_batch(&[SearchIndexEntry {
                 path: "C:\\stable.log".into(),
                 name: "stable.log".into(),
+                scope_key: String::new(),
                 is_log: true,
                 is_archive: false,
             }])
@@ -5441,12 +5448,14 @@ mod tests {
                 SearchIndexEntry {
                     path: "C:\\logs\\debug.log".into(),
                     name: "debug.log".into(),
+                    scope_key: String::new(),
                     is_log: true,
                     is_archive: false,
                 },
                 SearchIndexEntry {
                     path: "D:\\logs\\debug.log".into(),
                     name: "debug.log".into(),
+                    scope_key: String::new(),
                     is_log: true,
                     is_archive: false,
                 },

@@ -18,7 +18,7 @@
 
 ## Phase 2：索引正确性
 
-- [ ] 3.1 为 `SearchIndexEntry` 和 Tantivy schema 增加规范化 exact `scope_key`，实现按 scope 删除和重建。
+- [x] 3.1 为 `SearchIndexEntry` 和 Tantivy schema 增加规范化 exact `scope_key`，实现按 scope 删除和重建。
   - **自测标准**：整卷/目录根、同名路径、大小写规范化、删除隔离和 merge 后语义测试通过。
 - [ ] 3.2 实现可回滚的 schema 迁移及 active/staging/previous 原子发布，切换前核对逐 scope 计数和代表性查询。
   - **自测标准**：迁移、计数不一致拒绝发布、staging/切换失败和 previous 回滚测试通过，旧 active 与 SQLite 保持可用。

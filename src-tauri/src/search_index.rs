@@ -30,6 +30,7 @@ const FALSE_BYTES: &[u8] = b"0";
 pub struct SearchIndexEntry {
     pub path: String,
     pub name: String,
+    pub scope_key: String,
     pub is_log: bool,
     pub is_archive: bool,
 }
@@ -40,6 +41,7 @@ pub struct SearchIndex {
     name_field: Field,
     original_name_field: Field,
     path_key_field: Field,
+    scope_key_field: Field,
     path_field: Field,
     is_log_field: Field,
     is_archive_field: Field,
@@ -65,6 +67,7 @@ impl SearchIndex {
         let name_field = field("name")?;
         let original_name_field = field("original_name")?;
         let path_key_field = field("path_key")?;
+        let scope_key_field = field("scope_key")?;
         let path_field = field("path")?;
         let is_log_field = field("is_log")?;
         let is_archive_field = field("is_archive")?;
@@ -86,6 +89,7 @@ impl SearchIndex {
             name_field,
             original_name_field,
             path_key_field,
+            scope_key_field,
             path_field,
             is_log_field,
             is_archive_field,
@@ -126,6 +130,7 @@ impl SearchIndex {
             let name_field = self.name_field;
             let original_name_field = self.original_name_field;
             let path_key_field = self.path_key_field;
+            let scope_key_field = self.scope_key_field;
             let path_field = self.path_field;
             let is_log_field = self.is_log_field;
             let is_archive_field = self.is_archive_field;
@@ -142,6 +147,7 @@ impl SearchIndex {
                                         name: name_field,
                                         original_name: original_name_field,
                                         path_key: path_key_field,
+                                        scope_key: scope_key_field,
                                         path: path_field,
                                         is_log: is_log_field,
                                         is_archive: is_archive_field,
@@ -216,6 +222,7 @@ impl SearchIndex {
                 name: self.name_field,
                 original_name: self.original_name_field,
                 path_key: self.path_key_field,
+                scope_key: self.scope_key_field,
                 path: self.path_field,
                 is_log: self.is_log_field,
                 is_archive: self.is_archive_field,
@@ -234,6 +241,14 @@ impl SearchIndex {
         self.writer.delete_term(Term::from_field_bytes(
             self.path_key_field,
             path_key(path).as_bytes(),
+        ));
+    }
+
+    #[allow(dead_code)]
+    pub fn delete_scope(&mut self, scope_key: &str) {
+        self.writer.delete_term(Term::from_field_bytes(
+            self.scope_key_field,
+            normalize_scope_key(scope_key).as_bytes(),
         ));
     }
 
@@ -341,6 +356,7 @@ impl SearchIndex {
             entries.push(SearchIndexEntry {
                 path: path.to_owned(),
                 name: name.to_owned(),
+                scope_key: derive_scope_key(path),
                 is_log,
                 is_archive,
             });
@@ -441,6 +457,7 @@ struct SearchFields {
     name: Field,
     original_name: Field,
     path_key: Field,
+    scope_key: Field,
     path: Field,
     is_log: Field,
     is_archive: Field,
@@ -458,10 +475,16 @@ fn add_document(
         .and_then(|extension| extension.to_str())
         .unwrap_or_default()
         .to_lowercase();
+    let scope_key = if entry.scope_key.is_empty() {
+        derive_scope_key(&entry.path)
+    } else {
+        entry.scope_key.clone()
+    };
     writer.add_document(doc!(
         fields.name => tokenized_name,
         fields.original_name => entry.name.clone(),
         fields.path_key => path_key(&entry.path).into_bytes(),
+        fields.scope_key => normalize_scope_key(&scope_key).into_bytes(),
         fields.path => entry.path.as_bytes().to_vec(),
         fields.is_log => bool_bytes(entry.is_log).to_vec(),
         fields.is_archive => bool_bytes(entry.is_archive).to_vec(),
@@ -499,6 +522,7 @@ fn build_schema() -> Schema {
     builder.add_text_field("name", text_options.clone());
     builder.add_text_field("original_name", STORED);
     builder.add_bytes_field("path_key", INDEXED);
+    builder.add_bytes_field("scope_key", INDEXED);
     builder.add_bytes_field("path", STORED);
     builder.add_bytes_field("is_log", INDEXED | STORED);
     builder.add_bytes_field("is_archive", INDEXED | STORED);
@@ -509,6 +533,22 @@ fn build_schema() -> Schema {
 #[cfg(windows)]
 fn path_key(path: &str) -> String {
     path.replace('/', "\\").to_lowercase()
+}
+
+fn normalize_scope_key(value: &str) -> String {
+    let mut key = value.replace('/', "\\").to_lowercase();
+    while key.ends_with('\\') && key.len() > 3 {
+        key.pop();
+    }
+    key
+}
+
+fn derive_scope_key(path: &str) -> String {
+    let normalized = path.replace('/', "\\");
+    if normalized.as_bytes().get(1) == Some(&b':') {
+        return normalized[..3.min(normalized.len())].to_owned();
+    }
+    normalized.split('\\').next().unwrap_or_default().to_owned()
 }
 
 #[cfg(not(windows))]
@@ -540,30 +580,35 @@ mod tests {
                 SearchIndexEntry {
                     path: "D:\\work\\DataPatchController.log".into(),
                     name: "DataPatchController.log".into(),
+                    scope_key: String::new(),
                     is_log: true,
                     is_archive: false,
                 },
                 SearchIndexEntry {
                     path: "C:\\archives\\debug.zip".into(),
                     name: "debug.zip".into(),
+                    scope_key: String::new(),
                     is_log: false,
                     is_archive: true,
                 },
                 SearchIndexEntry {
                     path: "D:\\logs\\错误.log".into(),
                     name: "错误.log".into(),
+                    scope_key: String::new(),
                     is_log: true,
                     is_archive: false,
                 },
                 SearchIndexEntry {
                     path: "D:\\headers\\log.h".into(),
                     name: "log.h".into(),
+                    scope_key: String::new(),
                     is_log: false,
                     is_archive: false,
                 },
                 SearchIndexEntry {
                     path: "C:\\logs\\debug.log".into(),
                     name: "debug.log".into(),
+                    scope_key: String::new(),
                     is_log: true,
                     is_archive: false,
                 },
@@ -599,6 +644,7 @@ mod tests {
             .upsert_batch(&[SearchIndexEntry {
                 path: "D:\\work\\DataPatchController.log".into(),
                 name: "renamed.log".into(),
+                scope_key: String::new(),
                 is_log: true,
                 is_archive: false,
             }])
@@ -617,6 +663,38 @@ mod tests {
     }
 
     #[test]
+    fn deleting_scope_keeps_other_scopes_searchable() {
+        let directory = test_dir();
+        let mut index = SearchIndex::open(&directory).unwrap();
+        index
+            .add_batch(&[
+                SearchIndexEntry {
+                    path: "C:\\logs\\same.log".into(),
+                    name: "same.log".into(),
+                    scope_key: "C:\\".into(),
+                    is_log: true,
+                    is_archive: false,
+                },
+                SearchIndexEntry {
+                    path: "D:\\logs\\same.log".into(),
+                    name: "same.log".into(),
+                    scope_key: "D:\\".into(),
+                    is_log: true,
+                    is_archive: false,
+                },
+            ])
+            .unwrap();
+        index.commit().unwrap();
+        index.delete_scope("C:\\");
+        index.commit().unwrap();
+        let (items, total) = index.search(&["same".into()], "", 0, 20).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items[0].path, "D:\\logs\\same.log");
+        drop(index);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn closed_index_releases_directory_for_snapshot_switch() {
         let staging = test_dir();
         let active = staging.with_extension("active");
@@ -625,6 +703,7 @@ mod tests {
             .add_batch(&[SearchIndexEntry {
                 path: "C:\\logs\\ready.log".into(),
                 name: "ready.log".into(),
+                scope_key: String::new(),
                 is_log: true,
                 is_archive: false,
             }])
@@ -659,6 +738,7 @@ mod tests {
             .upsert_batch(&[SearchIndexEntry {
                 path: "C:\\__logcrate_switch_probe__\\ready.log".into(),
                 name: "ready.log".into(),
+                scope_key: String::new(),
                 is_log: true,
                 is_archive: false,
             }])
