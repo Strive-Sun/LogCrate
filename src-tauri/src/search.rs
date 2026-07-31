@@ -4407,6 +4407,65 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn query_snapshot_switch_handles_external_file_occupancy() {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        for round in 0..3 {
+            let directory = test_directory(&format!("query-switch-external-occupancy-{round}"));
+            let manager = FileSearchManager::new(directory.clone());
+            manager
+                .query_index
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .add_batch(&[SearchIndexEntry {
+                    path: "C:\\old.log".into(),
+                    name: "old.log".into(),
+                    scope_key: "C:\\".into(),
+                    is_log: true,
+                    is_archive: false,
+                }])
+                .unwrap();
+            manager.commit_query_index().unwrap();
+            let staging_path = query_index_staging_path(&manager.query_index_path);
+            let mut staging = SearchIndex::open(&staging_path).unwrap();
+            staging
+                .add_batch(&[SearchIndexEntry {
+                    path: "C:\\new.log".into(),
+                    name: "new.log".into(),
+                    scope_key: "C:\\".into(),
+                    is_log: true,
+                    is_archive: false,
+                }])
+                .unwrap();
+            staging.commit().unwrap();
+            staging.close().unwrap();
+            let held_path = fs::read_dir(&manager.query_index_path)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| path.is_file())
+                .expect("active Tantivy index must contain a file");
+            let held = OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&held_path)
+                .unwrap();
+            let first_attempt = manager.activate_staged_query_index();
+            drop(held);
+            if first_attempt.is_err() {
+                manager.activate_staged_query_index().unwrap();
+            }
+            assert!(manager.query_index_path.exists());
+            drop(manager);
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
     #[test]
     fn provider_switch_deduplicates_paths_and_removes_stale_results() {
         let directory = test_directory("provider-switch");
