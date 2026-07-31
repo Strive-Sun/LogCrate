@@ -26,6 +26,19 @@
 - 三轮均命中 C/D 代表性查询，且最终 provider 可搜索计数与 `indexed_files` 一致。
 - 第三轮收尾阶段出现三次 `count-mismatch database=4932392 query=4932401`；需要在索引正确性/可靠性阶段查明并增加一致性验收，不能将该现象视为无害日志。
 
+## scope_key/诊断代码后的当前 HEAD 三轮结果
+
+以下三轮在 `scope_key`、计数核对和 operation snapshot 报告代码已经生效的当前 HEAD 上执行；每轮均打印 `NTFS_OPERATION_SNAPSHOT`。
+
+| 样本 | 调度 | 首批可搜索 | 全部查询 ready | 持久化完成 | 发现记录 | 可搜索文件 | C 查询 | D 查询 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 105 ms | 13,218 ms | 60,970 ms | 288,224 ms | 5,745,658 | 4,932,814 | 40 ms | 28 ms |
+| 2 | 104 ms | 13,252 ms | 61,077 ms | 308,672 ms | 5,745,658 | 4,932,813 | 39 ms | 27 ms |
+| 3 | 107 ms | 14,746 ms | 61,754 ms | 287,364 ms | 5,745,834 | 4,932,973 | 43 ms | 28 ms |
+| 中位数 | 105 ms | 13,252 ms | 61,077 ms | 288,224 ms | — | — | 40 ms | 28 ms |
+
+当前 HEAD 判定：首批结果满足 30 秒，全部查询 ready 中位数超过 60 秒 1.077 秒，持久化中位数满足 5 分钟。三轮 operation ID 均为 `search-1`（每个独立测试进程 generation 从 1 开始），逐 scope 快照包含 C:/D: 计数和终态。
+
 ## 限制
 
 - 当前 `IndexOperationSnapshot` 尚未通过应用事件或基准报告导出 operation ID；本文件的阶段数据来自同一测试的结构化 provider 状态和 `NTFS_APP_PHASE` 输出，后续需补齐 operation 快照报告。
