@@ -10,6 +10,7 @@
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"scripts/**/*.{js,mjs}\" \"*.{json,js,ts,html}\" \".github/workflows/*.yml\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"scripts/**/*.{js,mjs}\" \"*.{json,js,ts,html}\" \".github/workflows/*.yml\"",
+    "mirror:test": "node --test scripts/update-mirror.test.mjs",
     "release:check": "node scripts/release-notes.mjs && node scripts/windows-index-service-installer-check.mjs",
     "brand:check": "node scripts/brand-check.mjs",
     "installer:check": "node scripts/windows-index-service-installer-check.mjs",
