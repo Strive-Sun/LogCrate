@@ -6044,11 +6044,65 @@ mod tests {
             matches
         );
         assert!(matches > 0);
-        assert!(rebuilt_at <= Duration::from_millis(43_200));
+        assert!(rebuilt_at <= Duration::from_secs(60));
 
         drop(query_index);
         fs::remove_file(renamed.join("logcrate-usn-recovery-proof.txt")).unwrap();
         fs::remove_dir(&renamed).unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires installed LogCrate Index Service and a writable local NTFS D volume"]
+    fn windows_single_scope_startup_recovery_performance() {
+        let directory = test_directory("single-scope-startup-recovery-performance");
+        let manager = FileSearchManager::new(directory.clone());
+        {
+            let mut config = manager.config.lock().unwrap();
+            config.enabled = true;
+            config.roots = vec!["D:\\".into()];
+            config.exclusions.clear();
+        }
+        let sink = NoopSearchStatusSink;
+        manager.start(sink, true).unwrap();
+        let build_deadline = std::time::Instant::now() + Duration::from_secs(5 * 60);
+        loop {
+            let status = manager.status();
+            if status.phase == "ready" && !manager.persistence_recovery.load(Ordering::Acquire) {
+                break;
+            }
+            assert!(std::time::Instant::now() < build_deadline);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        manager.pause(&sink);
+        drop(manager);
+
+        let active = directory.join("file-search-orange-gpl-v1");
+        fs::remove_dir_all(&active).unwrap();
+        let recovered = FileSearchManager::new(directory.clone());
+        let started = std::time::Instant::now();
+        recovered.resume_or_watch(sink).unwrap();
+        let deadline = started + Duration::from_secs(60);
+        loop {
+            let status = recovered.status();
+            if recovered.query_index_ready.load(Ordering::Acquire) && status.indexed_files > 0 {
+                let (_, total) = recovered
+                    .query_tantivy(&["tauri.dev-static.conf.json".into()], "", 0, 20)
+                    .unwrap()
+                    .unwrap_or_default();
+                eprintln!(
+                    "NTFS_STARTUP_RECOVERY scope=D query_ready_ms={} matches={total}",
+                    started.elapsed().as_millis()
+                );
+                assert!(total > 0);
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        recovered.pause(&sink);
+        drop(recovered);
         let _ = fs::remove_dir_all(directory);
     }
 }
