@@ -27,6 +27,7 @@ async function fixture() {
     writeFile(path.join(root, 'manifest.json'), ''),
   ]);
   await writeFile(path.join(siteDirectory, 'index.html'), '<p>LogCrate update mirror</p>\n');
+  await writeFile(path.join(siteDirectory, '404.html'), '<p>Not found</p>\n');
   const manifest = {
     version: '1.2.3',
     notes: 'notes',
@@ -53,6 +54,8 @@ async function fixture() {
   const manifestPath = path.join(root, 'manifest.json');
   await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
   await writeFile(path.join(assetsDirectory, 'LogCrate_1.2.3_x64-setup.exe'), 'signed-nsis');
+  await writeFile(path.join(assetsDirectory, 'LogCrate_1.2.3_x64_en-US.msi'), 'signed-msi');
+  await writeFile(path.join(assetsDirectory, 'LogCrate_universal.app.tar.gz'), 'signed-macos');
   return {
     root,
     siteDirectory,
@@ -130,6 +133,19 @@ test('creates a fallback-only payload without latest.json', () =>
     );
   }));
 
+test('requires a 404 page so Pages does not turn a missing manifest into SPA HTML', () =>
+  withFixture(async (value) => {
+    await rm(path.join(value.siteDirectory, '404.html'));
+    await assert.rejects(
+      prepareUpdateMirror({
+        outputDirectory: value.outputDirectory,
+        siteDirectory: value.siteDirectory,
+        fallbackOnly: true,
+      }),
+      /must contain 404\.html/,
+    );
+  }));
+
 test('supports the fallback-only command-line interface used by the release workflow', () =>
   withFixture(async (value) => {
     const { stdout } = await execFileAsync(process.execPath, [
@@ -159,11 +175,30 @@ test('rejects an empty signature on any platform', () =>
     await assert.rejects(prepareUpdateMirror(options(value)), /darwin-aarch64 signature/);
   }));
 
+test('rejects a manifest that references a missing non-mirrored platform asset', () =>
+  withFixture(async (value) => {
+    await rm(path.join(value.assetsDirectory, 'LogCrate_universal.app.tar.gz'));
+    await assert.rejects(
+      prepareUpdateMirror(options(value)),
+      /missing release asset for platform darwin-aarch64/,
+    );
+  }));
+
+test('rejects an incomplete cross-platform manifest', () =>
+  withFixture(async (value) => {
+    delete value.manifest.platforms['darwin-aarch64'];
+    await writeFile(value.manifestPath, JSON.stringify(value.manifest));
+    await assert.rejects(prepareUpdateMirror(options(value)), /does not contain a macOS platform/);
+  }));
+
 test('rejects a missing or non-NSIS Windows asset', async (context) => {
   await context.test('missing asset', () =>
     withFixture(async (value) => {
       await rm(path.join(value.assetsDirectory, 'LogCrate_1.2.3_x64-setup.exe'));
-      await assert.rejects(prepareUpdateMirror(options(value)), /missing Windows NSIS asset/);
+      await assert.rejects(
+        prepareUpdateMirror(options(value)),
+        /missing release asset for platform windows-x86_64/,
+      );
     }),
   );
   await context.test('non-NSIS URL', () =>

@@ -95,3 +95,26 @@ Tauri updater 会拒绝任何未通过签名验证的更新包。签名公钥保
 4. 将私钥和密码备份到受控的密码库。丢失私钥后,已安装版本将无法验证任何新密钥签发的更新。
 
 发布工作流会在构建前检查私钥 secret,随后生成并上传 `latest.json`、更新包和 `.sig` 签名。Windows 更新优先使用 NSIS,macOS 使用签名的 `.app.tar.gz`。
+
+### Cloudflare Pages 更新镜像
+
+Windows 自动更新同时使用固定 Pages 项目 `logcrate-updates`。Pages 只镜像 `latest.json` 和小于 25 MiB 的 NSIS 更新包；macOS 更新包及 Windows MSI 继续使用 GitHub Release。镜像不会改变 updater 签名，客户端仍只信任 `tauri.conf.json` 中的现有公钥。
+
+首次配置时，由维护者在 Cloudflare 创建仅限目标账户、具有 Cloudflare Pages 编辑权限的 API Token，然后在 GitHub 仓库的 Actions secrets 中添加：
+
+- `CLOUDFLARE_API_TOKEN`：最小权限 Pages token，值不得写入仓库、issue、构建参数或日志。
+- `CLOUDFLARE_ACCOUNT_ID`：Pages 项目所在账户的 account ID。
+
+不要把 secret 值发送给 AI 助手。工作流只读取 secret 并通过 Cloudflare API 确认 `logcrate-updates` 项目及其 production branch；缺少配置或无权访问时会在构建和公开 Release 前失败。
+
+发布采用以下顺序，不能手工跳过中间步骤：
+
+1. Windows 与 macOS job 把签名产物写入同一个 draft GitHub Release。
+2. 汇总 job 下载并验证所有清单引用的资产、签名、版本和 Windows NSIS 25 MiB 边界。
+3. Pages production 先部署不含 `latest.json` 的 fallback-only 状态并验证公开 URL 返回 404。
+4. GitHub draft 转为公开 Release；这个短暂窗口内客户端会从 Pages 404 顺序回退 GitHub。
+5. 同一次 Pages deployment 上线版本化 Windows 包和新 `latest.json`，随后从公网核对清单、缓存头和包 SHA-256。
+
+如果第 3 步之前失败，GitHub Release 保持 draft。如果 GitHub 已公开但完整 Pages 部署或验证失败，失败恢复步骤会再次部署并验证 fallback-only，workflow 以失败结束，客户端仍可使用 GitHub。恢复时修复原因后在 GitHub Actions 中只重新运行失败的 `finalize` job；它同时接受 draft 或已公开的同 tag Release。不得手工恢复旧版本 `latest.json`，否则 Tauri 会在第一个有效旧清单停止而看不到 GitHub 新版本。
+
+`v1.0.21` 及更早版本没有 Pages endpoint，仍需先从 GitHub 更新到首个双 endpoint 版本。

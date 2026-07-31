@@ -17,8 +17,53 @@ permissions:
   contents: write
 
 jobs:
+  preflight:
+    name: 校验发布与 Pages 配置
+    runs-on: ubuntu-latest
+    outputs:
+      pages-production-branch: ${{ steps.pages_project.outputs.production_branch }}
+    steps:
+      - name: 校验发布 secrets
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          missing=0
+          for name in TAURI_SIGNING_PRIVATE_KEY CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::缺少 ${name}，不会创建或公开 Release"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: 校验 Pages 项目
+        id: pages_project
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          response_file="$(mktemp)"
+          status="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/logcrate-updates")"
+          if [ "$status" != "200" ] || [ "$(jq -r '.success' "$response_file")" != "true" ]; then
+            echo "::error::无法访问 Cloudflare Pages 项目 logcrate-updates（HTTP $status）"
+            exit 1
+          fi
+          production_branch="$(jq -r '.result.production_branch // empty' "$response_file")"
+          if ! [[ "$production_branch" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "::error::Pages production branch 缺失或包含不支持的字符"
+            exit 1
+          fi
+          echo "production_branch=$production_branch" >> "$GITHUB_OUTPUT"
+
   release:
     name: 构建并发布(${{ matrix.os }})
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -83,8 +128,8 @@ jobs:
           tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           releaseName: LogCrate ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           releaseBody: ${{ steps.release_notes.outputs.body }}
-          # 自动发布(非草稿):Release 跑完即公开,点进 tag/Releases 页面可直接下载安装包
-          releaseDraft: false
+          # 双平台与 Pages 镜像全部验证前保持草稿，避免旧 Pages 清单遮住新版本
+          releaseDraft: true
           prerelease: false
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
@@ -106,3 +151,131 @@ jobs:
             src-tauri/target/**/bundle/dmg/*.dmg
             src-tauri/target/**/bundle/macos/*.app.tar.gz
             src-tauri/target/**/bundle/macos/*.sig
+
+  finalize:
+    name: 公开 Release 并部署 Pages 镜像
+    needs: [preflight, release]
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      MIRROR_BASE_URL: https://logcrate-updates.pages.dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: 下载并校验 Release 资产
+        id: prepare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')"
+          echo "is_draft=$is_draft" >> "$GITHUB_OUTPUT"
+          mkdir .release-assets
+          gh release download "$RELEASE_TAG" --dir .release-assets
+          node scripts/update-mirror.mjs \
+            --site-dir logcrate-updates \
+            --output-dir .pages-full \
+            --manifest .release-assets/latest.json \
+            --assets-dir .release-assets \
+            --tag "$RELEASE_TAG" \
+            --base-url "$MIRROR_BASE_URL"
+          node scripts/update-mirror.mjs \
+            --fallback-only \
+            --site-dir logcrate-updates \
+            --output-dir .pages-fallback
+
+      - name: 部署 Pages fallback-only 过渡态
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4.116.0'
+          command: >-
+            pages deploy .pages-fallback
+            --project-name=logcrate-updates
+            --branch=${{ needs.preflight.outputs.pages-production-branch }}
+            --commit-hash=${{ github.sha }}
+            --commit-message="${{ env.RELEASE_TAG }} fallback-only"
+
+      - name: 验证 Pages 已进入 GitHub fallback 状态
+        run: >-
+          node scripts/update-mirror-verify.mjs
+          --fallback-only
+          --expected-dir .pages-fallback
+          --base-url "$MIRROR_BASE_URL"
+          --run-id "$GITHUB_RUN_ID-fallback"
+          --attempts 12
+          --retry-delay-ms 5000
+
+      - name: 公开已验证的 GitHub Release
+        if: steps.prepare.outputs.is_draft == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest
+
+      - name: 验证公开 GitHub updater 清单
+        shell: bash
+        run: |
+          public_manifest="$(mktemp)"
+          curl --fail --location --silent --show-error \
+            --retry 12 --retry-delay 5 --retry-all-errors \
+            --header 'Cache-Control: no-cache' \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/latest/download/latest.json?verify=$GITHUB_RUN_ID" \
+            --output "$public_manifest"
+          node -e "const fs=require('node:fs');const assert=require('node:assert/strict');assert.deepEqual(JSON.parse(fs.readFileSync(process.argv[1])),JSON.parse(fs.readFileSync(process.argv[2])));" \
+            .release-assets/latest.json "$public_manifest"
+
+      - name: 原子部署完整 Pages 镜像
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4.116.0'
+          command: >-
+            pages deploy .pages-full
+            --project-name=logcrate-updates
+            --branch=${{ needs.preflight.outputs.pages-production-branch }}
+            --commit-hash=${{ github.sha }}
+            --commit-message="${{ env.RELEASE_TAG }} update mirror"
+
+      - name: 验证公开 Pages 清单、签名和 Windows 包
+        run: >-
+          node scripts/update-mirror-verify.mjs
+          --expected-dir .pages-full
+          --base-url "$MIRROR_BASE_URL"
+          --run-id "$GITHUB_RUN_ID-full"
+          --attempts 12
+          --retry-delay-ms 5000
+
+      - name: 失败时恢复 Pages fallback-only
+        if: failure() && steps.prepare.outcome == 'success'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4.116.0'
+          command: >-
+            pages deploy .pages-fallback
+            --project-name=logcrate-updates
+            --branch=${{ needs.preflight.outputs.pages-production-branch }}
+            --commit-hash=${{ github.sha }}
+            --commit-message="${{ env.RELEASE_TAG }} failure fallback"
+
+      - name: 验证失败恢复状态
+        if: failure() && steps.prepare.outcome == 'success'
+        run: >-
+          node scripts/update-mirror-verify.mjs
+          --fallback-only
+          --expected-dir .pages-fallback
+          --base-url "$MIRROR_BASE_URL"
+          --run-id "$GITHUB_RUN_ID-recovery"
+          --attempts 12
+          --retry-delay-ms 5000

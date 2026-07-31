@@ -75,6 +75,10 @@ export async function prepareUpdateMirror({
   const site = path.resolve(requireString(siteDirectory, 'siteDirectory'));
   await ensureEmptyDirectory(output);
   await copySiteDirectory(site, output);
+  const notFoundPage = await stat(path.join(output, '404.html')).catch(() => null);
+  if (!notFoundPage?.isFile()) {
+    throw new Error('site directory must contain 404.html to disable Pages SPA fallback');
+  }
   await writeFile(path.join(output, '_headers'), HEADERS, 'utf8');
 
   if (fallbackOnly) {
@@ -99,7 +103,15 @@ export async function prepareUpdateMirror({
       throw new Error(`platform ${platform} must be an object`);
     }
     requireString(release.signature, `platform ${platform} signature`);
-    assetNameFromUrl(release.url, `platform ${platform} url`);
+    const assetName = assetNameFromUrl(release.url, `platform ${platform} url`);
+    const assetPath = path.join(
+      path.resolve(requireString(assetsDirectory, 'assetsDirectory')),
+      assetName,
+    );
+    const assetStat = await stat(assetPath).catch(() => null);
+    if (!assetStat?.isFile()) {
+      throw new Error(`missing release asset for platform ${platform}: ${assetName}`);
+    }
   }
 
   const nsisPlatforms = Object.entries(manifest.platforms).filter(([platform]) =>
@@ -108,6 +120,9 @@ export async function prepareUpdateMirror({
   if (nsisPlatforms.length === 0) {
     throw new Error('manifest does not contain a Windows NSIS platform');
   }
+  if (!Object.keys(manifest.platforms).some((platform) => platform.startsWith('darwin-'))) {
+    throw new Error('manifest does not contain a macOS platform');
+  }
 
   const assets = new Map();
   for (const [platform, release] of nsisPlatforms) {
@@ -115,10 +130,7 @@ export async function prepareUpdateMirror({
     if (!assetName.toLowerCase().endsWith('-setup.exe')) {
       throw new Error(`platform ${platform} does not reference an NSIS setup executable`);
     }
-    const assetPath = path.join(
-      path.resolve(requireString(assetsDirectory, 'assetsDirectory')),
-      assetName,
-    );
+    const assetPath = path.join(path.resolve(assetsDirectory), assetName);
     const assetStat = await stat(assetPath).catch(() => null);
     if (!assetStat?.isFile()) {
       throw new Error(`missing Windows NSIS asset: ${assetName}`);
