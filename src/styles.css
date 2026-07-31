@@ -1935,7 +1935,14 @@ body.resizing {
 .log-field-settings-head {
   display: flex;
   align-items: center;
+  width: 100%;
   gap: 9px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
   padding-bottom: 2px;
 }
 .log-field-settings-head > span:last-child {
@@ -1953,6 +1960,15 @@ body.resizing {
   color: var(--fg-dim);
   font-size: 10px;
   font-weight: 400;
+}
+.log-field-settings-chevron {
+  margin-left: auto;
+  color: var(--fg-dim);
+  font-size: 13px;
+}
+.log-field-settings-body {
+  display: grid;
+  gap: 9px;
 }
 .log-field-settings-icon,
 .log-field-action-icon {

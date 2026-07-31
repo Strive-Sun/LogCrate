@@ -380,10 +380,24 @@ test('field controls support text case, editing actions, keyboard resize, drag g
 
   harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Time ▾$/ }));
   assert.ok(harness.screen.getByLabelText('Field settings'));
+  const settingsToggle = harness.screen.getByRole('button', { name: /Field settings/ });
+  assert.equal(settingsToggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(harness.screen.queryByRole('radiogroup'), null);
+  harness.fireEvent.click(settingsToggle);
+  assert.equal(settingsToggle.getAttribute('aria-expanded'), 'true');
   assert.equal(harness.screen.getAllByRole('radio').length, 4);
   assert.equal(
     harness.screen.getByRole('radio', { name: 'Time' }).getAttribute('aria-checked'),
     'true',
+  );
+  harness.fireEvent.click(settingsToggle);
+  assert.equal(settingsToggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(harness.screen.queryByRole('radiogroup'), null);
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Time ▾$/ }));
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Time ▾$/ }));
+  assert.equal(
+    harness.screen.getByRole('button', { name: /Field settings/ }).getAttribute('aria-expanded'),
+    'false',
   );
   const startTrigger = harness.screen.getByRole('button', { name: 'Start (inclusive)' });
   harness.fireEvent.click(startTrigger);
@@ -429,6 +443,7 @@ test('field controls support text case, editing actions, keyboard resize, drag g
   );
   harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Clear End (inclusive)' }));
   assert.deepEqual(conditions, []);
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: /Field settings/ }));
   harness.fireEvent.input(harness.screen.getByRole('textbox', { name: 'Field name' }), {
     target: { value: 'Timestamp' },
   });
@@ -542,6 +557,7 @@ test('low-confidence analysis falls back to an editable unsaved body field', asy
   assert.ok(harness.screen.getByText(/No stable layout recognized/));
   assert.equal(localStorage.getItem('logcrate.logFieldLayouts.v1'), null);
   harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Body ▾$/ }));
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: /Field settings/ }));
   harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Split' }));
   await harness.waitFor(() =>
     assert.equal(view.container.querySelectorAll('.log-field').length, 2),
