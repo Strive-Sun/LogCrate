@@ -329,6 +329,15 @@ pub struct FileSearchManager {
     persistence_recovery: AtomicBool,
     operation: Mutex<()>,
     operation_snapshot: Mutex<Option<IndexOperationSnapshot>>,
+    active_queries: AtomicU64,
+}
+
+struct QueryActivityGuard<'a>(&'a AtomicU64);
+
+impl Drop for QueryActivityGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl FileSearchManager {
@@ -380,6 +389,7 @@ impl FileSearchManager {
             persistence_recovery: AtomicBool::new(false),
             operation: Mutex::new(()),
             operation_snapshot: Mutex::new(None),
+            active_queries: AtomicU64::new(0),
         });
         match database_state {
             Err(error) => manager.status.lock().unwrap().error = Some(error.to_string()),
@@ -1200,6 +1210,8 @@ impl FileSearchManager {
         if !self.query_index_ready.load(Ordering::Acquire) {
             return Ok(None);
         }
+        self.active_queries.fetch_add(1, Ordering::Relaxed);
+        let _query_activity = QueryActivityGuard(&self.active_queries);
         let scanning = self.status.lock().unwrap().phase == "scanning";
         if scanning && self.query_index_staged.load(Ordering::Acquire) {
             let guard = self.staged_query_index.lock().unwrap();
@@ -1354,16 +1366,35 @@ impl FileSearchManager {
         if self.is_cancelled(generation) {
             return;
         }
+        let diagnostic = self.operation_diagnostic_context();
+        let error_message = format!("{error}; {diagnostic}");
         let mut status = self.status.lock().unwrap();
         status.phase = "error".into();
-        status.error = Some(error.to_string());
+        status.error = Some(error_message.clone());
         drop(status);
         if let Some(snapshot) = self.operation_snapshot.lock().unwrap().as_mut() {
             snapshot.final_phase = "error".into();
             snapshot.converged_ms = Some(system_time_ms(SystemTime::now()).unwrap_or(0));
-            snapshot.error = Some(error.to_string());
+            snapshot.error = Some(error_message);
         }
         self.emit_status(app);
+    }
+
+    fn operation_diagnostic_context(&self) -> String {
+        let operation_id = self
+            .operation_snapshot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|snapshot| snapshot.operation_id.clone())
+            .unwrap_or_else(|| "<none>".into());
+        let active = self.query_index_path.exists();
+        let staging = query_index_staging_path(&self.query_index_path).exists();
+        let previous = query_index_previous_path(&self.query_index_path).exists();
+        format!(
+            "operation_id={operation_id} active={active} staging={staging} previous={previous} concurrent_queries={}",
+            self.active_queries.load(Ordering::Relaxed)
+        )
     }
 
     fn emit_status<S: SearchStatusSink>(&self, app: &S) {
@@ -4346,6 +4377,32 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(total, 1);
+        drop(manager);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn query_switch_diagnostics_include_operation_and_directory_state() {
+        let directory = test_directory("query-switch-diagnostics");
+        let manager = FileSearchManager::new(directory.clone());
+        *manager.operation_snapshot.lock().unwrap() = Some(IndexOperationSnapshot {
+            operation_id: "search-diagnostic-test".into(),
+            generation: 7,
+            started_ms: 1,
+            query_ready_ms: None,
+            persistence_completed_ms: None,
+            event_handoff_completed_ms: None,
+            converged_ms: None,
+            final_phase: "scanning".into(),
+            error: None,
+            scopes: Vec::new(),
+        });
+        let diagnostic = manager.operation_diagnostic_context();
+        assert!(diagnostic.contains("operation_id=search-diagnostic-test"));
+        assert!(diagnostic.contains("active=true"));
+        assert!(diagnostic.contains("staging=false"));
+        assert!(diagnostic.contains("previous=false"));
+        assert!(diagnostic.contains("concurrent_queries=0"));
         drop(manager);
         fs::remove_dir_all(directory).unwrap();
     }
