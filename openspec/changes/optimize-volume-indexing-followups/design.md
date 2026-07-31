@@ -1,34 +1,28 @@
 ## Context
 
-`parallelize-volume-indexing` 已完成并行调度和可搜索快照发布。真机 UI 测试显示 C provider 585.5 秒、D provider 307.3 秒，最终有 4,895,619 个可搜索文件且查询约 16ms 返回结果。此前自动化持久化指标不能代表完整应用生命周期，因此需要单独测量并优化。
+当前 `search.rs` 仍同时承担 manager、协调、provider、SQLite、恢复、查询索引切换和状态报告。现有 active/staging/previous、重试和 Tantivy merge 等待已经存在，因此本变更是补齐边界、观测和覆盖，不是从零重写切换流程。
 
 ## Goals / Non-Goals
 
-- Goals: 先明确搜索模块边界；建立结构化观测与应用级基线；测量 WebView 输入 p95；改善单卷启动恢复；验证并记录 Windows 索引目录切换失败；最后降低真实 provider 生命周期。
-- Non-Goals: 不把当前五分钟目标或旧的 cargo PATH 环境问题当作已解决功能；不牺牲结果正确性、权限边界或后台非阻塞行为。
+- Goals：建立最小可用的结构化 operation telemetry；抽离 query store；以 `scope_key` 定义单范围索引替换边界；重测当前 HEAD 的单范围恢复和 WebView p95；补充 Windows 剩余可靠性证据。
+- Non-Goals：不预设 provider 必须低于五分钟；不把旧版本基线当作当前验收样本；不改变搜索结果、权限或 UI 非阻塞语义。
 
 ## Decisions
 
-- 变更严格按照架构拆分、结构化观测、基线验证、单卷恢复、Windows 可靠性、生命周期优化的顺序执行。每个编号任务只有在实现完整、其自测标准全部通过并留下结果证据后才能标记完成和开始下一任务；失败、跳过或尚需人工验证均视为未完成。
-- 将现有搜索实现按职责拆分为 manager、coordinator、provider、persistence、query store、recovery 和 telemetry 边界。拆分保持单一协调器/单 writer、generation 取消、Tauri 命令与事件载荷兼容，不借重构改变搜索结果或权限语义。
-- 引入结构化 `IndexOperation` 生命周期快照。每次启动恢复、重建或修复操作使用稳定的 operation ID，并记录 generation、开始时间、查询可用时间、持久化完成时间、事件交接完成时间、状态收敛时间和最终结果核对；每个 volume 子记录使用相同 operation ID 关联 provider、策略、阶段、计数、耗时和错误。
-- 所有性能报告必须从该结构化快照生成，拆分调度、MFT/USN、路径解析、查询索引可用、持久化和事件交接耗时，并同时记录发现数、可搜索数和查询结果数。零散日志可用于诊断，但不得作为指标定义的唯一来源。
-- 基线使用同一设备、相同 C:/D: 范围、Release 构建、固定数据快照和完全相同的 `IndexOperation` 起止点；修改前基线只能通过重新构建旧版本或归档的可执行物取得，不能用串行单元测试、单卷快速阶段或 MFT 子阶段代替完整应用基线。
-- WebView p95 只接受真实 Tauri/WebView 交互采样；后端查询延迟或 jsdom 测试不得作为替代。
-- Tantivy schema 增加稳定、规范化且可精确匹配的 `volume_key` 字段，`SearchIndexEntry` 必须携带该字段。单卷恢复通过 `delete_term(volume_key)` 后写入该卷新文档实现；Tantivy segment 可能被自动合并，因此 segment 只允许作为性能优化，不作为卷身份或正确性边界。
-- 单卷替换沿用 active/staging/previous 发布模型：替换期间查询继续读取旧 active 快照，新的卷快照完成并校验计数后再原子发布；发布失败保留旧 active 可查询。若采用共享 staging，必须从旧 active 复制或重建未受影响卷，不能让单卷操作丢失其它卷结果。
-- `volume_key` 引入时提升查询索引 schema 版本。迁移先构建新 staging 索引并核对逐卷计数和代表性查询，再切换 active；旧索引保留为 previous 直到新索引确认可用，失败时无需修改或清空 SQLite 即可回滚。
-- Windows 切换日志必须包含阶段、源路径、目标路径、活动索引、并发查询、`.next`/`.previous` 状态和重试次数；失败时保留旧活动索引可查询。
-- 生命周期性能优化必须放在最后，且只能依据前序结构化基线选择瓶颈；不得为追求单一阶段耗时牺牲结果正确性、未受影响卷持续查询、UI 响应、权限边界或崩溃回滚。
+- 执行顺序为：最小 telemetry → query store → 当前 HEAD 基线 → 按收益决定其他边界拆分 → 单范围原子替换 → Windows 诊断与真机覆盖 → 条件化性能优化。避免在没有新证据前进行大规模重构。
+- `IndexOperation` 使用稳定 operation ID，记录 generation、阶段时间、发现数、可搜索数、查询结果数、错误和终态；逐 scope 记录 provider、阶段、计数和耗时。性能报告只从该快照生成，零散日志仅用于诊断。
+- 基线固定设备、C:/D: 范围、Release 构建、数据快照和 operation 起止点。当前 HEAD 先执行三轮；每个实际优化以前后同夹具三轮比较。历史数据只作为背景。
+- 查询索引范围键命名为规范化 exact `scope_key`，覆盖整卷和目录根，并定义大小写、路径分隔符及跨平台规则。`volume_key` 仅作为 NTFS 整卷 provider 的实现别名。
+- 单范围替换期间继续读取旧 active；新范围 staging 完成并核对计数和代表性查询后原子发布。失败保留旧 active 和 SQLite 可用；共享 staging 必须保留未受影响范围。
+- Windows 日志补充 operation ID、阶段、源/目标路径、目录状态、并发查询、句柄诊断和重试次数；不重复实现已有 retry、merge wait 和 rollback。
+- 只有结构化基线确认真实瓶颈时才进行生命周期性能优化；若门槛已满足，则记录无需优化并关闭该条件任务。
 
 ## Risks / Trade-offs
 
-- 按卷删除或 segment 可能增加索引元数据和迁移复杂度；先用实验性 schema 与可回滚迁移验证。
-- 从旧 active 构建共享 staging 可能增加临时磁盘占用和单卷恢复复制成本；基准必须同时记录总耗时、峰值磁盘和未受影响卷持续可查询时间，再决定是否引入更细粒度的物理索引布局。
-- 更详细遥测会增加少量日志量；默认仅保留聚合指标和可定位的错误上下文，不记录文件内容。
+- 按 scope 删除和 schema 迁移会增加索引元数据与临时磁盘占用，必须先验证可回滚性并记录峰值磁盘。
+- 更详细遥测会增加少量日志量；默认不记录文件内容，只保留聚合指标和可定位错误上下文。
 
 ## Open Questions
 
-- 在 `volume_key` 正确性边界确定后，共享索引复制、按卷独立物理索引或辅助 segment 策略中，哪一种能在可接受的磁盘与写入开销下满足 60 秒恢复目标？
-- Windows 文件句柄占用来自 Tantivy reader、并发查询、其他进程还是杀毒软件？需要通过诊断日志和多轮真机复现确认。
-- provider 总耗时超过五分钟时，主要瓶颈是 MFT、路径解析、合并还是持久化？需要阶段数据驱动优化顺序。
+- 共享 staging、独立物理索引或其他布局哪一种能在可接受成本下满足实测恢复目标？
+- Windows 句柄占用的主要来源是什么？需由多轮真机诊断确认。
