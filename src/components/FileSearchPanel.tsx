@@ -23,6 +23,7 @@ import {
   shouldApplySearchResponse,
 } from '../util/fileSearch';
 import { ContextMenu } from './ContextMenu';
+import { recordSearchInputLatency } from '../util/searchInputLatency';
 
 const PAGE_SIZE = 200;
 const MAX_VISIBLE_RESULTS = 1_000;
@@ -425,7 +426,11 @@ export function FileSearchPanel({
           <input
             ref={inputRef}
             value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => {
+              const startedAt = performance.now();
+              setQuery(event.target.value);
+              window.requestAnimationFrame(() => recordSearchInputLatency(startedAt, status.phase));
+            }}
             placeholder={t('search.placeholder')}
             aria-label={t('search.placeholder')}
             onFocus={(event) => {
