@@ -22,6 +22,7 @@
   <a href="https://github.com/Strive-Sun/LogCrate/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Strive-Sun/LogCrate/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-4a9eff?style=flat-square" alt="Windows and macOS">
   <img src="https://img.shields.io/badge/built%20with-Tauri%202-24c8db?style=flat-square" alt="Built with Tauri 2">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-blue?style=flat-square" alt="GNU GPL v3 License"></a>
 </p>
 
 <p align="center">
@@ -69,7 +70,9 @@ flowchart LR
 - **Read archives directly** — browse ZIP, 7z, RAR, TAR and compressed streams like folders without creating a scattered manual extraction directory.
 - **Expand nested archives lazily** — recognize archive entries inside another archive and read the next layer only when you expand it.
 - **Open large logs** — build line indexes in the background and load only the visible range instead of putting a multi-gigabyte file into memory.
+- **Find files and important lines quickly** — search local file names and paths, use `Ctrl+F` inside a log, or filter recognized time, level, discrete, and text fields.
 - **Keep investigation context** — each tab retains its own scroll position, encoding, and loaded content.
+- **Resume where you stopped** — restore tabs and layouts after restart, and react safely when a source changes or disappears.
 - **Local-first processing** — logs stay on your machine; no cloud upload service is required.
 
 ## Highlights
@@ -83,10 +86,14 @@ flowchart LR
 | Multi-file tabs                  | Deduplicates repeated opens, moves overflow into a More menu, and preserves per-file reading state                         |
 | Virtual scrolling for large logs | Uses line-offset indexing, windowed reads, and bounded caches so memory usage does not scale with the full file            |
 | Encoding support                 | Detects UTF-8, GBK / GB18030, UTF-16LE / UTF-16BE, with manual override                                                    |
+| In-log find and highlighting     | Uses `Ctrl+F` for forward/reverse, whole-word, case-sensitive, wrapping navigation and visible match highlighting           |
+| Adaptive field filtering         | Recognizes common log layouts and filters time ranges, levels, discrete values, and text with editable, reusable layouts   |
+| Local file search                | Optionally indexes file names and paths across local volumes, supports fast queries, log preview, and adding result folders |
+| Workspace restoration            | Restores tabs, active file, ordering, encoding and saved field layouts, while handling changed or missing sources safely    |
 | New-log notifications            | Shows an unread badge, locates individual arrivals, and supports marking everything as read                                |
 | Suffix filtering                 | Controls which file extensions appear and trigger notifications, with an option to show everything                         |
-| Automatic updates                | Supports startup or manual checks, download progress, signature verification, installation, and relaunch                   |
-| Desktop behavior                 | Includes light/dark themes, close-to-tray, auto-hiding scrollbars, and a resizable directory pane                          |
+| Signed automatic updates         | Supports startup/manual checks, progress, signature verification and install; Windows prefers the Pages mirror with GitHub fallback |
+| Desktop behavior                 | Includes three UI templates, light/dark themes, single-instance restore, close-to-tray, auto-hiding scrollbars, and a resizable directory pane |
 | UI languages                     | Follows the system by default and switches instantly between English and Simplified Chinese in Settings                    |
 
 > LogCrate is currently a **read-only viewer**. It can rename or delete files on disk, but it cannot edit log content or create, modify, or repack archives.
@@ -137,13 +144,26 @@ Click more logs to create tabs:
 
 The backend keeps a bounded number of active sessions. An older tab may become dormant; clicking it transparently rebuilds its index and restores the selected encoding.
 
-### 5. Fix encoding and filter files
+### 5. Find and filter log content
+
+- Press `Ctrl+F` in the active log to search forward or backward, match whole words, respect case, and optionally wrap at the end.
+- For recognized layouts, use the field bar to filter by minute-precision time range, level/discrete values, or text content.
+- Choose **matching rows only** or **highlight matches**; optionally keep unparsed rows visible.
+- Drag field boundaries or rename, split, merge, and retype fields. Confirmed layouts are restored for the same source later.
+
+### 6. Fix encoding and filter files
 
 - **Garbled text** — use the encoding selector at the bottom-left of the content pane to choose UTF-8, GBK, GB18030, or UTF-16.
 - **Too many files** — use the suffix filter beside “Watched folders” to keep only the extensions you care about.
 - **Need another file temporarily** — enable “Show all”; a currently open file remains visible even if it no longer matches the filter.
 
-### 6. Handle newly arrived logs
+### 7. Search local files (optional)
+
+Enable **Search local files** in Settings and restart LogCrate. The Search entry can then query indexed file names and paths across available volumes. Double-click a log result to open it, or add its containing folder to monitoring from the context menu.
+
+On Windows, LogCrate uses a bounded index service for fast MFT/USN discovery and incremental recovery. Search is disabled by default and its index runtime is not initialized when the feature is off.
+
+### 8. Handle newly arrived logs
 
 When a new supported archive or matching log appears under a watched folder, the bell in the top-right shows an unread count. Clicking a notification expands the directory chain and locates the target. “Mark all as read” clears notifications only; it never deletes files.
 
@@ -157,6 +177,9 @@ When a new supported archive or matching log appears under a watched folder, the
 | Read a log inside an archive           | Expand each required layer and click a log | Lazily opens nested archives without manual extraction             |
 | Distinguish same-named files           | Hover a tab                             | Shows the absolute disk path and archive entry path                   |
 | Change text encoding                   | Use the encoding menu below the content | Rebuilds the line index in the background                             |
+| Find text in the active log            | Press `Ctrl+F`                          | Navigates and highlights matching keyword fragments                   |
+| Filter structured fields               | Use controls above the log content      | Filters or highlights rows by time, level, discrete value, or text    |
+| Search local file names and paths       | Enable Search in Settings, restart, then use the top Search entry | Queries the local metadata index without uploading content |
 | Locate a path in the file manager      | Right-click a file or folder            | Opens the system file manager at that path                            |
 | Stop watching but keep files           | Right-click a watch root → Remove watch | Removes monitoring without changing disk content                      |
 | Delete a file or directory             | Right-click → Delete, then confirm      | Moves it to the system recycle bin instead of permanently deleting it |
@@ -175,6 +198,8 @@ When a new supported archive or matching log appears under a watched folder, the
 - **Text** — common log extensions plus files recognized as text through content sampling.
 - **Encodings** — UTF-8, GBK, GB18030, UTF-16LE, and UTF-16BE.
 - **Interface languages** — English and Simplified Chinese, with a persisted system/manual preference.
+- **Log layouts** — bracketed application logs, Chromium/CEF-style logs, and Android logcat can be recognized automatically; other layouts fall back to an editable body field.
+- **Local search** — optional persistent file-name/path indexing, with fast Windows NTFS MFT/USN discovery and cross-platform fallback providers.
 
 ### Current boundaries
 
@@ -183,31 +208,29 @@ When a new supported archive or matching log appears under a watched folder, the
 - No archive creation, modification, entry deletion, or repacking.
 - Password-protected and multi-volume 7z/RAR archives are detected but not opened yet.
 - WIM disk-image containers are not supported. WIM support requires separate native-dependency and cross-platform packaging work.
-- Automatic updates require access to GitHub Release download endpoints.
+- Local file search is opt-in and applies after restart; file contents remain local and are not uploaded.
+- Windows automatic updates prefer the Cloudflare Pages mirror for the signed NSIS package and fall back to GitHub; MSI and macOS packages remain on GitHub.
 
 ## Roadmap
 
 The roadmap describes direction, not a promised version or delivery date. Issues are welcome when discussing priorities.
 
-### Near term: find important lines faster
+### Near term: make investigation loops faster
 
-- [ ] **Log-level filters** — recognize and filter `INFO`, `WARNING / WARN`, `ERROR`, and `FATAL` entries.
-- [ ] **Log-level annotations** — apply consistent colors, line markers, and counts so failures and their context stand out.
-- [ ] **Full-text search and highlighting** — keywords, case sensitivity, regular expressions, result counts, and next/previous navigation.
-- [ ] **Fast time navigation** — jump by timestamp and restrict the view to a time range.
+- [ ] **Regular-expression search and result overview** — extend current keyword navigation with regex, total counts, and a compact result list.
 - [ ] **Multi-file drag and drop** — accept several logs or folders at once and report the result of each item.
+- [ ] **Follow appended content** — provide a `tail -f`-style follow mode for plain logs that are still being written.
+- [ ] **Bookmarks and line annotations** — save important lines and local notes, then recover their location when possible after a file changes.
 
 ### Mid term: side-by-side investigation
 
 - [ ] **Side-by-side log panes** — display two logs next to each other with independent or synchronized scrolling.
 - [ ] **Log comparison** — align by line, time, or key fields and highlight additions, omissions, and changes.
-- [x] **Workspace restoration** — restore open files, tab order, and the active tab after a restart; missing sources are reported instead of reopened.
-- [ ] **Bookmarks and line annotations** — save important lines and local notes, then recover their location when possible after a file changes.
-- [ ] **Follow appended content** — provide a `tail -f`-style follow mode for plain logs that are still being written.
+- [ ] **Cross-file timeline** — correlate selected logs by timestamp while preserving each file's original lines and context.
 
 ### Long term: more formats and stronger workflows
 
-- [ ] **Structured log views** — expand fields, select columns, and apply conditions to formats such as JSON Lines.
+- [ ] **Structured JSON log views** — expand JSON Lines fields, select columns, and build reusable conditions beyond current text-layout filtering.
 - [ ] **Search indexes for huge logs** — accelerate repeated queries without loading the complete file into memory.
 - [ ] **Export investigation snippets** — export the smallest useful range by selected lines or time window for issues and team sharing.
 - [ ] **Reusable rule sets** — save combinations of levels, keywords, colors, and suffixes, then switch between projects quickly.
@@ -215,15 +238,17 @@ The roadmap describes direction, not a promised version or delivery date. Issues
 
 ## How it works
 
-LogCrate is built with Tauri 2. The frontend owns interaction and virtualized lists; the Rust backend owns file watching, archive access, encoding detection, and line indexing.
+LogCrate is built with Tauri 2. The frontend owns interaction and virtualized lists; the Rust backend owns file watching, archive access, encoding detection, line/field indexing, and local file search.
 
 | Layer              | Responsibility                                                                                         |
 | ------------------ | ------------------------------------------------------------------------------------------------------ |
-| React + TypeScript | Directory tree, notifications, tabs, settings, and the virtualized log view                            |
+| React + TypeScript | Directory tree, notifications, tabs, settings, field filters, search UI, and the virtualized log view   |
 | Tauri IPC          | Commands and progress events between the UI and local Rust capabilities                                |
 | Rust watcher       | Recursive directory monitoring, event coalescing, file stability checks, and configuration persistence |
 | ArchiveReader      | Bounded streaming access for ZIP, 7z, RAR, TAR, compressed streams, nested archives, and plain text     |
-| SessionManager     | Encoding detection, line-offset indexes, bounded-session LRU, and temporary-resource cleanup           |
+| SessionManager     | Encoding detection, line/field indexes, windowed filtering, bounded-session LRU, and temporary-resource cleanup |
+| SearchManager      | Persistent SQLite/Tantivy metadata index, bounded multi-volume scheduling, queries, and recovery       |
+| Windows index service | Privileged MFT/USN discovery through a bounded local IPC protocol; repairable from Settings         |
 
 Read the [technical design](docs/technical-design.md) for implementation detail and [CHANGELOG.md](CHANGELOG.md) for version history.
 
@@ -282,7 +307,10 @@ logcrate/
 ├── src-tauri/            # Rust + Tauri backend
 │   └── src/
 │       ├── archive/      # Archive registry, format readers, nested streams, and plain text
-│       ├── index.rs      # Line indexes, encodings, caches, and session lifecycle
+│       ├── index.rs      # Line/field indexes, encodings, filters, caches, and session lifecycle
+│       ├── search.rs     # Local search orchestration, persistence, recovery, and platform providers
+│       ├── search_index.rs # Tantivy query index and snapshot switching
+│       ├── ntfs/         # Windows MFT/USN parsing and bounded service IPC
 │       ├── watcher.rs    # Directory monitoring, stability checks, and persisted configuration
 │       └── lib.rs        # Tauri commands, events, tray, and application lifecycle
 ├── openspec/             # Capability specs, change proposals, and archives
@@ -303,4 +331,6 @@ New capabilities are specified through OpenSpec before implementation. See [docs
 
 ## License
 
-This repository does not currently include an open-source license. Until a license is added, do not assume the code may be freely copied, modified, or redistributed.
+LogCrate is free software released under the [GNU General Public License v3.0](LICENSE) (`GPL-3.0-only`).
+
+Bundled third-party components retain their own terms and attribution. See [`resources/licenses/`](resources/licenses/), including the Orange search-module attribution and the UnRAR restriction notice.
