@@ -66,14 +66,29 @@ describe('界面模板偏好', () => {
     assert.equal(root.dataset.theme, 'dark');
   });
 
-  it('为两套丰富模板提供深浅变量、全局材质和减少动态效果降级', () => {
+  it('为三套丰富模板提供深浅变量、全局材质和减少动态效果降级', () => {
     const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
     assert.match(css, /:root\[data-ui-template='aurora'\]/);
     assert.match(css, /:root\[data-theme='light'\]\[data-ui-template='aurora'\]/);
     assert.match(css, /:root\[data-ui-template='amber'\]/);
     assert.match(css, /:root\[data-theme='light'\]\[data-ui-template='amber'\]/);
+    assert.match(css, /:root\[data-ui-template='verdant'\]/);
+    assert.match(css, /:root\[data-theme='light'\]\[data-ui-template='verdant'\]/);
     assert.match(css, /--ui-template-accent-gradient:/);
     assert.match(css, /prefers-reduced-motion: reduce/);
+    assert.match(css, /\.ui-template-preview\.is-verdant/);
+    assert.match(
+      css,
+      /:root:is\(\[data-ui-template='aurora'\], \[data-ui-template='amber'\], \[data-ui-template='verdant'\]\)/,
+    );
+
+    const globalRules = css.slice(css.indexOf('/* ===== 极光 / 琥珀全局组件材质 ===== */'));
+    assert.match(globalRules, /\.settings-pop/);
+    assert.match(globalRules, /\.log-content-panel/);
+    assert.match(globalRules, /\.file-search-panel/);
+    assert.match(globalRules, /\.file-search-settings/);
+    assert.match(globalRules, /\.empty-state \.cta/);
+    assert.match(globalRules, /data-ui-template='verdant'/);
 
     const templateRules = css.slice(css.indexOf('/* ===== 极光 / 琥珀全局组件材质 ===== */'));
     assert.doesNotMatch(templateRules, /--log-font-size|--log-gutter-width/);
@@ -105,6 +120,15 @@ describe('界面模板偏好', () => {
     assert.match(
       moduleRules,
       /:root\[data-ui-template='amber'\] \.app \.log-field-choice\.is-selected\s*\{/,
+    );
+    assert.match(moduleRules, /:root\[data-ui-template='verdant'\] \.app \.log-tab\.active\s*\{/);
+    assert.match(
+      moduleRules,
+      /:root\[data-ui-template='verdant'\] \.app \.log-field\.active \.log-field-button\s*\{/,
+    );
+    assert.match(
+      moduleRules,
+      /:root\[data-ui-template='verdant'\] \.app \.log-field-choice\.is-selected\s*\{/,
     );
     assert.doesNotMatch(
       moduleRules,
