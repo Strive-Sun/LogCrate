@@ -1,10 +1,10 @@
-export type UiTemplate = 'native' | 'aurora' | 'amber';
+export type UiTemplate = 'native' | 'aurora' | 'amber' | 'verdant';
 
 export const UI_TEMPLATE_STORAGE_KEY = 'logcrate.uiTemplate.v1';
 export const DEFAULT_UI_TEMPLATE: UiTemplate = 'native';
 
 export function isUiTemplate(value: unknown): value is UiTemplate {
-  return value === 'native' || value === 'aurora' || value === 'amber';
+  return value === 'native' || value === 'aurora' || value === 'amber' || value === 'verdant';
 }
 
 export function loadUiTemplate(storage: Pick<Storage, 'getItem'>): UiTemplate {

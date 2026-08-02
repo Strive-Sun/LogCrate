@@ -31,6 +31,8 @@ describe('界面模板偏好', () => {
     assert.equal(loadUiTemplate(storage), 'aurora');
     saveUiTemplate(storage, 'amber');
     assert.equal(loadUiTemplate(storage), 'amber');
+    saveUiTemplate(storage, 'verdant');
+    assert.equal(loadUiTemplate(storage), 'verdant');
   });
 
   it('存储不可用时回退或保留当前进程选择', () => {
@@ -57,6 +59,10 @@ describe('界面模板偏好', () => {
 
     applyUiTemplate(root, 'amber');
     assert.equal(root.dataset.uiTemplate, 'amber');
+    assert.equal(root.dataset.theme, 'dark');
+
+    applyUiTemplate(root, 'verdant');
+    assert.equal(root.dataset.uiTemplate, 'verdant');
     assert.equal(root.dataset.theme, 'dark');
   });
 

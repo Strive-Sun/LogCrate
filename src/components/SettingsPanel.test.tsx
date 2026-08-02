@@ -81,33 +81,34 @@ test('pending next-launch state is visible and saving disables the toggle', () =
   );
 });
 
-test('settings shows three template previews and switches through click or arrow keys', () => {
+test('settings shows four template previews and switches through click or arrow keys', () => {
   const requested: string[] = [];
   renderSettings({ onUiTemplateChange: (template) => requested.push(template) });
 
   const group = harness.screen.getByRole('radiogroup', { name: 'Interface template' });
   const radios = harness.within(group).getAllByRole('radio');
-  assert.equal(radios.length, 3);
+  assert.equal(radios.length, 4);
   assert.equal((radios[0] as HTMLInputElement).checked, true);
   assert.ok(harness.screen.getByText('Aurora'));
   assert.ok(harness.screen.getByText('Amber'));
+  assert.ok(harness.screen.getByText('Verdant'));
 
   harness.fireEvent.click(radios[1]);
   assert.equal(requested.at(-1), 'aurora');
   radios[0].focus();
   harness.fireEvent.keyDown(radios[0], { key: 'ArrowLeft' });
-  assert.equal(requested.at(-1), 'amber');
-  assert.equal(document.activeElement, radios[2]);
+  assert.equal(requested.at(-1), 'verdant');
+  assert.equal(document.activeElement, radios[3]);
 });
 
 test('template choices remain available in a narrow settings viewport', () => {
   const originalWidth = window.innerWidth;
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 360 });
   try {
-    renderSettings({ uiTemplate: 'amber' });
-    assert.equal(harness.screen.getAllByRole('radio').length, 3);
+    renderSettings({ uiTemplate: 'verdant' });
+    assert.equal(harness.screen.getAllByRole('radio').length, 4);
     assert.equal(
-      (harness.screen.getByRole('radio', { name: /Amber/ }) as HTMLInputElement).checked,
+      (harness.screen.getByRole('radio', { name: /Verdant/ }) as HTMLInputElement).checked,
       true,
     );
   } finally {

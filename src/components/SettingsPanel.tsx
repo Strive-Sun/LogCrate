@@ -41,6 +41,11 @@ const templateOptions = [
     nameKey: 'settings.template.amber',
     hintKey: 'settings.template.amberHint',
   },
+  {
+    value: 'verdant',
+    nameKey: 'settings.template.verdant',
+    hintKey: 'settings.template.verdantHint',
+  },
 ] as const;
 
 export function SettingsPanel(props: Props) {
