@@ -17,7 +17,10 @@ function percentile95(values: number[]): number {
   return sorted[index] ?? 0;
 }
 
-export function recordSearchInputLatency(startedAt: number, phase: string): SearchInputLatencyReport {
+export function recordSearchInputLatency(
+  startedAt: number,
+  phase: string,
+): SearchInputLatencyReport {
   const elapsed = Math.max(0, performance.now() - startedAt);
   samples.push(elapsed);
   if (samples.length > MAX_SAMPLES) samples.shift();
@@ -29,7 +32,9 @@ export function recordSearchInputLatency(startedAt: number, phase: string): Sear
   };
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new window.CustomEvent(REPORT_EVENT, { detail: report }));
-    (window as Window & { __logcrateSearchInputLatency?: SearchInputLatencyReport }).__logcrateSearchInputLatency = report;
+    (
+      window as Window & { __logcrateSearchInputLatency?: SearchInputLatencyReport }
+    ).__logcrateSearchInputLatency = report;
   }
   return report;
 }

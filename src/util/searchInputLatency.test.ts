@@ -1,9 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {
-  recordSearchInputLatency,
-  resetSearchInputLatencySamples,
-} from './searchInputLatency';
+import { recordSearchInputLatency, resetSearchInputLatencySamples } from './searchInputLatency';
 
 test('search input latency keeps bounded raw samples and computes p95', () => {
   resetSearchInputLatencySamples();
