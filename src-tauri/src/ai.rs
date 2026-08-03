@@ -22,6 +22,29 @@ pub struct AiProviderConfig {
     pub key_configured: bool,
 }
 
+const MAX_ANALYSIS_CHARS: usize = 120_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAnalysisResult {
+    pub provider_id: String,
+    pub model: String,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatRequest<'a> {
+    model: &'a str,
+    temperature: f32,
+    messages: [ChatMessage<'a>; 2],
+}
+
+#[derive(Debug, Serialize)]
+struct ChatMessage<'a> {
+    role: &'a str,
+    content: &'a str,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredAiProvider {
@@ -100,6 +123,18 @@ fn is_allowed_endpoint(value: &str) -> bool {
         .unwrap_or_default()
         .trim_matches(['[', ']']);
     matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn validate_analysis_text(text: &str) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("Select some log text before starting AI analysis".to_string());
+    }
+    if text.chars().count() > MAX_ANALYSIS_CHARS {
+        return Err(format!(
+            "Selected log text is too large (maximum {MAX_ANALYSIS_CHARS} characters)"
+        ));
+    }
+    Ok(())
 }
 
 fn key_entry(provider_id: &str) -> Result<Entry, keyring::Error> {
@@ -254,6 +289,76 @@ pub async fn test_ai_provider(app: AppHandle, provider_id: String) -> Result<(),
     }
 }
 
+#[tauri::command]
+pub async fn analyze_ai_log(
+    app: AppHandle,
+    provider_id: String,
+    selected_text: String,
+) -> Result<AiAnalysisResult, String> {
+    validate_analysis_text(&selected_text)?;
+    let provider = read_stored_providers(&app)?
+        .into_iter()
+        .find(|provider| provider.id == provider_id)
+        .ok_or_else(|| "AI provider was not found".to_string())?;
+    let api_key = read_api_key(&provider.id)
+        .map_err(|_| "Unable to access the API key in the system credential store".to_string())?;
+    if api_key.is_empty() {
+        return Err("AI provider API key is not configured".to_string());
+    }
+    let endpoint = format!(
+        "{}/chat/completions",
+        provider.base_url.trim_end_matches('/')
+    );
+    let system_prompt = "你是日志分析助手。请基于用户提供的日志，使用清晰的中文分段说明：1. 日志包含的主要信息；2. 警告；3. 错误；4. 可能原因；5. 建议。不要臆造日志中不存在的事实，对无法确定的内容明确标注不确定性。";
+    let request = ChatRequest {
+        model: &provider.model,
+        temperature: 0.1,
+        messages: [
+            ChatMessage {
+                role: "system",
+                content: system_prompt,
+            },
+            ChatMessage {
+                role: "user",
+                content: &selected_text,
+            },
+        ],
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|_| "Unable to create the AI analysis client".to_string())?;
+    let response = client
+        .post(endpoint)
+        .bearer_auth(api_key)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|_| "AI analysis request failed".to_string())?;
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|_| "AI provider returned an invalid response".to_string())?;
+    if !status.is_success() {
+        return Err(format!("AI provider returned HTTP {}", status.as_u16()));
+    }
+    let content = body
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|content| !content.trim().is_empty())
+        .ok_or_else(|| "AI provider returned no analysis content".to_string())?;
+    Ok(AiAnalysisResult {
+        provider_id,
+        model: provider.model,
+        content: content.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,5 +389,12 @@ mod tests {
         let mut invalid = config("https://api.example.com/v1");
         invalid.id = "provider/key".into();
         assert_eq!(invalid.validate(), Err(AiProviderConfigError::InvalidId));
+    }
+
+    #[test]
+    fn analysis_text_is_bounded_and_must_not_be_blank() {
+        assert!(validate_analysis_text("ERROR something").is_ok());
+        assert!(validate_analysis_text(" \n\t ").is_err());
+        assert!(validate_analysis_text(&"x".repeat(MAX_ANALYSIS_CHARS + 1)).is_err());
     }
 }

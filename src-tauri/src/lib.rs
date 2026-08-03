@@ -18,7 +18,9 @@ mod startup;
 mod startup_trace;
 mod watcher;
 
-use ai::{delete_ai_provider, list_ai_providers, save_ai_provider, test_ai_provider};
+use ai::{
+    analyze_ai_log, delete_ai_provider, list_ai_providers, save_ai_provider, test_ai_provider,
+};
 use archive::{open_archive, resolve_archive_chain, ArchiveEntry};
 use index::{
     IndexProgress, LogFieldAnchorResult, LogFieldFilterRequest, LogFieldMarkedLine,
@@ -1514,7 +1516,8 @@ pub fn run() {
             list_ai_providers,
             save_ai_provider,
             delete_ai_provider,
-            test_ai_provider
+            test_ai_provider,
+            analyze_ai_log
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
