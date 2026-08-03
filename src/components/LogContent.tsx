@@ -5,6 +5,7 @@ import type {
   LogFieldCondition,
   LogFieldLayout,
   LogFieldMarkedLine,
+  type LogFieldLayoutPattern,
   LogFieldResultMode,
   LogFieldStatistics,
   LogLine,
@@ -54,7 +55,27 @@ export function mergeLogLineWindow(
   return next;
 }
 
-function storedToRuntime(layout: StoredLogFieldLayout): LogFieldLayout {
+export function storedToRuntime(layout: StoredLogFieldLayout): LogFieldLayout {
+  let pattern: LogFieldLayoutPattern = { kind: 'manualColumns' };
+  if (layout.source === 'automatic') {
+    try {
+      const fingerprint = JSON.parse(layout.fingerprint) as {
+        pattern?: LogFieldLayoutPattern;
+      };
+      if (
+        fingerprint.pattern?.kind === 'chromium' ||
+        fingerprint.pattern?.kind === 'androidLogcat' ||
+        fingerprint.pattern?.kind === 'manualColumns' ||
+        (fingerprint.pattern?.kind === 'bracketed' &&
+          Number.isInteger(fingerprint.pattern.segmentCount) &&
+          fingerprint.pattern.segmentCount > 0)
+      ) {
+        pattern = fingerprint.pattern;
+      }
+    } catch {
+      // Older or malformed fingerprints remain fixed-column layouts.
+    }
+  }
   return {
     fields: layout.fields.map((field) => ({
       id: field.id,
@@ -63,7 +84,7 @@ function storedToRuntime(layout: StoredLogFieldLayout): LogFieldLayout {
       boundary: { start: field.start, end: field.end },
       displayWidth: Math.max(4, (field.end ?? field.start + 24) - field.start),
     })),
-    pattern: { kind: 'manualColumns' },
+    pattern,
     confidence: 1,
     source: layout.source,
   };

@@ -5,8 +5,8 @@ import { useState } from 'react';
 import type { ComponentProps } from 'react';
 import { api, type LogFieldCondition, type LogFieldLayout, type LogSearchRequest } from '../api';
 import { I18nProvider } from '../i18n/I18nProvider';
-import { persistLogFieldLayout } from '../util/logFieldLayoutStorage';
-import { LogContent, mergeLogLineWindow } from './LogContent';
+import { persistLogFieldLayout, type StoredLogFieldLayout } from '../util/logFieldLayoutStorage';
+import { LogContent, mergeLogLineWindow, storedToRuntime } from './LogContent';
 import { LogFieldFilterBar } from './LogFieldFilterBar';
 import { LogRow } from './LogRow';
 
@@ -539,6 +539,20 @@ test('saved layout appears immediately, validates in background, and can re-reco
   assert.equal(confirmCalls, 1);
   assert.ok(harness.screen.getByText('Valid layout changes are saved automatically.'));
   assert.equal(harness.screen.queryByRole('button', { name: /^Save$/ }), null);
+});
+
+test('saved automatic chromium layouts keep parser semantics instead of fixed stale columns', () => {
+  const saved: StoredLogFieldLayout = {
+    fields: [
+      { id: 'field-1', name: 'Time', type: 'time', start: 1, end: 18 },
+      { id: 'field-2', name: 'Level', type: 'level', start: 19, end: 26 },
+      { id: 'field-3', name: 'Source', type: 'discrete', start: 27, end: 48 },
+      { id: 'field-4', name: 'Body', type: 'text', start: 49, end: null },
+    ],
+    fingerprint: JSON.stringify({ pattern: { kind: 'chromium' }, fields: 4 }),
+    source: 'automatic',
+  };
+  assert.deepEqual(storedToRuntime(saved).pattern, { kind: 'chromium' });
 });
 
 test('low-confidence analysis falls back to an editable unsaved body field', async () => {
