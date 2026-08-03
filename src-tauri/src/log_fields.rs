@@ -892,11 +892,24 @@ fn looks_like_time(value: &str) -> bool {
 }
 
 fn looks_like_chromium_time(value: &str) -> bool {
-    value.len() >= 6
-        && value.contains('/')
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte == b'/')
+    let Some((date, time)) = value.split_once('/') else {
+        return false;
+    };
+    if date.len() != 4 || !date.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let (clock, fraction) = match time.split_once('.') {
+        Some((clock, fraction)) => (clock, Some(fraction)),
+        None => (time, None),
+    };
+    clock.len() == 6
+        && clock.bytes().all(|byte| byte.is_ascii_digit())
+        && match fraction {
+            Some(fraction) => {
+                !fraction.is_empty() && fraction.bytes().all(|byte| byte.is_ascii_digit())
+            }
+            None => true,
+        }
 }
 
 fn looks_like_logcat_date(value: &str) -> bool {
@@ -921,8 +934,9 @@ fn looks_like_single_letter_level(value: &str) -> bool {
 }
 
 fn looks_like_level(value: &str) -> bool {
-    matches!(
-        value.to_ascii_uppercase().as_str(),
+    let upper = value.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
         "V" | "D"
             | "I"
             | "W"
@@ -939,7 +953,13 @@ fn looks_like_level(value: &str) -> bool {
             | "FATAL"
             | "CRITICAL"
             | "SEVERE"
-    )
+    ) {
+        return true;
+    }
+    match upper.strip_prefix("VERBOSE") {
+        Some(suffix) => suffix.bytes().all(|byte| byte.is_ascii_digit()),
+        None => false,
+    }
 }
 
 pub fn canonical_level_counts<'a, I>(values: I) -> BTreeMap<String, usize>
@@ -1211,6 +1231,36 @@ mod tests {
 
         let prose = vec!["this is xxx error, please return".to_string(); 8];
         assert!(analyze_lines(&prose, SamplingPhase::Quick).layout.is_none());
+    }
+
+    #[test]
+    fn recognizes_numbered_chromium_verbose_levels_as_stable_layout() {
+        let lines = vec![
+            "[0722/134614.337:INFO:missevan_fm_kernel.cpp(121)] MissEvanFM: start",
+            "[0722/134614.338:VERBOSE1:vector.cpp(222)] enable AVX2",
+            "[0722/134614.401:INFO:httpdns.cc(382)] OnEffectiveConnectionTypeChanged",
+            "[0722/134614.529:VERBOSE1:audio_capture.cpp(529)] current friendly name",
+            "[0722/134619.355:WARNING:mic_capture.cpp(407)] Reset cur_time_stamp",
+            "[0722/134619.387:VERBOSE1:audio_capture.cpp(566)] max block size changed",
+            "[0722/134619.877:ERROR:cert_verify_proc_builtin.cc(602)] No net_fetcher",
+            "[0722/134645.036:INFO:user_account.cpp(123)] login success",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+        let analysis = analyze_lines(&lines, SamplingPhase::Quick);
+        assert_eq!(analysis.main_layout_lines, lines.len());
+        assert_eq!(analysis.unparsed_lines, 0);
+        let layout = analysis.layout.unwrap();
+        assert_eq!(layout.pattern, LayoutPattern::Chromium);
+        assert_eq!(layout.fields.len(), 4);
+
+        let values = extracted_values(&layout, &lines[1]).unwrap();
+        assert_eq!(values[0], "0722/134614.338");
+        assert_eq!(values[1], "VERBOSE1");
+        assert_eq!(values[2], "vector.cpp(222)");
+        assert_eq!(values[3], "enable AVX2");
     }
 
     #[test]
