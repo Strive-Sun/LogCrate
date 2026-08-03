@@ -690,11 +690,13 @@ fn bracket_spans(line: &str) -> Vec<(usize, usize)> {
 }
 
 fn parse_chromium(line: &str) -> Option<ParsedLine> {
-    let spans = bracket_spans(line);
-    if spans.len() != 1 || !line.starts_with('[') {
+    if !line.starts_with('[') {
         return None;
     }
-    let (content_start, content_end) = spans[0];
+    // Chromium's header is the first bracketed segment. The message may
+    // legitimately contain additional bracketed timestamps or metadata.
+    let content_start = 1;
+    let content_end = line[content_start..].find(']')? + content_start;
     let content = &line[content_start..content_end];
     let first_colon = content.find(':')?;
     let second_relative = content[first_colon + 1..].find(':')?;
@@ -1261,6 +1263,23 @@ mod tests {
         assert_eq!(values[1], "VERBOSE1");
         assert_eq!(values[2], "vector.cpp(222)");
         assert_eq!(values[3], "enable AVX2");
+    }
+
+    #[test]
+    fn ignores_additional_brackets_in_chromium_message_body() {
+        let lines = vec![
+            "[0615/194037.082:VERBOSE1:bvclive_engine.cpp(143)] [2026-06-15T19:40:37.081 INFO 0 bvclive_api.cc:21 bvclive_live_open] bvclive_version: v1.12.6",
+            "[0615/194037.083:INFO:httpdns.cc(382)] [network] OnEffectiveConnectionTypeChanged",
+            "[0615/194037.084:WARNING:mic_capture.cpp(202)] [audio] transformer enabled",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+        let analysis = analyze_lines(&lines, SamplingPhase::Quick);
+        assert_eq!(analysis.main_layout_lines, lines.len());
+        assert_eq!(analysis.unparsed_lines, 0);
+        assert_eq!(analysis.layout.unwrap().pattern, LayoutPattern::Chromium);
     }
 
     #[test]
