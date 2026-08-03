@@ -38,6 +38,30 @@ const PAGE = 200;
 const MAX_CACHED_LINES = 5_000;
 const ENCODINGS = ['UTF-8', 'GBK', 'GB18030', 'UTF-16LE', 'UTF-16BE'];
 
+async function copySelectedText(text: string): Promise<void> {
+  if (!text) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch {
+    // Fall back to the synchronous WebView-compatible copy path below.
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    document.execCommand('copy');
+  } finally {
+    textarea.remove();
+  }
+}
+
 export function mergeLogLineWindow(
   previous: Map<number, LogLine>,
   start: number,
@@ -172,7 +196,11 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
   const [fieldMode, setFieldMode] = useState<LogFieldResultMode>('compact');
   const [includeUnparsed, setIncludeUnparsed] = useState(true);
   const [fieldFilterMenuOpen, setFieldFilterMenuOpen] = useState(false);
-  const [logContextMenu, setLogContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [logContextMenu, setLogContextMenu] = useState<{
+    x: number;
+    y: number;
+    selectedText: string;
+  } | null>(null);
   const [logScrollLeft, setLogScrollLeft] = useState(0);
   const [fieldEncodingVersion, setFieldEncodingVersion] = useState(0);
   const fieldUnsub = useRef<() => void>(() => {});
@@ -902,7 +930,11 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
         onScroll={(event) => setLogScrollLeft(event.currentTarget.scrollLeft)}
         onContextMenu={(event) => {
           event.preventDefault();
-          setLogContextMenu({ x: event.clientX, y: event.clientY });
+          setLogContextMenu({
+            x: event.clientX,
+            y: event.clientY,
+            selectedText: window.getSelection()?.toString() ?? '',
+          });
         }}
       >
         {fieldGeneration && !fieldFiltering && fieldMode === 'compact' && totalLines === 0 && (
@@ -953,10 +985,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
           items={[
             {
               label: t('log.copySelection'),
-              onClick: () => {
-                const selected = window.getSelection()?.toString();
-                if (selected) void navigator.clipboard?.writeText(selected);
-              },
+              onClick: () => void copySelectedText(logContextMenu.selectedText),
             },
             {
               label: t('log.selectAll'),
