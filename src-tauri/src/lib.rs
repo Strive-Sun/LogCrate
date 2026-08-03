@@ -1,3 +1,4 @@
+mod ai;
 mod archive;
 mod index;
 pub mod log_fields;

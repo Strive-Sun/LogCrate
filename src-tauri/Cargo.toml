@@ -56,6 +56,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 anyhow = "1"
 thiserror = "1"
 trash = "5"
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native"] }
 
 [features]
 # 由 tauri CLI 在构建时按需启用
