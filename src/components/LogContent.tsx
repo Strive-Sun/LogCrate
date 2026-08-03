@@ -5,7 +5,7 @@ import type {
   LogFieldCondition,
   LogFieldLayout,
   LogFieldMarkedLine,
-  type LogFieldLayoutPattern,
+  LogFieldLayoutPattern,
   LogFieldResultMode,
   LogFieldStatistics,
   LogLine,
@@ -23,6 +23,7 @@ import {
 } from '../util/logFieldLayoutStorage';
 import { LogFieldFilterBar } from './LogFieldFilterBar';
 import { LogRow } from './LogRow';
+import { ContextMenu } from './ContextMenu';
 import { useI18n } from '../i18n/I18nProvider';
 
 interface Props {
@@ -171,6 +172,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
   const [fieldMode, setFieldMode] = useState<LogFieldResultMode>('compact');
   const [includeUnparsed, setIncludeUnparsed] = useState(true);
   const [fieldFilterMenuOpen, setFieldFilterMenuOpen] = useState(false);
+  const [logContextMenu, setLogContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [logScrollLeft, setLogScrollLeft] = useState(0);
   const [fieldEncodingVersion, setFieldEncodingVersion] = useState(0);
   const fieldUnsub = useRef<() => void>(() => {});
@@ -898,6 +900,10 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
         ref={scrollRef}
         tabIndex={-1}
         onScroll={(event) => setLogScrollLeft(event.currentTarget.scrollLeft)}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setLogContextMenu({ x: event.clientX, y: event.clientY });
+        }}
       >
         {fieldGeneration && !fieldFiltering && fieldMode === 'compact' && totalLines === 0 && (
           <div className="log-field-empty">
@@ -938,6 +944,35 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
           })}
         </div>
       </div>
+
+      {logContextMenu && (
+        <ContextMenu
+          x={logContextMenu.x}
+          y={logContextMenu.y}
+          onClose={() => setLogContextMenu(null)}
+          items={[
+            {
+              label: t('log.copySelection'),
+              onClick: () => {
+                const selected = window.getSelection()?.toString();
+                if (selected) void navigator.clipboard?.writeText(selected);
+              },
+            },
+            {
+              label: t('log.selectAll'),
+              onClick: () => {
+                const view = scrollRef.current;
+                if (!view) return;
+                const selection = window.getSelection();
+                const range = document.createRange();
+                range.selectNodeContents(view);
+                selection?.removeAllRanges();
+                selection?.addRange(range);
+              },
+            },
+          ]}
+        />
+      )}
 
       <div className="col-foot log-status-foot">
         <select
