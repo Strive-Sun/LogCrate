@@ -979,7 +979,11 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
             </select>
             <label
               className="log-field-unparsed-toggle"
-              title={fieldMode === 'highlight' ? t('fields.unparsedHighlightHint') : undefined}
+              title={
+                fieldMode === 'highlight'
+                  ? t('fields.unparsedHighlightHint')
+                  : t('fields.unparsedHint')
+              }
             >
               <input
                 type="checkbox"
