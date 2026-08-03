@@ -699,11 +699,25 @@ fn parse_chromium(line: &str) -> Option<ParsedLine> {
     let content_end = line[content_start..].find(']')? + content_start;
     let content = &line[content_start..content_end];
     let first_colon = content.find(':')?;
-    let second_relative = content[first_colon + 1..].find(':')?;
-    let second_colon = first_colon + 1 + second_relative;
     let timestamp = &content[..first_colon];
-    let level = &content[first_colon + 1..second_colon];
+    // Chromium normally uses `LEVEL:source`, but some builds emit
+    // `LEVEL 0 source:line`. The level is the first token after the timestamp.
+    let level_tail = &content[first_colon + 1..];
+    let level_len = level_tail
+        .find(|character: char| character == ':' || character.is_ascii_whitespace())
+        .unwrap_or(level_tail.len());
+    let level = &level_tail[..level_len];
     if !looks_like_chromium_time(timestamp) || !looks_like_level(level) {
+        return None;
+    }
+    let level_start = content_start + first_colon + 1;
+    let level_end = level_start + level_len;
+    let source_start = if level_tail.as_bytes().get(level_len) == Some(&b':') {
+        level_end + 1
+    } else {
+        level_end + level_tail[level_len..].len() - level_tail[level_len..].trim_start().len()
+    };
+    if source_start >= content_end {
         return None;
     }
     let body_start = trim_body_start(line, content_end + 1);
@@ -722,14 +736,14 @@ fn parse_chromium(line: &str) -> Option<ParsedLine> {
                 line,
                 "级别",
                 LogFieldType::Level,
-                content_start + first_colon + 1,
-                Some(content_start + second_colon),
+                level_start,
+                Some(level_end),
             ),
             parsed_field(
                 line,
                 "来源",
                 LogFieldType::Discrete,
-                content_start + second_colon + 1,
+                source_start,
                 Some(content_end),
             ),
             parsed_field(line, "正文", LogFieldType::Text, body_start, None),
@@ -1280,6 +1294,38 @@ mod tests {
         assert_eq!(analysis.main_layout_lines, lines.len());
         assert_eq!(analysis.unparsed_lines, 0);
         assert_eq!(analysis.layout.unwrap().pattern, LayoutPattern::Chromium);
+    }
+
+    #[test]
+    fn chromium_metadata_after_level_does_not_pollute_level_candidates() {
+        let lines = vec![
+            "[0722/135413.464:INFO 0 bvclive_api.cc:31 bvclive_live_open] input".to_string(),
+            "[0722/135413.465:ERROR 0 encoder.cc:86 Open] failed".to_string(),
+            "[0722/135413.466:ERROR 0 stats_reporter.cc:59 StatsReporter] failed".to_string(),
+        ];
+        let layout = analyze_layout(lines.len(), SamplingPhase::Quick, |index| {
+            lines.get(index).cloned()
+        })
+        .layout
+        .unwrap();
+        assert_eq!(layout.pattern, LayoutPattern::Chromium);
+        let result = scan_field_lines(
+            lines.len() as u64,
+            &layout,
+            &[],
+            |index| Ok((lines[index as usize].clone(), false)),
+            || false,
+            |_, _, _| {},
+        )
+        .unwrap()
+        .unwrap();
+        let candidates = &result.statistics[1].candidates;
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.value == "ERROR"));
+        assert!(candidates
+            .iter()
+            .all(|candidate| !candidate.value.contains(' ')));
     }
 
     #[test]
