@@ -10,6 +10,7 @@ import type {
   LogFieldStatistics,
   LogLine,
   LogSearchMatch,
+  AiAnalysisResult,
   OpenSessionResult,
 } from '../api';
 import { fmtNum, fmtSize } from '../util/format';
@@ -202,6 +203,9 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
     selectedText: string;
   } | null>(null);
   const [logScrollLeft, setLogScrollLeft] = useState(0);
+  const [aiResult, setAiResult] = useState<AiAnalysisResult | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
   const [fieldEncodingVersion, setFieldEncodingVersion] = useState(0);
   const fieldUnsub = useRef<() => void>(() => {});
   const fieldRequestGeneration = useRef(0);
@@ -218,6 +222,21 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
   fieldModeRef.current = fieldMode;
   includeUnparsedRef.current = includeUnparsed;
   indexedLinesRef.current = indexedLines;
+
+  const analyzeSelectedText = useCallback(async (selectedText: string) => {
+    if (!selectedText.trim()) return;
+    setAiError(null);
+    const providers = await api.listAiProviders();
+    if (!providers.length) { setAiError('请先在设置中配置 AI 供应商'); return; }
+    const provider = providers[0];
+    if (!provider.keyConfigured) { setAiError('当前供应商尚未配置 API Key，请先在设置中完成配置'); return; }
+    const confirmed = window.confirm(`将把选中的 ${selectedText.length} 个字符发送到 ${provider.baseUrl}，使用模型 ${provider.model}。是否继续？`);
+    if (!confirmed) return;
+    setAiBusy(true);
+    try { setAiResult(await api.analyzeAiLog(provider.id, selectedText)); }
+    catch (error) { setAiError(error instanceof Error ? error.message : 'AI 分析失败'); }
+    finally { setAiBusy(false); }
+  }, []);
 
   const clearLineCache = useCallback(() => {
     cacheRequestGeneration.current += 1;
@@ -999,8 +1018,21 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
                 selection?.addRange(range);
               },
             },
+            {
+              label: 'AI 分析',
+              onClick: () => void analyzeSelectedText(logContextMenu.selectedText),
+            },
           ]}
         />
+      )}
+
+      {(aiBusy || aiError || aiResult) && (
+        <div className="ai-result-pop" role="dialog" aria-label="AI 日志分析">
+          <div className="pop-head"><span>AI 日志分析</span><button className="settings-close" onClick={() => { setAiResult(null); setAiError(null); }}>×</button></div>
+          {aiBusy && <div className="settings-hint">分析中，请稍候…</div>}
+          {aiError && <div className="update-message error">{aiError}</div>}
+          {aiResult && <><div className="settings-hint">供应商：{aiResult.providerId} · 模型：{aiResult.model}</div><pre className="ai-result-content">{aiResult.content}</pre></>}
+        </div>
       )}
 
       <div className="col-foot log-status-foot">
