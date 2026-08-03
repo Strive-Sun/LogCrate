@@ -1,0 +1,4 @@
+interface:
+  display_name: "LogCrate Workflow"
+  short_description: "Run LogCrate tasks by repository rules"
+  default_prompt: "Use $logcrate-workflow to handle this LogCrate repository task according to its rule manual."
