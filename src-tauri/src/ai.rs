@@ -7,6 +7,8 @@
 
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use tauri::{AppHandle, Manager};
 
 const KEYRING_SERVICE: &str = "com.logcrate.ai-provider";
 
@@ -18,6 +20,15 @@ pub struct AiProviderConfig {
     pub base_url: String,
     pub model: String,
     pub key_configured: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredAiProvider {
+    id: String,
+    name: String,
+    base_url: String,
+    model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +126,131 @@ pub fn delete_api_key(provider_id: &str) -> Result<(), keyring::Error> {
     match key_entry(provider_id)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+fn providers_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|path| path.join("ai-providers.json"))
+        .map_err(|_| "AI provider settings directory is unavailable".to_string())
+}
+
+fn read_stored_providers(app: &AppHandle) -> Result<Vec<StoredAiProvider>, String> {
+    let path = providers_path(app)?;
+    let Ok(bytes) = std::fs::read(path) else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_slice(&bytes).map_err(|_| "AI provider settings are invalid".to_string())
+}
+
+fn write_stored_providers(app: &AppHandle, providers: &[StoredAiProvider]) -> Result<(), String> {
+    let path = providers_path(app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|_| "Unable to create AI provider settings directory".to_string())?;
+    }
+    let bytes = serde_json::to_vec_pretty(providers)
+        .map_err(|_| "Unable to serialize AI provider settings".to_string())?;
+    std::fs::write(path, bytes).map_err(|_| "Unable to save AI provider settings".to_string())
+}
+
+#[tauri::command]
+pub fn list_ai_providers(app: AppHandle) -> Result<Vec<AiProviderConfig>, String> {
+    read_stored_providers(&app)?
+        .into_iter()
+        .map(|provider| {
+            let key_configured = has_api_key(&provider.id)
+                .map_err(|_| "Unable to access the system credential store".to_string())?;
+            Ok(AiProviderConfig {
+                id: provider.id,
+                name: provider.name,
+                base_url: provider.base_url,
+                model: provider.model,
+                key_configured,
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn save_ai_provider(
+    app: AppHandle,
+    config: AiProviderConfig,
+    api_key: Option<String>,
+) -> Result<AiProviderConfig, String> {
+    config.validate().map_err(|error| error.to_string())?;
+    if let Some(api_key) = api_key.filter(|value| !value.trim().is_empty()) {
+        save_api_key(&config.id, &api_key)
+            .map_err(|_| "Unable to save the API key to the system credential store".to_string())?;
+    }
+    let mut providers = read_stored_providers(&app)?;
+    let stored = StoredAiProvider {
+        id: config.id.clone(),
+        name: config.name.clone(),
+        base_url: config.base_url.clone(),
+        model: config.model.clone(),
+    };
+    if let Some(existing) = providers
+        .iter_mut()
+        .find(|provider| provider.id == stored.id)
+    {
+        *existing = stored;
+    } else {
+        providers.push(stored);
+    }
+    write_stored_providers(&app, &providers)?;
+    Ok(AiProviderConfig {
+        key_configured: has_api_key(&config.id)
+            .map_err(|_| "Unable to access the system credential store".to_string())?,
+        ..config
+    })
+}
+
+#[tauri::command]
+pub fn delete_ai_provider(app: AppHandle, provider_id: String) -> Result<(), String> {
+    if !provider_id
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err("Invalid AI provider id".to_string());
+    }
+    delete_api_key(&provider_id)
+        .map_err(|_| "Unable to remove the API key from the system credential store".to_string())?;
+    let mut providers = read_stored_providers(&app)?;
+    providers.retain(|provider| provider.id != provider_id);
+    write_stored_providers(&app, &providers)
+}
+
+#[tauri::command]
+pub async fn test_ai_provider(app: AppHandle, provider_id: String) -> Result<(), String> {
+    let provider = read_stored_providers(&app)?
+        .into_iter()
+        .find(|provider| provider.id == provider_id)
+        .ok_or_else(|| "AI provider was not found".to_string())?;
+    let api_key = read_api_key(&provider.id)
+        .map_err(|_| "Unable to access the API key in the system credential store".to_string())?;
+    if api_key.is_empty() {
+        return Err("AI provider API key is not configured".to_string());
+    }
+    let endpoint = format!("{}/models", provider.base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|_| "Unable to create the AI connection client".to_string())?;
+    let response = client
+        .get(endpoint)
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .map_err(|_| "AI provider connection failed".to_string())?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "AI provider returned HTTP {}",
+            response.status().as_u16()
+        ))
     }
 }
 
