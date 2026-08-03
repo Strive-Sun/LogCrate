@@ -110,6 +110,16 @@ export function SettingsPanel(props: Props) {
           <span><button className="settings-button" onClick={() => { setProvider({ ...item }); setApiKey(''); }}>编辑</button>{' '}<button className="settings-button" onClick={() => void api.testAiProvider(item.id).then(() => setProviderMessage('连接成功')).catch(() => setProviderMessage('连接失败'))}>测试</button>{' '}<button className="settings-button" onClick={() => void api.deleteAiProvider(item.id).then(() => setProviders((all) => all.filter((p) => p.id !== item.id)))}>删除</button></span>
         </div>)}
         <div className="settings-provider-form">
+          <select className="settings-input" aria-label="预设供应商" onChange={(e) => {
+            const presets: Record<string, Partial<AiProviderConfig>> = {
+              openai: { name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+              deepseek: { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+              qwen: { name: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
+              openrouter: { name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4o-mini' },
+            };
+            const preset = presets[e.target.value];
+            if (preset) setProvider((current) => ({ ...current, ...preset, id: current.id || e.target.value }));
+          }} defaultValue=""><option value="">选择预设供应商（可自定义）</option><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="qwen">通义千问</option><option value="openrouter">OpenRouter</option></select>
           <input className="settings-input" placeholder="供应商 ID" value={provider.id} onChange={(e) => setProvider({ ...provider, id: e.target.value })} />
           <input className="settings-input" placeholder="名称" value={provider.name} onChange={(e) => setProvider({ ...provider, name: e.target.value })} />
           <input className="settings-input" placeholder="OpenAI 兼容 Base URL（HTTPS）" value={provider.baseUrl} onChange={(e) => setProvider({ ...provider, baseUrl: e.target.value })} />
