@@ -372,3 +372,17 @@ export interface AppUpdateProgress {
   /** 总大小未知时不提供百分比；安装阶段固定为 100 */
   percent?: number;
 }
+
+export interface AiProviderConfig {
+  id: string;
+  name: string;
+  baseUrl: string;
+  model: string;
+  keyConfigured: boolean;
+}
+
+export interface AiAnalysisResult {
+  providerId: string;
+  model: string;
+  content: string;
+}

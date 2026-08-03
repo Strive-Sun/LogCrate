@@ -14,6 +14,8 @@ import { downloadPercent, updateFailureMessage } from '../util/update';
 import type {
   AppUpdateInfo,
   AppUpdateProgress,
+  AiProviderConfig,
+  AiAnalysisResult,
   ArchiveEntry,
   DetectedItem,
   DirectoryChangeBatch,
@@ -133,6 +135,21 @@ function resolveOuterSourcePath(pathOrEntryKey: string): string {
 }
 
 export const tauriApi = {
+  async listAiProviders(): Promise<AiProviderConfig[]> {
+    return invoke('list_ai_providers');
+  },
+  async saveAiProvider(config: AiProviderConfig, apiKey?: string): Promise<AiProviderConfig> {
+    return invoke('save_ai_provider', { config, apiKey: apiKey?.trim() || null });
+  },
+  async deleteAiProvider(providerId: string): Promise<void> {
+    await invoke('delete_ai_provider', { providerId });
+  },
+  async testAiProvider(providerId: string): Promise<void> {
+    await invoke('test_ai_provider', { providerId });
+  },
+  async analyzeAiLog(providerId: string, selectedText: string): Promise<AiAnalysisResult> {
+    return invoke('analyze_ai_log', { providerId, selectedText });
+  },
   async fileRevision(path: string): Promise<FileRevision> {
     return invoke<FileRevision>('file_revision', { path: resolveOuterSourcePath(path) });
   },

@@ -4,6 +4,8 @@
 import type {
   AppUpdateInfo,
   AppUpdateProgress,
+  AiProviderConfig,
+  AiAnalysisResult,
   ArchiveEntry,
   DirectoryChangeBatch,
   FileRevision,
@@ -33,6 +35,8 @@ import type {
   OpenSessionResult,
   TreeNode,
 } from './types';
+
+let mockAiProviders: AiProviderConfig[] = [];
 
 const LEVELS = ['INFO', 'INFO', 'DEBUG', 'WARN', 'INFO', 'ERROR', 'INFO', 'TRACE'];
 const MSGS = [
@@ -273,6 +277,31 @@ let encodingGeneration = 0;
 const encodingByKey = new Map<string, string>();
 
 export const mockApi = {
+  async listAiProviders(): Promise<AiProviderConfig[]> {
+    return mockAiProviders.map((provider) => ({ ...provider }));
+  },
+  async saveAiProvider(config: AiProviderConfig, apiKey?: string): Promise<AiProviderConfig> {
+    const saved = { ...config, keyConfigured: Boolean(apiKey?.trim()) || config.keyConfigured };
+    mockAiProviders = [...mockAiProviders.filter((item) => item.id !== config.id), saved];
+    return { ...saved };
+  },
+  async deleteAiProvider(providerId: string): Promise<void> {
+    mockAiProviders = mockAiProviders.filter((item) => item.id !== providerId);
+  },
+  async testAiProvider(providerId: string): Promise<void> {
+    const provider = mockAiProviders.find((item) => item.id === providerId);
+    if (!provider?.keyConfigured) throw new Error('AI provider API key is not configured');
+  },
+  async analyzeAiLog(providerId: string, selectedText: string): Promise<AiAnalysisResult> {
+    const provider = mockAiProviders.find((item) => item.id === providerId);
+    if (!provider) throw new Error('AI provider was not found');
+    if (!selectedText.trim()) throw new Error('Select some log text before starting AI analysis');
+    return {
+      providerId,
+      model: provider.model,
+      content: `主要信息：选中的日志共 ${selectedText.length} 个字符。\n\n警告：请结合上下文进一步确认。\n\n错误：未发现可由 mock 确认的错误。\n\n建议：检查 ERROR/WARN 行及其前后文。`,
+    };
+  },
   async fileRevision(_path: string): Promise<FileRevision> {
     return { exists: true, revision: 'mock:1' };
   },
