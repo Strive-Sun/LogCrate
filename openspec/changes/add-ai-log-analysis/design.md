@@ -26,6 +26,14 @@ LogCrate 是 Tauri 2 + React/Rust 桌面应用。日志可能来自本地文件�
 
 ## Risks / Trade-offs
 
+## Separate Native AI Window Design
+
+- 使用 Tauri 独立 WebviewWindow（固定 label：`ai-conversation`）承载 AI UI，主窗口只保留 AI 启动入口。
+- AI 窗口目标宽度 440px、最小宽度 360px，与主窗口右边缘贴靠；主窗口本身不扩宽、不改变内容布局。
+- AI 窗口使用独立白色不透明页面和独立关闭按钮；窗口关闭事件只销毁/隐藏 AI 窗口。
+- AI 页面通过既有安全 IPC 访问供应商、分析、追问和加密历史，不接收 API Key。
+- 顶栏左侧历史按钮展开下拉列表，切换会话后恢复消息与追问上下文。
+
 ## Encrypted History Design
 
 - 应用数据目录保存版本化历史文件，由 Rust 后端独占读写，前端只通过 IPC 访问。

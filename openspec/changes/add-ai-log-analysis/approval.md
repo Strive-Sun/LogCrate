@@ -1,8 +1,8 @@
 # Approval
 
-- Status: approved
-- Approved-By: user
-- Approved-At: 2026-08-04
-- Approved-Revision: proposal=0E3A948CEA7C08632F4D591E11E7045848C2A78A55E2233CAB2EAE564639B705; design=6835609B8B347A8F0A58222E7ACACE10D16D971F89F4D543E65D103C7F3C4192; tasks=9F96C270BACEFD87962F7636F147D5B0D0B9DBE848DA5BE9B016F8279EB37E64; application-settings=AE2EB08EA987B95764E9C20415F926EF4868386A776012F8EC700714E3E09AA8; log-viewing=690EF31F9F0DF6E6EEA283F2CC4E4CF0C0C6F2809958C272920E1302C099E196
+- Status: draft
+- Approved-By: pending
+- Approved-At: pending
+- Approved-Revision: pending
 - Source: 待维护者批准 2026-08-04 窗口向右扩展与多轮对话修订
 - Scope: proposal.md, design.md, specs/, and task scope/acceptance definitions
