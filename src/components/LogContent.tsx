@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { api } from '../api';
 import type {
   LogFieldCondition,
@@ -263,7 +264,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
     try {
       const result = await api.analyzeAiLog(provider.id, selectedText);
       setAiResult(result);
-      setAiPanelOpen(true);
+      void getCurrentWebviewWindow().emitTo('ai-conversation', 'ai-result', { providerId: result.providerId, model: result.model, content: result.content, selectedText });
       setAiConversation([{ role: 'user', content: selectedText }, { role: 'assistant', content: result.content }]);
       setAiConversationText(selectedText);
       const now = new Date().toISOString();

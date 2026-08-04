@@ -1232,7 +1232,7 @@ export function App() {
         onUiTemplateChange={changeUiTemplate}
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
-        onOpenAi={() => { void api.setAiWindowOpen(true).then(() => setAiOpenToken((value) => value + 1)); }}
+        onOpenAi={() => { void api.setAiWindowOpen(true); }}
         count={count}
         newItems={newItems}
         onOpenItem={(item) => void revealNewItem(item)}
