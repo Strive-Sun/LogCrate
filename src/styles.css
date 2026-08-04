@@ -2742,23 +2742,42 @@ body.resizing {
 }
 .ai-result-pop {
   position: fixed;
-  right: 24px;
-  bottom: 24px;
+  top: 0;
+  right: 0;
+  bottom: 0;
   z-index: 30;
-  width: min(620px, calc(100vw - 48px));
-  max-height: 70vh;
-  overflow: auto;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  width: min(440px, calc(100vw - 16px));
+  min-height: 0;
+  overflow: hidden;
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
   background: var(--panel);
-  box-shadow: 0 12px 40px #0003;
+  box-shadow: -12px 0 40px #0003;
+}
+.ai-result-pop .pop-head {
+  flex: 0 0 auto;
+  min-height: 42px;
+}
+.ai-result-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px 20px;
 }
 .ai-result-content {
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
   font: inherit;
   line-height: 1.5;
   margin: 12px 0 0;
+}
+@media (max-width: 560px) {
+  .ai-result-pop {
+    width: calc(100vw - 16px);
+  }
 }
 .settings-section + .settings-section {
   border-top: 1px solid var(--border);

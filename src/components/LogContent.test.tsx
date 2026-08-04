@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test, { afterEach, before, beforeEach } from 'node:test';
 import { JSDOM } from 'jsdom';
 import { useState } from 'react';
@@ -23,8 +24,11 @@ const originalSubscribeLogFieldProgress = api.subscribeLogFieldProgress;
 const originalLogFieldStatus = api.logFieldStatus;
 const originalLocateLogFieldAnchor = api.locateLogFieldAnchor;
 const originalClearLogFieldFilter = api.clearLogFieldFilter;
+const originalListAiProviders = api.listAiProviders;
+const originalAnalyzeAiLog = api.analyzeAiLog;
 const originalPrompt = dom.window.prompt;
 const originalConfirm = dom.window.confirm;
+const originalGetSelection = dom.window.getSelection;
 
 before(async () => {
   class ResizeObserverStub {
@@ -72,8 +76,11 @@ afterEach(() => {
   api.logFieldStatus = originalLogFieldStatus;
   api.locateLogFieldAnchor = originalLocateLogFieldAnchor;
   api.clearLogFieldFilter = originalClearLogFieldFilter;
+  api.listAiProviders = originalListAiProviders;
+  api.analyzeAiLog = originalAnalyzeAiLog;
   dom.window.prompt = originalPrompt;
   dom.window.confirm = originalConfirm;
+  dom.window.getSelection = originalGetSelection;
   dom.window.localStorage.clear();
   harness.cleanup();
 });
@@ -157,6 +164,63 @@ test('Ctrl+F opens the active log find dialog with the required defaults and opt
     (harness.screen.getByRole('checkbox', { name: 'Wrap search' }) as HTMLInputElement).checked,
     true,
   );
+});
+
+test('AI analysis result opens in a closable drawer body', async () => {
+  dom.window.getSelection = () =>
+    ({
+      toString: () => 'ERROR synthetic failure',
+    }) as Selection;
+  dom.window.confirm = () => true;
+  api.listAiProviders = async () => [
+    {
+      id: 'test-provider',
+      name: 'Test provider',
+      baseUrl: 'https://example.test/v1',
+      model: 'test-model',
+      keyConfigured: true,
+      protocol: 'chatCompletions',
+      endpointMode: 'base',
+      allowInsecureHttp: false,
+    },
+  ];
+  api.analyzeAiLog = async () => ({
+    providerId: 'test-provider',
+    model: 'test-model',
+    content: 'Synthetic analysis result',
+  });
+
+  const { container } = renderLog();
+  harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement, {
+    clientX: 20,
+    clientY: 20,
+  });
+  harness.fireEvent.click(harness.screen.getByText('AI 分析'));
+
+  const drawer = await harness.screen.findByRole('dialog', { name: 'AI 日志分析' });
+  assert.ok(drawer.classList.contains('ai-result-pop'));
+  assert.ok(drawer.querySelector('.ai-result-body'));
+  assert.equal(
+    harness.screen.getByText('Synthetic analysis result').textContent,
+    'Synthetic analysis result',
+  );
+
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '关闭 AI 日志分析' }));
+  assert.equal(harness.screen.queryByRole('dialog', { name: 'AI 日志分析' }), null);
+});
+
+test('AI analysis drawer is fixed to the full right edge with an independently scrolling body', () => {
+  const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  const drawerRule = css.match(/\.ai-result-pop\s*\{([^}]*)\}/)?.[1] ?? '';
+  const bodyRule = css.match(/\.ai-result-body\s*\{([^}]*)\}/)?.[1] ?? '';
+
+  assert.match(drawerRule, /top:\s*0;/);
+  assert.match(drawerRule, /right:\s*0;/);
+  assert.match(drawerRule, /bottom:\s*0;/);
+  assert.match(drawerRule, /width:\s*min\(440px, calc\(100vw - 16px\)\);/);
+  assert.match(drawerRule, /overflow:\s*hidden;/);
+  assert.match(bodyRule, /min-height:\s*0;/);
+  assert.match(bodyRule, /overflow:\s*auto;/);
 });
 
 test('find action forwards all options and Escape closes the lightweight dialog', async () => {

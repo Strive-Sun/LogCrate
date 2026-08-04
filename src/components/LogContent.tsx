@@ -1047,7 +1047,9 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
           <div className="pop-head">
             <span>AI 日志分析</span>
             <button
+              type="button"
               className="settings-close"
+              aria-label="关闭 AI 日志分析"
               onClick={() => {
                 setAiResult(null);
                 setAiError(null);
@@ -1056,16 +1058,18 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
               ×
             </button>
           </div>
-          {aiBusy && <div className="settings-hint">分析中，请稍候…</div>}
-          {aiError && <div className="update-message error">{aiError}</div>}
-          {aiResult && (
-            <>
-              <div className="settings-hint">
-                供应商：{aiResult.providerId} · 模型：{aiResult.model}
-              </div>
-              <pre className="ai-result-content">{aiResult.content}</pre>
-            </>
-          )}
+          <div className="ai-result-body">
+            {aiBusy && <div className="settings-hint">分析中，请稍候…</div>}
+            {aiError && <div className="update-message error">{aiError}</div>}
+            {aiResult && (
+              <>
+                <div className="settings-hint">
+                  供应商：{aiResult.providerId} · 模型：{aiResult.model}
+                </div>
+                <pre className="ai-result-content">{aiResult.content}</pre>
+              </>
+            )}
+          </div>
         </div>
       )}
 
