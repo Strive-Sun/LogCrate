@@ -67,6 +67,13 @@ struct ChatMessage<'a> {
     content: &'a str,
 }
 
+#[derive(Debug, Serialize)]
+struct ResponsesRequest<'a> {
+    model: &'a str,
+    instructions: &'a str,
+    input: &'a str,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredAiProvider {
@@ -163,6 +170,102 @@ fn validate_analysis_text(text: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn provider_endpoint(provider: &StoredAiProvider) -> String {
+    if provider.endpoint_mode == AiEndpointMode::Full {
+        return provider.base_url.trim().to_string();
+    }
+    let suffix = match provider.protocol {
+        AiProtocol::ChatCompletions => "chat/completions",
+        AiProtocol::Responses => "responses",
+    };
+    format!("{}/{suffix}", provider.base_url.trim_end_matches('/'))
+}
+
+async fn send_ai_request(
+    provider: &StoredAiProvider,
+    api_key: &str,
+    instructions: &str,
+    input: &str,
+    timeout_seconds: u64,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_seconds))
+        .build()
+        .map_err(|_| "Unable to create the AI request client".to_string())?;
+    let request = client
+        .post(provider_endpoint(provider))
+        .bearer_auth(api_key);
+    let response = match provider.protocol {
+        AiProtocol::ChatCompletions => {
+            request
+                .json(&ChatRequest {
+                    model: &provider.model,
+                    temperature: 0.1,
+                    messages: [
+                        ChatMessage {
+                            role: "system",
+                            content: instructions,
+                        },
+                        ChatMessage {
+                            role: "user",
+                            content: input,
+                        },
+                    ],
+                })
+                .send()
+                .await
+        }
+        AiProtocol::Responses => {
+            request
+                .json(&ResponsesRequest {
+                    model: &provider.model,
+                    instructions,
+                    input,
+                })
+                .send()
+                .await
+        }
+    }
+    .map_err(|_| "AI provider request failed".to_string())?;
+    let status = response.status();
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|_| "AI provider returned an invalid response".to_string())?;
+    if !status.is_success() {
+        return Err(format!("AI provider returned HTTP {}", status.as_u16()));
+    }
+    Ok(body)
+}
+
+fn response_content(protocol: AiProtocol, body: &serde_json::Value) -> Option<String> {
+    let content = match protocol {
+        AiProtocol::ChatCompletions => body
+            .get("choices")?
+            .as_array()?
+            .first()?
+            .get("message")?
+            .get("content")?
+            .as_str()?
+            .to_string(),
+        AiProtocol::Responses => {
+            if let Some(output_text) = body.get("output_text").and_then(serde_json::Value::as_str) {
+                output_text.to_string()
+            } else {
+                body.get("output")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|item| item.get("content")?.as_array())
+                    .flatten()
+                    .filter_map(|content| content.get("text")?.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+    };
+    (!content.trim().is_empty()).then_some(content)
 }
 
 fn key_entry(provider_id: &str) -> Result<Entry, keyring::Error> {
@@ -302,25 +405,17 @@ pub async fn test_ai_provider(app: AppHandle, provider_id: String) -> Result<(),
     if api_key.is_empty() {
         return Err("AI provider API key is not configured".to_string());
     }
-    let endpoint = format!("{}/models", provider.base_url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|_| "Unable to create the AI connection client".to_string())?;
-    let response = client
-        .get(endpoint)
-        .bearer_auth(api_key)
-        .send()
-        .await
-        .map_err(|_| "AI provider connection failed".to_string())?;
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "AI provider returned HTTP {}",
-            response.status().as_u16()
-        ))
-    }
+    let body = send_ai_request(
+        &provider,
+        &api_key,
+        "This is a connection test. Follow the user request exactly.",
+        "Reply with OK.",
+        10,
+    )
+    .await?;
+    response_content(provider.protocol, &body)
+        .map(|_| ())
+        .ok_or_else(|| "AI provider returned no compatible content".to_string())
 }
 
 #[tauri::command]
@@ -339,57 +434,14 @@ pub async fn analyze_ai_log(
     if api_key.is_empty() {
         return Err("AI provider API key is not configured".to_string());
     }
-    let endpoint = format!(
-        "{}/chat/completions",
-        provider.base_url.trim_end_matches('/')
-    );
     let system_prompt = "你是日志分析助手。请基于用户提供的日志，使用清晰的中文分段说明：1. 日志包含的主要信息；2. 警告；3. 错误；4. 可能原因；5. 建议。不要臆造日志中不存在的事实，对无法确定的内容明确标注不确定性。";
-    let request = ChatRequest {
-        model: &provider.model,
-        temperature: 0.1,
-        messages: [
-            ChatMessage {
-                role: "system",
-                content: system_prompt,
-            },
-            ChatMessage {
-                role: "user",
-                content: &selected_text,
-            },
-        ],
-    };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|_| "Unable to create the AI analysis client".to_string())?;
-    let response = client
-        .post(endpoint)
-        .bearer_auth(api_key)
-        .json(&request)
-        .send()
-        .await
-        .map_err(|_| "AI analysis request failed".to_string())?;
-    let status = response.status();
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|_| "AI provider returned an invalid response".to_string())?;
-    if !status.is_success() {
-        return Err(format!("AI provider returned HTTP {}", status.as_u16()));
-    }
-    let content = body
-        .get("choices")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|content| !content.trim().is_empty())
+    let body = send_ai_request(&provider, &api_key, system_prompt, &selected_text, 60).await?;
+    let content = response_content(provider.protocol, &body)
         .ok_or_else(|| "AI provider returned no analysis content".to_string())?;
     Ok(AiAnalysisResult {
         provider_id,
         model: provider.model,
-        content: content.to_string(),
+        content,
     })
 }
 
@@ -406,6 +458,18 @@ mod tests {
             key_configured: false,
             protocol: AiProtocol::ChatCompletions,
             endpoint_mode: AiEndpointMode::Base,
+            allow_insecure_http: false,
+        }
+    }
+
+    fn stored(protocol: AiProtocol, endpoint_mode: AiEndpointMode) -> StoredAiProvider {
+        StoredAiProvider {
+            id: "test".into(),
+            name: "Test".into(),
+            base_url: "https://api.example.com/v1".into(),
+            model: "model-1".into(),
+            protocol,
+            endpoint_mode,
             allow_insecure_http: false,
         }
     }
@@ -437,5 +501,37 @@ mod tests {
         assert!(validate_analysis_text("ERROR something").is_ok());
         assert!(validate_analysis_text(" \n\t ").is_err());
         assert!(validate_analysis_text(&"x".repeat(MAX_ANALYSIS_CHARS + 1)).is_err());
+    }
+
+    #[test]
+    fn resolves_protocol_paths_and_preserves_full_urls() {
+        assert_eq!(
+            provider_endpoint(&stored(AiProtocol::ChatCompletions, AiEndpointMode::Base)),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            provider_endpoint(&stored(AiProtocol::Responses, AiEndpointMode::Base)),
+            "https://api.example.com/v1/responses"
+        );
+        assert_eq!(
+            provider_endpoint(&stored(AiProtocol::Responses, AiEndpointMode::Full)),
+            "https://api.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn extracts_chat_and_responses_content() {
+        let chat = serde_json::json!({"choices": [{"message": {"content": "chat result"}}]});
+        assert_eq!(
+            response_content(AiProtocol::ChatCompletions, &chat).as_deref(),
+            Some("chat result")
+        );
+        let responses = serde_json::json!({
+            "output": [{"content": [{"type": "output_text", "text": "first"}, {"type": "output_text", "text": "second"}]}]
+        });
+        assert_eq!(
+            response_content(AiProtocol::Responses, &responses).as_deref(),
+            Some("first\nsecond")
+        );
     }
 }
