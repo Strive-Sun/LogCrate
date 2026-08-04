@@ -249,15 +249,29 @@ async fn send_ai_request(
     }
     .map_err(|_| "AI provider request failed".to_string())?;
     let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
     let raw_body = response
-        .text()
+        .bytes()
         .await
         .map_err(|_| "AI provider returned an invalid response".to_string())?;
     if !status.is_success() {
         return Err(format!("AI provider returned HTTP {}", status.as_u16()));
     }
-    parse_ai_response(&raw_body)
-        .ok_or_else(|| "AI provider returned an invalid response".to_string())
+    let body_size = raw_body.len();
+    let raw_body = String::from_utf8_lossy(&raw_body);
+    parse_ai_response(&raw_body).ok_or_else(|| {
+        format!(
+            "AI provider returned an invalid response (HTTP {}; Content-Type: {}; body: {} bytes)",
+            status.as_u16(),
+            content_type,
+            body_size
+        )
+    })
 }
 
 fn parse_ai_response(raw_body: &str) -> Option<serde_json::Value> {
