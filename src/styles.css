@@ -2754,7 +2754,8 @@ body.resizing {
   border: 0;
   border-left: 1px solid var(--border);
   border-radius: 0;
-  background: var(--panel);
+  background: #fff;
+  color: #1f2937;
   box-shadow: -12px 0 40px #0003;
 }
 .ai-result-pop .pop-head {
@@ -2774,6 +2775,10 @@ body.resizing {
   line-height: 1.5;
   margin: 12px 0 0;
 }
+.ai-history-list { flex: 0 0 auto; max-height: 180px; overflow: auto; padding: 8px 12px; border-bottom: 1px solid #e5e7eb; background: #fff; }
+.ai-history-item { display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 4px; }
+.ai-history-item > button:first-child { flex: 1; display: flex; justify-content: space-between; gap: 8px; text-align: left; overflow: hidden; }
+.ai-history-item small { color: #6b7280; white-space: nowrap; }
 @media (max-width: 560px) {
   .ai-result-pop {
     width: calc(100vw - 16px);

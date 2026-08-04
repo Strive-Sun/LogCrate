@@ -250,6 +250,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
       `将把选中的 ${selectedText.length} 个字符发送到 ${provider.baseUrl}，使用 ${provider.protocol === 'responses' ? 'OpenAI Responses' : 'OpenAI Chat Completions'} 协议和模型 ${provider.model}。${insecureWarning}\n\n是否继续？`,
     );
     if (!confirmed) return;
+    try { await api.setAiWindowOpen(true); } catch (error) { setAiError(errorMessage(error)); return; }
     setAiBusy(true);
     try {
       const result = await api.analyzeAiLog(provider.id, selectedText);
@@ -1073,6 +1074,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
               onClick={() => {
                 setAiResult(null);
                 setAiError(null);
+                void api.setAiWindowOpen(false);
               }}
             >
               ×

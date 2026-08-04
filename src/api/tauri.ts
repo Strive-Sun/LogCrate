@@ -155,6 +155,7 @@ export const tauriApi = {
   async continueAiConversation(providerId: string, selectedText: string, history: import('./types').AiHistoryMessage[], question: string): Promise<AiAnalysisResult> {
     return invoke('continue_ai_conversation', { providerId, selectedText, history, question });
   },
+  async setAiWindowOpen(open: boolean): Promise<void> { await invoke('set_ai_window_open', { open }); },
   async listAiHistory(): Promise<AiHistorySummary[]> { return invoke('list_ai_history'); },
   async loadAiHistory(id: string): Promise<AiHistoryRecord> { return invoke('load_ai_history', { id }); },
   async saveAiHistory(record: AiHistoryRecord): Promise<void> { await invoke('save_ai_history', { record }); },
