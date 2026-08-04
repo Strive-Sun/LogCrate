@@ -28,6 +28,13 @@ LogCrate 是 Tauri 2 + React/Rust 桌面应用。日志可能来自本地文件�
 
 ## Separate Native AI Window Design
 
+## Single-Window Layout Design
+
+- 主窗口是唯一 Tauri 窗口；React 根布局使用主区域与 AI 区域的并排容器。
+- 打开 AI 时由主窗口 IPC 调整自身尺寸，AI 区域使用普通布局流（`flex`/`grid`），不使用 fixed、absolute 覆盖或独立 WebviewWindow。
+- AI 区域顶栏承载历史下拉、标题和关闭按钮；消息区与输入区独立滚动/固定。
+- 关闭 AI 时销毁当前 AI React 会话并通过 IPC 恢复主窗口打开前的位置、尺寸和最大化状态。
+
 - 使用 Tauri 独立 WebviewWindow（固定 label：`ai-conversation`）承载 AI UI，主窗口只保留 AI 启动入口。
 - AI 窗口目标宽度 440px、最小宽度 360px，与主窗口右边缘贴靠；主窗口本身不扩宽、不改变内容布局。
 - AI 窗口使用独立白色不透明页面和独立关闭按钮；窗口关闭事件只销毁/隐藏 AI 窗口。
