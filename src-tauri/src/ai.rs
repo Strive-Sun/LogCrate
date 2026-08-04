@@ -72,6 +72,7 @@ struct ResponsesRequest<'a> {
     model: &'a str,
     instructions: &'a str,
     input: &'a str,
+    store: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,6 +224,7 @@ async fn send_ai_request(
                     model: &provider.model,
                     instructions,
                     input,
+                    store: false,
                 })
                 .send()
                 .await
@@ -532,6 +534,17 @@ mod tests {
         assert_eq!(
             response_content(AiProtocol::Responses, &responses).as_deref(),
             Some("first\nsecond")
+        );
+        let request = serde_json::to_value(ResponsesRequest {
+            model: "model-1",
+            instructions: "analyze",
+            input: "selected log",
+            store: false,
+        })
+        .expect("Responses request should serialize");
+        assert_eq!(
+            request.get("store").and_then(serde_json::Value::as_bool),
+            Some(false)
         );
     }
 
