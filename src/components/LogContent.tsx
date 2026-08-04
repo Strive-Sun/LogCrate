@@ -1099,7 +1099,14 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
                 <div className="settings-hint">
                   供应商：{aiResult.providerId} · 模型：{aiResult.model}
                 </div>
-                <pre className="ai-result-content">{aiResult.content}</pre>
+                <div className="ai-chat-messages">
+                  {(aiConversation.length ? aiConversation : [{ role: 'assistant' as const, content: aiResult.content }]).map((message, index) => (
+                    <div key={`${index}-${message.role}`} className={`ai-chat-message ${message.role}`}>
+                      <div className="ai-chat-avatar">{message.role === 'user' ? '你' : 'AI'}</div>
+                      <div className="ai-chat-bubble">{message.content}</div>
+                    </div>
+                  ))}
+                </div>
                 <textarea aria-label="继续追问" value={aiQuestion} onChange={(event) => setAiQuestion(event.target.value)} placeholder="继续追问…" />
                 <button type="button" onClick={async () => { const providers = await api.listAiProviders(); const provider = providers.find((item) => item.id === aiResult.providerId) ?? providers[0]; if (!provider || !aiQuestion.trim()) return; setAiBusy(true); try { const question = aiQuestion; const next = await api.continueAiConversation(provider.id, aiConversationText, aiConversation, question); const messages = [...aiConversation, { role: 'user' as const, content: question }, { role: 'assistant' as const, content: next.content }]; setAiResult(next); setAiConversation(messages); if (aiHistoryId) await api.saveAiHistory({ id: aiHistoryId, title: aiConversationText.split(/\r?\n/)[0].slice(0, 80) || 'AI 日志分析', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), providerId: next.providerId, protocol: provider.protocol, model: next.model, endpointFingerprint: provider.baseUrl, selectedText: aiConversationText, messages }); setAiQuestion(''); } catch (error) { setAiError(errorMessage(error)); } finally { setAiBusy(false); } }}>发送追问</button>
               </>
