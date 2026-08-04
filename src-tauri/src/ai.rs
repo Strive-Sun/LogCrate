@@ -75,6 +75,7 @@ struct ResponsesRequest<'a> {
     instructions: &'a str,
     input: &'a str,
     store: bool,
+    stream: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +202,7 @@ fn ai_request_builder(
     request
         .header(SESSION_ID_HEADER, uuid::Uuid::now_v7().to_string())
         .header(THREAD_ID_HEADER, uuid::Uuid::now_v7().to_string())
+        .header(reqwest::header::ACCEPT, "text/event-stream")
 }
 
 async fn send_ai_request(
@@ -242,6 +244,7 @@ async fn send_ai_request(
                     instructions,
                     input,
                     store: false,
+                    stream: true,
                 })
                 .send()
                 .await
@@ -683,11 +686,16 @@ mod tests {
             instructions: "analyze",
             input: "selected log",
             store: false,
+            stream: true,
         })
         .expect("Responses request should serialize");
         assert_eq!(
             request.get("store").and_then(serde_json::Value::as_bool),
             Some(false)
+        );
+        assert_eq!(
+            request.get("stream").and_then(serde_json::Value::as_bool),
+            Some(true)
         );
         let compatible = serde_json::json!({
             "response": {"message": {"content": "company gateway result"}}
