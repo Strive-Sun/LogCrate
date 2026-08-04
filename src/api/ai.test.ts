@@ -3,9 +3,16 @@ import test from 'node:test';
 import { mockApi } from './mock';
 
 test('AI mock provider stores only metadata and exposes keyConfigured', async () => {
-  const saved = await mockApi.saveAiProvider({
-    id: 'test-provider', name: 'Test', baseUrl: 'https://example.test/v1', model: 'test-model', keyConfigured: false,
-  }, 'secret-key');
+  const saved = await mockApi.saveAiProvider(
+    {
+      id: 'test-provider',
+      name: 'Test',
+      baseUrl: 'https://example.test/v1',
+      model: 'test-model',
+      keyConfigured: false,
+    },
+    'secret-key',
+  );
   assert.equal(saved.keyConfigured, true);
   const listed = await mockApi.listAiProviders();
   assert.deepEqual(listed[0], saved);
@@ -15,7 +22,13 @@ test('AI mock provider stores only metadata and exposes keyConfigured', async ()
 
 test('AI mock analysis rejects blank selections and returns structured content', async () => {
   await assert.rejects(() => mockApi.analyzeAiLog('missing', ' '));
-  await mockApi.saveAiProvider({ id: 'analysis', name: 'Analysis', baseUrl: 'https://example.test/v1', model: 'model', keyConfigured: true });
+  await mockApi.saveAiProvider({
+    id: 'analysis',
+    name: 'Analysis',
+    baseUrl: 'https://example.test/v1',
+    model: 'model',
+    keyConfigured: true,
+  });
   const result = await mockApi.analyzeAiLog('analysis', 'ERROR failed');
   assert.equal(result.providerId, 'analysis');
   assert.match(result.content, /ERROR/);
