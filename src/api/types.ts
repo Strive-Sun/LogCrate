@@ -379,6 +379,9 @@ export interface AiProviderConfig {
   baseUrl: string;
   model: string;
   keyConfigured: boolean;
+  protocol: 'chatCompletions' | 'responses';
+  endpointMode: 'base' | 'full';
+  allowInsecureHttp: boolean;
 }
 
 export interface AiAnalysisResult {

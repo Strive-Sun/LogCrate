@@ -65,6 +65,9 @@ export function SettingsPanel(props: Props) {
     baseUrl: 'https://api.openai.com/v1',
     model: '',
     keyConfigured: false,
+    protocol: 'chatCompletions',
+    endpointMode: 'base',
+    allowInsecureHttp: false,
   });
   const [apiKey, setApiKey] = useState('');
   const [providerMessage, setProviderMessage] = useState<string | null>(null);

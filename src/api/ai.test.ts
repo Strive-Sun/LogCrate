@@ -10,6 +10,9 @@ test('AI mock provider stores only metadata and exposes keyConfigured', async ()
       baseUrl: 'https://example.test/v1',
       model: 'test-model',
       keyConfigured: false,
+      protocol: 'chatCompletions',
+      endpointMode: 'base',
+      allowInsecureHttp: false,
     },
     'secret-key',
   );
@@ -28,6 +31,9 @@ test('AI mock analysis rejects blank selections and returns structured content',
     baseUrl: 'https://example.test/v1',
     model: 'model',
     keyConfigured: true,
+    protocol: 'responses',
+    endpointMode: 'base',
+    allowInsecureHttp: false,
   });
   const result = await mockApi.analyzeAiLog('analysis', 'ERROR failed');
   assert.equal(result.providerId, 'analysis');

@@ -20,6 +20,28 @@ pub struct AiProviderConfig {
     pub base_url: String,
     pub model: String,
     pub key_configured: bool,
+    #[serde(default)]
+    pub protocol: AiProtocol,
+    #[serde(default)]
+    pub endpoint_mode: AiEndpointMode,
+    #[serde(default)]
+    pub allow_insecure_http: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AiProtocol {
+    #[default]
+    ChatCompletions,
+    Responses,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AiEndpointMode {
+    #[default]
+    Base,
+    Full,
 }
 
 const MAX_ANALYSIS_CHARS: usize = 120_000;
@@ -52,6 +74,12 @@ struct StoredAiProvider {
     name: String,
     base_url: String,
     model: String,
+    #[serde(default)]
+    protocol: AiProtocol,
+    #[serde(default)]
+    endpoint_mode: AiEndpointMode,
+    #[serde(default)]
+    allow_insecure_http: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,14 +124,14 @@ impl AiProviderConfig {
         if self.model.trim().is_empty() {
             return Err(AiProviderConfigError::EmptyModel);
         }
-        if !is_allowed_endpoint(&self.base_url) {
+        if !is_allowed_endpoint(&self.base_url, self.allow_insecure_http) {
             return Err(AiProviderConfigError::InvalidEndpoint);
         }
         Ok(())
     }
 }
 
-fn is_allowed_endpoint(value: &str) -> bool {
+fn is_allowed_endpoint(value: &str, allow_insecure_http: bool) -> bool {
     let endpoint = value.trim();
     let Some((scheme, remainder)) = endpoint.split_once("://") else {
         return false;
@@ -122,7 +150,7 @@ fn is_allowed_endpoint(value: &str) -> bool {
         .next()
         .unwrap_or_default()
         .trim_matches(['[', ']']);
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
+    allow_insecure_http || matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn validate_analysis_text(text: &str) -> Result<(), String> {
@@ -203,6 +231,9 @@ pub fn list_ai_providers(app: AppHandle) -> Result<Vec<AiProviderConfig>, String
                 base_url: provider.base_url,
                 model: provider.model,
                 key_configured,
+                protocol: provider.protocol,
+                endpoint_mode: provider.endpoint_mode,
+                allow_insecure_http: provider.allow_insecure_http,
             })
         })
         .collect()
@@ -225,6 +256,9 @@ pub fn save_ai_provider(
         name: config.name.clone(),
         base_url: config.base_url.clone(),
         model: config.model.clone(),
+        protocol: config.protocol,
+        endpoint_mode: config.endpoint_mode,
+        allow_insecure_http: config.allow_insecure_http,
     };
     if let Some(existing) = providers
         .iter_mut()
@@ -370,6 +404,9 @@ mod tests {
             base_url: base_url.into(),
             model: "model-1".into(),
             key_configured: false,
+            protocol: AiProtocol::ChatCompletions,
+            endpoint_mode: AiEndpointMode::Base,
+            allow_insecure_http: false,
         }
     }
 
@@ -389,6 +426,10 @@ mod tests {
         let mut invalid = config("https://api.example.com/v1");
         invalid.id = "provider/key".into();
         assert_eq!(invalid.validate(), Err(AiProviderConfigError::InvalidId));
+
+        let mut explicitly_allowed = config("http://api.internal.example/v1");
+        explicitly_allowed.allow_insecure_http = true;
+        assert!(explicitly_allowed.validate().is_ok());
     }
 
     #[test]
