@@ -81,6 +81,22 @@ test('pending next-launch state is visible and saving disables the toggle', () =
   );
 });
 
+test('AI provider settings follow the current version and stay collapsed until requested', () => {
+  renderSettings();
+  const version = harness.screen.getByText('Current version');
+  const disclosure = harness.screen.getByRole('button', { name: /AI 供应商/ });
+  assert.equal(
+    Boolean(version.compareDocumentPosition(disclosure) & Node.DOCUMENT_POSITION_FOLLOWING),
+    true,
+  );
+  assert.equal(disclosure.getAttribute('aria-expanded'), 'false');
+  assert.equal(harness.screen.queryByRole('combobox', { name: '预设供应商' }), null);
+
+  harness.fireEvent.click(disclosure);
+  assert.equal(disclosure.getAttribute('aria-expanded'), 'true');
+  assert.ok(harness.screen.getByRole('combobox', { name: '预设供应商' }));
+});
+
 test('settings shows four template previews and switches through click or arrow keys', () => {
   const requested: string[] = [];
   renderSettings({ onUiTemplateChange: (template) => requested.push(template) });

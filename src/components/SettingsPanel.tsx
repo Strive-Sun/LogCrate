@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react';
-import { api, type AiProviderConfig, type AppUpdateInfo, type AppUpdateProgress, type FileSearchFeatureState } from '../api';
+import {
+  api,
+  type AiProviderConfig,
+  type AppUpdateInfo,
+  type AppUpdateProgress,
+  type FileSearchFeatureState,
+} from '../api';
 import { formatBytes, type UpdateStatus } from '../util/update';
 import { useI18n } from '../i18n/I18nProvider';
 import type { UiTemplate } from '../util/uiTemplate';
@@ -53,22 +59,55 @@ export function SettingsPanel(props: Props) {
   const { preference, setPreference, t } = useI18n();
   const busy = busyStatuses.includes(props.status);
   const [providers, setProviders] = useState<AiProviderConfig[]>([]);
-  const [provider, setProvider] = useState<AiProviderConfig>({ id: '', name: '', baseUrl: 'https://api.openai.com/v1', model: '', keyConfigured: false });
+  const [provider, setProvider] = useState<AiProviderConfig>({
+    id: '',
+    name: '',
+    baseUrl: 'https://api.openai.com/v1',
+    model: '',
+    keyConfigured: false,
+  });
   const [apiKey, setApiKey] = useState('');
   const [providerMessage, setProviderMessage] = useState<string | null>(null);
   const [providerBusy, setProviderBusy] = useState(false);
-  useEffect(() => { void api.listAiProviders().then(setProviders).catch(() => setProviderMessage('无法读取 AI 供应商配置')); }, []);
+  const [providerExpanded, setProviderExpanded] = useState(false);
+  useEffect(() => {
+    void api
+      .listAiProviders()
+      .then(setProviders)
+      .catch(() => setProviderMessage('无法读取 AI 供应商配置'));
+  }, []);
   const saveProvider = async () => {
-    if (!provider.id.trim() || !provider.name.trim() || !provider.model.trim() || !provider.baseUrl.trim()) {
-      setProviderMessage('请填写供应商名称、端点和模型'); return;
+    if (
+      !provider.id.trim() ||
+      !provider.name.trim() ||
+      !provider.model.trim() ||
+      !provider.baseUrl.trim()
+    ) {
+      setProviderMessage('请填写供应商名称、端点和模型');
+      return;
     }
-    setProviderBusy(true); setProviderMessage(null);
+    setProviderBusy(true);
+    setProviderMessage(null);
     try {
-      const saved = await api.saveAiProvider({ ...provider, id: provider.id.trim(), name: provider.name.trim(), model: provider.model.trim(), baseUrl: provider.baseUrl.trim() }, apiKey);
+      const saved = await api.saveAiProvider(
+        {
+          ...provider,
+          id: provider.id.trim(),
+          name: provider.name.trim(),
+          model: provider.model.trim(),
+          baseUrl: provider.baseUrl.trim(),
+        },
+        apiKey,
+      );
       setProviders((items) => [...items.filter((item) => item.id !== saved.id), saved]);
-      setProvider({ ...saved }); setApiKey(''); setProviderMessage('已保存（密钥存储在系统密钥链）');
-    } catch (error) { setProviderMessage(error instanceof Error ? error.message : '保存失败'); }
-    finally { setProviderBusy(false); }
+      setProvider({ ...saved });
+      setApiKey('');
+      setProviderMessage('已保存（密钥存储在系统密钥链）');
+    } catch (error) {
+      setProviderMessage(error instanceof Error ? error.message : '保存失败');
+    } finally {
+      setProviderBusy(false);
+    }
   };
   const progressLabel = props.progress
     ? props.progress.totalBytes
@@ -103,34 +142,6 @@ export function SettingsPanel(props: Props) {
       </div>
 
       <div className="settings-section">
-        <div className="settings-label">AI 供应商</div>
-        <div className="settings-hint">日志仅在你确认分析后发送到所配置的第三方端点；API Key 不会写入配置文件。</div>
-        {providers.map((item) => <div className="settings-row" key={item.id}>
-          <div><div className="settings-label">{item.name}</div><div className="settings-hint">{item.baseUrl} · {item.model} · {item.keyConfigured ? '密钥已配置' : '未配置密钥'}</div></div>
-          <span><button className="settings-button" onClick={() => { setProvider({ ...item }); setApiKey(''); }}>编辑</button>{' '}<button className="settings-button" onClick={() => void api.testAiProvider(item.id).then(() => setProviderMessage('连接成功')).catch(() => setProviderMessage('连接失败'))}>测试</button>{' '}<button className="settings-button" onClick={() => void api.deleteAiProvider(item.id).then(() => setProviders((all) => all.filter((p) => p.id !== item.id)))}>删除</button></span>
-        </div>)}
-        <div className="settings-provider-form">
-          <select className="settings-input" aria-label="预设供应商" onChange={(e) => {
-            const presets: Record<string, Partial<AiProviderConfig>> = {
-              openai: { name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
-              deepseek: { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
-              qwen: { name: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
-              openrouter: { name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4o-mini' },
-            };
-            const preset = presets[e.target.value];
-            if (preset) setProvider((current) => ({ ...current, ...preset, id: current.id || e.target.value }));
-          }} defaultValue=""><option value="">选择预设供应商（可自定义）</option><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="qwen">通义千问</option><option value="openrouter">OpenRouter</option></select>
-          <input className="settings-input" placeholder="供应商 ID" value={provider.id} onChange={(e) => setProvider({ ...provider, id: e.target.value })} />
-          <input className="settings-input" placeholder="名称" value={provider.name} onChange={(e) => setProvider({ ...provider, name: e.target.value })} />
-          <input className="settings-input" placeholder="OpenAI 兼容 Base URL（HTTPS）" value={provider.baseUrl} onChange={(e) => setProvider({ ...provider, baseUrl: e.target.value })} />
-          <input className="settings-input" placeholder="模型" value={provider.model} onChange={(e) => setProvider({ ...provider, model: e.target.value })} />
-          <input className="settings-input" type="password" autoComplete="new-password" placeholder={provider.keyConfigured ? 'API Key 已配置（留空保持不变）' : 'API Key'} value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
-          <button className="settings-button primary" disabled={providerBusy} onClick={() => void saveProvider()}>{providerBusy ? '保存中…' : '保存供应商'}</button>
-        </div>
-        {providerMessage && <div className="settings-hint" role="status">{providerMessage}</div>}
-      </div>
-
-      <div className="settings-section">
         <div className="settings-row">
           <div>
             <div className="settings-label">{t('settings.version')}</div>
@@ -139,6 +150,167 @@ export function SettingsPanel(props: Props) {
           <code className="version-value">v{props.currentVersion}</code>
         </div>
 
+        <button
+          type="button"
+          className="settings-row settings-disclosure"
+          aria-expanded={providerExpanded}
+          aria-controls="ai-provider-settings"
+          onClick={() => setProviderExpanded((expanded) => !expanded)}
+        >
+          <div>
+            <div className="settings-label">AI 供应商</div>
+            <div className="settings-hint">
+              {providers.length > 0
+                ? `已配置 ${providers.length} 个供应商`
+                : '配置 AI 日志分析服务'}
+            </div>
+          </div>
+          <span className="settings-disclosure-icon" aria-hidden="true">
+            {providerExpanded ? '▾' : '›'}
+          </span>
+        </button>
+
+        {providerExpanded && (
+          <div id="ai-provider-settings" className="settings-disclosure-content">
+            <div className="settings-hint">
+              日志仅在你确认分析后发送到所配置的第三方端点；API Key 不会写入配置文件。
+            </div>
+            {providers.map((item) => (
+              <div className="settings-row" key={item.id}>
+                <div>
+                  <div className="settings-label">{item.name}</div>
+                  <div className="settings-hint">
+                    {item.baseUrl} · {item.model} ·{' '}
+                    {item.keyConfigured ? '密钥已配置' : '未配置密钥'}
+                  </div>
+                </div>
+                <span>
+                  <button
+                    className="settings-button"
+                    onClick={() => {
+                      setProvider({ ...item });
+                      setApiKey('');
+                    }}
+                  >
+                    编辑
+                  </button>{' '}
+                  <button
+                    className="settings-button"
+                    onClick={() =>
+                      void api
+                        .testAiProvider(item.id)
+                        .then(() => setProviderMessage('连接成功'))
+                        .catch(() => setProviderMessage('连接失败'))
+                    }
+                  >
+                    测试
+                  </button>{' '}
+                  <button
+                    className="settings-button"
+                    onClick={() =>
+                      void api
+                        .deleteAiProvider(item.id)
+                        .then(() => setProviders((all) => all.filter((p) => p.id !== item.id)))
+                    }
+                  >
+                    删除
+                  </button>
+                </span>
+              </div>
+            ))}
+            <div className="settings-provider-form">
+              <select
+                className="settings-input"
+                aria-label="预设供应商"
+                onChange={(e) => {
+                  const presets: Record<string, Partial<AiProviderConfig>> = {
+                    openai: {
+                      name: 'OpenAI',
+                      baseUrl: 'https://api.openai.com/v1',
+                      model: 'gpt-4o-mini',
+                    },
+                    deepseek: {
+                      name: 'DeepSeek',
+                      baseUrl: 'https://api.deepseek.com/v1',
+                      model: 'deepseek-chat',
+                    },
+                    qwen: {
+                      name: '通义千问',
+                      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                      model: 'qwen-plus',
+                    },
+                    openrouter: {
+                      name: 'OpenRouter',
+                      baseUrl: 'https://openrouter.ai/api/v1',
+                      model: 'openai/gpt-4o-mini',
+                    },
+                  };
+                  const preset = presets[e.target.value];
+                  if (preset)
+                    setProvider((current) => ({
+                      ...current,
+                      ...preset,
+                      id: current.id || e.target.value,
+                    }));
+                }}
+                defaultValue=""
+              >
+                <option value="">选择预设供应商（可自定义）</option>
+                <option value="openai">OpenAI</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="qwen">通义千问</option>
+                <option value="openrouter">OpenRouter</option>
+              </select>
+              <input
+                className="settings-input"
+                placeholder="供应商 ID"
+                value={provider.id}
+                onChange={(e) => setProvider({ ...provider, id: e.target.value })}
+              />
+              <input
+                className="settings-input"
+                placeholder="名称"
+                value={provider.name}
+                onChange={(e) => setProvider({ ...provider, name: e.target.value })}
+              />
+              <input
+                className="settings-input"
+                placeholder="OpenAI 兼容 Base URL（HTTPS）"
+                value={provider.baseUrl}
+                onChange={(e) => setProvider({ ...provider, baseUrl: e.target.value })}
+              />
+              <input
+                className="settings-input"
+                placeholder="模型"
+                value={provider.model}
+                onChange={(e) => setProvider({ ...provider, model: e.target.value })}
+              />
+              <input
+                className="settings-input"
+                type="password"
+                autoComplete="new-password"
+                placeholder={provider.keyConfigured ? 'API Key 已配置（留空保持不变）' : 'API Key'}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+              />
+              <button
+                className="settings-button primary"
+                disabled={providerBusy}
+                onClick={() => void saveProvider()}
+              >
+                {providerBusy ? '保存中…' : '保存供应商'}
+              </button>
+            </div>
+            {providerMessage && (
+              <div className="settings-hint" role="status">
+                {providerMessage}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="settings-section">
         <label className="settings-row">
           <div>
             <div className="settings-label">{t('settings.language')}</div>

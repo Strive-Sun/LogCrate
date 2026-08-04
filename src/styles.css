@@ -2688,10 +2688,60 @@ body.resizing {
 .settings-section {
   padding: 4px 12px;
 }
-.settings-provider-form { display: grid; gap: 8px; margin-top: 10px; }
-.settings-input { width: 100%; box-sizing: border-box; padding: 7px 9px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--fg); }
-.ai-result-pop { position: fixed; right: 24px; bottom: 24px; z-index: 30; width: min(620px, calc(100vw - 48px)); max-height: 70vh; overflow: auto; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); box-shadow: 0 12px 40px #0003; }
-.ai-result-content { white-space: pre-wrap; font: inherit; line-height: 1.5; margin: 12px 0 0; }
+.settings-provider-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.settings-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+}
+.settings-disclosure {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.settings-disclosure:hover {
+  background: var(--hover);
+}
+.settings-disclosure-icon {
+  color: var(--fg-dim);
+  font-size: 18px;
+}
+.settings-disclosure-content {
+  padding: 0 0 12px;
+}
+.ai-result-pop {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 30;
+  width: min(620px, calc(100vw - 48px));
+  max-height: 70vh;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 12px 40px #0003;
+}
+.ai-result-content {
+  white-space: pre-wrap;
+  font: inherit;
+  line-height: 1.5;
+  margin: 12px 0 0;
+}
 .settings-section + .settings-section {
   border-top: 1px solid var(--border);
 }
