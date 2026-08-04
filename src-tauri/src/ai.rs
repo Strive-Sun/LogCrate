@@ -593,6 +593,26 @@ pub async fn analyze_ai_log(
     })
 }
 
+#[tauri::command]
+pub async fn continue_ai_conversation(
+    app: AppHandle,
+    provider_id: String,
+    selected_text: String,
+    history: Vec<crate::ai_history::AiHistoryMessage>,
+    question: String,
+) -> Result<AiAnalysisResult, String> {
+    validate_analysis_text(&selected_text)?;
+    if question.trim().is_empty() { return Err("请输入追问内容".into()); }
+    if question.chars().count() > 4_000 { return Err("追问内容超过 4000 个字符限制".into()); }
+    let provider = read_stored_providers(&app)?.into_iter().find(|p| p.id == provider_id).ok_or_else(|| "AI provider was not found".to_string())?;
+    let api_key = read_api_key(&provider.id).map_err(|_| "Unable to access the API key in the system credential store".to_string())?;
+    let context = history.into_iter().rev().take(12).map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>().join("\n\n");
+    let input = format!("原始日志：\n{selected_text}\n\n已有对话：\n{context}\n\n用户追问：\n{question}");
+    let body = send_ai_request(&provider, &api_key, "你是日志分析助手，请基于原始日志和已有对话准确回答用户追问。", &input, 60).await?;
+    let content = analysis_content(provider.protocol, &body).ok_or_else(|| "AI provider returned no analysis content".to_string())?;
+    Ok(AiAnalysisResult { provider_id, model: provider.model, content })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

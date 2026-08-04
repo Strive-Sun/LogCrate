@@ -209,6 +209,10 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiHistory, setAiHistory] = useState<import('../api/types').AiHistorySummary[]>([]);
   const [aiHistoryOpen, setAiHistoryOpen] = useState(false);
+  const [aiConversation, setAiConversation] = useState<import('../api/types').AiHistoryMessage[]>([]);
+  const [aiConversationText, setAiConversationText] = useState('');
+  const [aiQuestion, setAiQuestion] = useState('');
+  const [aiHistoryId, setAiHistoryId] = useState<string | null>(null);
   const [fieldEncodingVersion, setFieldEncodingVersion] = useState(0);
   const fieldUnsub = useRef<() => void>(() => {});
   const fieldRequestGeneration = useRef(0);
@@ -250,9 +254,13 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
     try {
       const result = await api.analyzeAiLog(provider.id, selectedText);
       setAiResult(result);
+      setAiConversation([{ role: 'user', content: selectedText }, { role: 'assistant', content: result.content }]);
+      setAiConversationText(selectedText);
       const now = new Date().toISOString();
+      const historyId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      setAiHistoryId(historyId);
       await api.saveAiHistory({
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        id: historyId,
         title: selectedText.split(/\r?\n/)[0].slice(0, 80) || 'AI 日志分析',
         createdAt: now, updatedAt: now, providerId: result.providerId,
         protocol: provider.protocol, model: result.model, endpointFingerprint: provider.baseUrl,
@@ -1074,7 +1082,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
             {aiHistory.length > 0 && <button type="button" className="settings-button" onClick={async () => { await api.clearAiHistory(); setAiHistory([]); }}>清空历史</button>}
             {aiHistory.length === 0 ? <div className="settings-hint">暂无历史记录</div> : aiHistory.map((item) => (
               <div key={item.id} className="ai-history-item">
-                <button type="button" onClick={async () => { const record = await api.loadAiHistory(item.id); const assistant = [...record.messages].reverse().find((message) => message.role === 'assistant'); if (assistant) setAiResult({ providerId: record.providerId, model: record.model, content: assistant.content }); setAiHistoryOpen(false); }}>
+                <button type="button" onClick={async () => { const record = await api.loadAiHistory(item.id); const assistant = [...record.messages].reverse().find((message) => message.role === 'assistant'); if (assistant) setAiResult({ providerId: record.providerId, model: record.model, content: assistant.content }); setAiConversation(record.messages); setAiConversationText(record.selectedText); setAiHistoryId(record.id); setAiHistoryOpen(false); }}>
                   <span>{item.title}</span><small>{new Date(item.updatedAt).toLocaleString()}</small>
                 </button>
                 <button type="button" aria-label={`删除历史 ${item.title}`} onClick={async () => { await api.deleteAiHistory(item.id); setAiHistory((items) => items.filter((history) => history.id !== item.id)); }}>删除</button>
@@ -1090,6 +1098,8 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
                   供应商：{aiResult.providerId} · 模型：{aiResult.model}
                 </div>
                 <pre className="ai-result-content">{aiResult.content}</pre>
+                <textarea aria-label="继续追问" value={aiQuestion} onChange={(event) => setAiQuestion(event.target.value)} placeholder="继续追问…" />
+                <button type="button" onClick={async () => { const providers = await api.listAiProviders(); const provider = providers.find((item) => item.id === aiResult.providerId) ?? providers[0]; if (!provider || !aiQuestion.trim()) return; setAiBusy(true); try { const question = aiQuestion; const next = await api.continueAiConversation(provider.id, aiConversationText, aiConversation, question); const messages = [...aiConversation, { role: 'user' as const, content: question }, { role: 'assistant' as const, content: next.content }]; setAiResult(next); setAiConversation(messages); if (aiHistoryId) await api.saveAiHistory({ id: aiHistoryId, title: aiConversationText.split(/\r?\n/)[0].slice(0, 80) || 'AI 日志分析', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), providerId: next.providerId, protocol: provider.protocol, model: next.model, endpointFingerprint: provider.baseUrl, selectedText: aiConversationText, messages }); setAiQuestion(''); } catch (error) { setAiError(errorMessage(error)); } finally { setAiBusy(false); } }}>发送追问</button>
               </>
             )}
           </div>
