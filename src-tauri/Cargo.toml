@@ -59,6 +59,8 @@ trash = "5"
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 uuid = { version = "1", features = ["v7"] }
+aes-gcm = "0.10"
+rand = "0.8"
 
 [features]
 # 由 tauri CLI 在构建时按需启用

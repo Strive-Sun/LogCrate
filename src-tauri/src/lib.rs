@@ -1,4 +1,5 @@
 mod ai;
+mod ai_history;
 mod archive;
 mod index;
 pub mod log_fields;
@@ -21,6 +22,7 @@ mod watcher;
 use ai::{
     analyze_ai_log, delete_ai_provider, list_ai_providers, save_ai_provider, test_ai_provider,
 };
+use ai_history::{delete_ai_history, list_ai_history, load_ai_history, save_ai_history, clear_ai_history};
 use archive::{open_archive, resolve_archive_chain, ArchiveEntry};
 use index::{
     IndexProgress, LogFieldAnchorResult, LogFieldFilterRequest, LogFieldMarkedLine,
@@ -1518,6 +1520,11 @@ pub fn run() {
             delete_ai_provider,
             test_ai_provider,
             analyze_ai_log
+            ,list_ai_history,
+            load_ai_history,
+            save_ai_history,
+            delete_ai_history,
+            clear_ai_history
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

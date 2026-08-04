@@ -207,6 +207,8 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
   const [aiResult, setAiResult] = useState<AiAnalysisResult | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [aiHistory, setAiHistory] = useState<import('../api/types').AiHistorySummary[]>([]);
+  const [aiHistoryOpen, setAiHistoryOpen] = useState(false);
   const [fieldEncodingVersion, setFieldEncodingVersion] = useState(0);
   const fieldUnsub = useRef<() => void>(() => {});
   const fieldRequestGeneration = useRef(0);
@@ -246,7 +248,16 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
     if (!confirmed) return;
     setAiBusy(true);
     try {
-      setAiResult(await api.analyzeAiLog(provider.id, selectedText));
+      const result = await api.analyzeAiLog(provider.id, selectedText);
+      setAiResult(result);
+      const now = new Date().toISOString();
+      await api.saveAiHistory({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        title: selectedText.split(/\r?\n/)[0].slice(0, 80) || 'AI 日志分析',
+        createdAt: now, updatedAt: now, providerId: result.providerId,
+        protocol: provider.protocol, model: result.model, endpointFingerprint: provider.baseUrl,
+        selectedText, messages: [{ role: 'user', content: selectedText }, { role: 'assistant', content: result.content }],
+      });
     } catch (error) {
       setAiError(errorMessage(error));
     } finally {
@@ -1045,6 +1056,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
       {(aiBusy || aiError || aiResult) && (
         <div className="ai-result-pop" role="dialog" aria-label="AI 日志分析">
           <div className="pop-head">
+            <button type="button" className="settings-close" onClick={async () => { setAiHistory(await api.listAiHistory()); setAiHistoryOpen((open) => !open); }}>历史</button>
             <span>AI 日志分析</span>
             <button
               type="button"
@@ -1058,6 +1070,13 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
               ×
             </button>
           </div>
+          {aiHistoryOpen && <div className="ai-history-list">
+            {aiHistory.length === 0 ? <div className="settings-hint">暂无历史记录</div> : aiHistory.map((item) => (
+              <button key={item.id} type="button" className="ai-history-item" onClick={async () => { const record = await api.loadAiHistory(item.id); const assistant = [...record.messages].reverse().find((message) => message.role === 'assistant'); if (assistant) setAiResult({ providerId: record.providerId, model: record.model, content: assistant.content }); setAiHistoryOpen(false); }}>
+                <span>{item.title}</span><small>{new Date(item.updatedAt).toLocaleString()}</small>
+              </button>
+            ))}
+          </div>}
           <div className="ai-result-body">
             {aiBusy && <div className="settings-hint">分析中，请稍候…</div>}
             {aiError && <div className="update-message error">{aiError}</div>}

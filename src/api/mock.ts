@@ -6,6 +6,8 @@ import type {
   AppUpdateProgress,
   AiProviderConfig,
   AiAnalysisResult,
+  AiHistoryRecord,
+  AiHistorySummary,
   ArchiveEntry,
   DirectoryChangeBatch,
   FileRevision,
@@ -37,6 +39,7 @@ import type {
 } from './types';
 
 let mockAiProviders: AiProviderConfig[] = [];
+let mockAiHistory: AiHistoryRecord[] = [];
 
 const LEVELS = ['INFO', 'INFO', 'DEBUG', 'WARN', 'INFO', 'ERROR', 'INFO', 'TRACE'];
 const MSGS = [
@@ -302,6 +305,11 @@ export const mockApi = {
       content: `主要信息：选中的日志共 ${selectedText.length} 个字符。\n\n警告：请结合上下文进一步确认。\n\n错误：未发现可由 mock 确认的错误。\n\n建议：检查 ERROR/WARN 行及其前后文。`,
     };
   },
+  async listAiHistory(): Promise<AiHistorySummary[]> { return mockAiHistory.map(({ id, title, createdAt, updatedAt, providerId, model }) => ({ id, title, createdAt, updatedAt, providerId, model })); },
+  async loadAiHistory(id: string): Promise<AiHistoryRecord> { const item = mockAiHistory.find((record) => record.id === id); if (!item) throw new Error('AI history not found'); return structuredClone(item); },
+  async saveAiHistory(record: AiHistoryRecord): Promise<void> { mockAiHistory = [record, ...mockAiHistory.filter((item) => item.id !== record.id)].slice(0, 100); },
+  async deleteAiHistory(id: string): Promise<void> { mockAiHistory = mockAiHistory.filter((item) => item.id !== id); },
+  async clearAiHistory(): Promise<void> { mockAiHistory = []; },
   async fileRevision(_path: string): Promise<FileRevision> {
     return { exists: true, revision: 'mock:1' };
   },

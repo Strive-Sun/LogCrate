@@ -16,6 +16,8 @@ import type {
   AppUpdateProgress,
   AiProviderConfig,
   AiAnalysisResult,
+  AiHistoryRecord,
+  AiHistorySummary,
   ArchiveEntry,
   DetectedItem,
   DirectoryChangeBatch,
@@ -150,6 +152,11 @@ export const tauriApi = {
   async analyzeAiLog(providerId: string, selectedText: string): Promise<AiAnalysisResult> {
     return invoke('analyze_ai_log', { providerId, selectedText });
   },
+  async listAiHistory(): Promise<AiHistorySummary[]> { return invoke('list_ai_history'); },
+  async loadAiHistory(id: string): Promise<AiHistoryRecord> { return invoke('load_ai_history', { id }); },
+  async saveAiHistory(record: AiHistoryRecord): Promise<void> { await invoke('save_ai_history', { record }); },
+  async deleteAiHistory(id: string): Promise<void> { await invoke('delete_ai_history', { id }); },
+  async clearAiHistory(): Promise<void> { await invoke('clear_ai_history'); },
   async fileRevision(path: string): Promise<FileRevision> {
     return invoke<FileRevision>('file_revision', { path: resolveOuterSourcePath(path) });
   },
