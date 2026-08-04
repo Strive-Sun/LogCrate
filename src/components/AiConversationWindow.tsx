@@ -21,7 +21,7 @@ export function AiConversationWindow() {
   }, []);
 
   return <div className="ai-window-shell">
-    <header className="ai-window-header">
+    <header className="ai-window-header" data-tauri-drag-region>
       <div className="ai-history-menu">
         <button type="button" onClick={() => setHistoryOpen((open) => !open)}>历史对话⌄</button>
         {historyOpen && <div className="ai-history-dropdown">

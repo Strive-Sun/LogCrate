@@ -76,6 +76,7 @@ fn set_ai_window_open(app: tauri::AppHandle, open: bool) -> Result<(), String> {
         let width = available.min(440) as f64;
         tauri::WebviewWindowBuilder::new(&app, "ai-conversation", tauri::WebviewUrl::App("index.html?aiWindow=1".into()))
             .title("LogCrate AI")
+            .decorations(false)
             .inner_size(width, size.height as f64)
             .min_inner_size(360.0, 480.0)
             .position(current_right as f64, position.y as f64)
@@ -85,6 +86,23 @@ fn set_ai_window_open(app: tauri::AppHandle, open: bool) -> Result<(), String> {
         ai.close().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+fn synchronize_ai_windows(window: &tauri::Window, event: &tauri::WindowEvent) {
+    if !matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) { return; }
+    let app = window.app_handle();
+    let Some(main) = app.get_window(MAIN_WINDOW_LABEL) else { return; };
+    let Some(ai) = app.get_window("ai-conversation") else { return; };
+    let Ok(main_size) = main.outer_size() else { return; };
+    if window.label() == MAIN_WINDOW_LABEL {
+        let Ok(main_pos) = main.outer_position() else { return; };
+        let expected = PhysicalPosition::new(main_pos.x + main_size.width as i32, main_pos.y);
+        if ai.outer_position().ok() != Some(expected) { let _ = ai.set_position(expected); }
+    } else if window.label() == "ai-conversation" {
+        let Ok(ai_pos) = ai.outer_position() else { return; };
+        let expected = PhysicalPosition::new(ai_pos.x - main_size.width as i32, ai_pos.y);
+        if main.outer_position().ok() != Some(expected) { let _ = main.set_position(expected); }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1335,6 +1353,7 @@ pub fn run() {
             }
         }))
         .on_window_event(|window, event| {
+            synchronize_ai_windows(window, event);
             if close_action(window.label()) == LifecycleAction::HideMainWindow {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
