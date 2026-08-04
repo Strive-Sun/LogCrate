@@ -236,8 +236,11 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
       setAiError('当前供应商尚未配置 API Key，请先在设置中完成配置');
       return;
     }
+    const insecureWarning = provider.baseUrl.trim().toLowerCase().startsWith('http://')
+      ? '\n\n警告：该端点使用不安全 HTTP，API Key 和日志内容在传输中不受 TLS 保护。'
+      : '';
     const confirmed = window.confirm(
-      `将把选中的 ${selectedText.length} 个字符发送到 ${provider.baseUrl}，使用模型 ${provider.model}。是否继续？`,
+      `将把选中的 ${selectedText.length} 个字符发送到 ${provider.baseUrl}，使用 ${provider.protocol === 'responses' ? 'OpenAI Responses' : 'OpenAI Chat Completions'} 协议和模型 ${provider.model}。${insecureWarning}\n\n是否继续？`,
     );
     if (!confirmed) return;
     setAiBusy(true);

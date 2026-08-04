@@ -55,6 +55,17 @@ const templateOptions = [
   },
 ] as const;
 
+function isNonLocalHttp(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === 'http:' && !['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function SettingsPanel(props: Props) {
   const { preference, setPreference, t } = useI18n();
   const busy = busyStatuses.includes(props.status);
@@ -184,7 +195,9 @@ export function SettingsPanel(props: Props) {
                   <div className="settings-label">{item.name}</div>
                   <div className="settings-hint">
                     {item.baseUrl} · {item.model} ·{' '}
+                    {item.protocol === 'responses' ? 'Responses' : 'Chat Completions'} ·{' '}
                     {item.keyConfigured ? '密钥已配置' : '未配置密钥'}
+                    {item.allowInsecureHttp ? ' · 不安全 HTTP' : ''}
                   </div>
                 </div>
                 <span>
@@ -231,21 +244,33 @@ export function SettingsPanel(props: Props) {
                       name: 'OpenAI',
                       baseUrl: 'https://api.openai.com/v1',
                       model: 'gpt-4o-mini',
+                      protocol: 'chatCompletions',
+                      endpointMode: 'base',
+                      allowInsecureHttp: false,
                     },
                     deepseek: {
                       name: 'DeepSeek',
                       baseUrl: 'https://api.deepseek.com/v1',
                       model: 'deepseek-chat',
+                      protocol: 'chatCompletions',
+                      endpointMode: 'base',
+                      allowInsecureHttp: false,
                     },
                     qwen: {
                       name: '通义千问',
                       baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
                       model: 'qwen-plus',
+                      protocol: 'chatCompletions',
+                      endpointMode: 'base',
+                      allowInsecureHttp: false,
                     },
                     openrouter: {
                       name: 'OpenRouter',
                       baseUrl: 'https://openrouter.ai/api/v1',
                       model: 'openai/gpt-4o-mini',
+                      protocol: 'chatCompletions',
+                      endpointMode: 'base',
+                      allowInsecureHttp: false,
                     },
                   };
                   const preset = presets[e.target.value];
@@ -276,12 +301,78 @@ export function SettingsPanel(props: Props) {
                 value={provider.name}
                 onChange={(e) => setProvider({ ...provider, name: e.target.value })}
               />
+              <div className="settings-label">API 请求地址</div>
               <input
                 className="settings-input"
-                placeholder="OpenAI 兼容 Base URL（HTTPS）"
+                aria-label="API 请求地址"
+                placeholder={
+                  provider.endpointMode === 'full'
+                    ? '完整请求 URL，例如 https://example.com/v1/responses'
+                    : '基础地址，例如 https://example.com/v1'
+                }
                 value={provider.baseUrl}
-                onChange={(e) => setProvider({ ...provider, baseUrl: e.target.value })}
+                onChange={(e) => {
+                  const baseUrl = e.target.value;
+                  setProvider({
+                    ...provider,
+                    baseUrl,
+                    allowInsecureHttp: isNonLocalHttp(baseUrl) ? provider.allowInsecureHttp : false,
+                  });
+                }}
               />
+              <select
+                className="settings-input"
+                aria-label="API 协议"
+                value={provider.protocol}
+                onChange={(event) =>
+                  setProvider({
+                    ...provider,
+                    protocol: event.target.value as AiProviderConfig['protocol'],
+                  })
+                }
+              >
+                <option value="responses">OpenAI Responses</option>
+                <option value="chatCompletions">OpenAI Chat Completions</option>
+              </select>
+              <label className="settings-provider-option">
+                <input
+                  type="checkbox"
+                  checked={provider.endpointMode === 'full'}
+                  onChange={(event) =>
+                    setProvider({
+                      ...provider,
+                      endpointMode: event.target.checked ? 'full' : 'base',
+                    })
+                  }
+                />
+                使用完整 URL（不自动拼接协议路径）
+              </label>
+              {isNonLocalHttp(provider.baseUrl) && (
+                <div className="settings-insecure-warning">
+                  <strong>此地址未使用 HTTPS。</strong>
+                  API Key 和所选日志可能在内网中以明文传输，建议优先使用 HTTPS。
+                  <label className="settings-provider-option">
+                    <input
+                      type="checkbox"
+                      checked={provider.allowInsecureHttp}
+                      onChange={(event) => {
+                        if (!event.target.checked) {
+                          setProvider({ ...provider, allowInsecureHttp: false });
+                          return;
+                        }
+                        if (
+                          window.confirm(
+                            '该端点使用不安全 HTTP，API Key 和日志内容可能被网络中的其他设备读取。是否仅为当前供应商允许此地址？',
+                          )
+                        ) {
+                          setProvider({ ...provider, allowInsecureHttp: true });
+                        }
+                      }}
+                    />
+                    我了解风险，仅允许当前供应商使用此 HTTP 地址
+                  </label>
+                </div>
+              )}
               <input
                 className="settings-input"
                 placeholder="模型"

@@ -2722,6 +2722,24 @@ body.resizing {
 .settings-disclosure-content {
   padding: 0 0 12px;
 }
+.settings-provider-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+.settings-insecure-warning {
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid #d99a22;
+  border-radius: 6px;
+  color: #9b5c00;
+  background: rgb(217 154 34 / 10%);
+  font-size: 11px;
+  line-height: 1.45;
+}
 .ai-result-pop {
   position: fixed;
   right: 24px;
