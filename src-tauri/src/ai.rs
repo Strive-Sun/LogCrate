@@ -249,14 +249,75 @@ async fn send_ai_request(
     }
     .map_err(|_| "AI provider request failed".to_string())?;
     let status = response.status();
-    let body = response
-        .json::<serde_json::Value>()
+    let raw_body = response
+        .text()
         .await
         .map_err(|_| "AI provider returned an invalid response".to_string())?;
     if !status.is_success() {
         return Err(format!("AI provider returned HTTP {}", status.as_u16()));
     }
-    Ok(body)
+    parse_ai_response(&raw_body)
+        .ok_or_else(|| "AI provider returned an invalid response".to_string())
+}
+
+fn parse_ai_response(raw_body: &str) -> Option<serde_json::Value> {
+    let trimmed = raw_body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(body) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Some(body);
+    }
+
+    let mut events = Vec::new();
+    let mut deltas = Vec::new();
+    for line in raw_body.lines() {
+        let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+            continue;
+        };
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        if let Some(delta) = stream_delta_text(&event) {
+            deltas.push(delta);
+        }
+        events.push(event);
+    }
+    if !deltas.is_empty() {
+        return Some(serde_json::json!({"output_text": deltas.join("")}));
+    }
+    if !events.is_empty() {
+        let mut parts = Vec::new();
+        for event in &events {
+            if let Some(text) = response_content(AiProtocol::Responses, event)
+                .or_else(|| response_content(AiProtocol::ChatCompletions, event))
+            {
+                parts.push(text);
+            }
+        }
+        if !parts.is_empty() {
+            return Some(serde_json::json!({"output_text": parts.join("\n")}));
+        }
+    }
+    Some(serde_json::json!({"output_text": trimmed}))
+}
+
+fn stream_delta_text(event: &serde_json::Value) -> Option<String> {
+    if let Some(delta) = event.get("delta").and_then(serde_json::Value::as_str) {
+        return (!delta.is_empty()).then_some(delta.to_string());
+    }
+    event
+        .get("choices")?
+        .as_array()?
+        .first()?
+        .get("delta")?
+        .get("content")?
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
 }
 
 fn chat_content(body: &serde_json::Value) -> Option<String> {
@@ -625,6 +686,38 @@ mod tests {
         assert_eq!(
             analysis_content(AiProtocol::Responses, &unexpected).as_deref(),
             Some("{\n  \"unexpected\": 42\n}")
+        );
+    }
+
+    #[test]
+    fn accepts_plain_text_and_sse_responses() {
+        let plain = parse_ai_response("company gateway plain text").expect("plain text body");
+        assert_eq!(
+            analysis_content(AiProtocol::Responses, &plain).as_deref(),
+            Some("company gateway plain text")
+        );
+
+        let sse = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"first\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\" second\"}\n\n",
+            "data: [DONE]\n"
+        );
+        let body = parse_ai_response(sse).expect("SSE body");
+        assert_eq!(
+            analysis_content(AiProtocol::Responses, &body).as_deref(),
+            Some("first second")
+        );
+
+        let chat_sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"chat\"}}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" result\"}}]}\n",
+            "data: [DONE]\n"
+        );
+        let body = parse_ai_response(chat_sse).expect("Chat SSE body");
+        assert_eq!(
+            analysis_content(AiProtocol::ChatCompletions, &body).as_deref(),
+            Some("chat result")
         );
     }
 
