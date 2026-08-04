@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import { App } from './App';
 import { AiConversationWindow } from './components/AiConversationWindow';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { I18nProvider } from './i18n/I18nProvider';
 import { beginStartupHandoff } from './startup';
 import './styles.css';
@@ -15,7 +16,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <I18nProvider>
       <StartupLifecycle />
-      {new URLSearchParams(window.location.search).get('aiWindow') === '1' ? <AiConversationWindow /> : <App />}
+      {getCurrentWebviewWindow().label === 'ai-conversation' ? <AiConversationWindow /> : <App />}
     </I18nProvider>
   </React.StrictMode>,
 );

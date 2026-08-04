@@ -313,6 +313,7 @@ export const mockApi = {
     return { providerId, model: provider.model, content: `模拟追问回复：${question}` };
   },
   async setAiWindowOpen(_open: boolean): Promise<void> {},
+  async toggleAiWindow(): Promise<void> {},
   async listAiHistory(): Promise<AiHistorySummary[]> { return mockAiHistory.map(({ id, title, createdAt, updatedAt, providerId, model }) => ({ id, title, createdAt, updatedAt, providerId, model })); },
   async loadAiHistory(id: string): Promise<AiHistoryRecord> { const item = mockAiHistory.find((record) => record.id === id); if (!item) throw new Error('AI history not found'); return structuredClone(item); },
   async saveAiHistory(record: AiHistoryRecord): Promise<void> { mockAiHistory = [record, ...mockAiHistory.filter((item) => item.id !== record.id)].slice(0, 100); },

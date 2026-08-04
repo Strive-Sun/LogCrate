@@ -70,7 +70,7 @@ fn set_ai_window_open(app: tauri::AppHandle, open: bool) -> Result<(), String> {
         let size = main.outer_size().map_err(|e| e.to_string())?;
         let monitor = main.current_monitor().map_err(|e| e.to_string())?.ok_or_else(|| "无法确定当前显示器工作区".to_string())?;
         let area = monitor.work_area();
-        let current_right = position.x + size.width as i32;
+        let current_right = position.x + size.width as i32 - 6;
         let available = area.position.x + area.size.width as i32 - current_right;
         if available < 360 { return Err("主窗口右侧空间不足，无法创建独立 AI 窗口".into()); }
         let width = available.min(440) as f64;
@@ -88,6 +88,11 @@ fn set_ai_window_open(app: tauri::AppHandle, open: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn toggle_ai_window(app: tauri::AppHandle) -> Result<(), String> {
+    set_ai_window_open(app.clone(), app.get_webview_window("ai-conversation").is_none())
+}
+
 fn synchronize_ai_windows(window: &tauri::Window, event: &tauri::WindowEvent) {
     if !matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) { return; }
     let app = window.app_handle();
@@ -96,11 +101,11 @@ fn synchronize_ai_windows(window: &tauri::Window, event: &tauri::WindowEvent) {
     let Ok(main_size) = main.outer_size() else { return; };
     if window.label() == MAIN_WINDOW_LABEL {
         let Ok(main_pos) = main.outer_position() else { return; };
-        let expected = PhysicalPosition::new(main_pos.x + main_size.width as i32, main_pos.y);
+        let expected = PhysicalPosition::new(main_pos.x + main_size.width as i32 - 6, main_pos.y);
         if ai.outer_position().ok() != Some(expected) { let _ = ai.set_position(expected); }
     } else if window.label() == "ai-conversation" {
         let Ok(ai_pos) = ai.outer_position() else { return; };
-        let expected = PhysicalPosition::new(ai_pos.x - main_size.width as i32, ai_pos.y);
+        let expected = PhysicalPosition::new(ai_pos.x - main_size.width as i32 + 6, ai_pos.y);
         if main.outer_position().ok() != Some(expected) { let _ = main.set_position(expected); }
     }
 }
@@ -1564,6 +1569,7 @@ pub fn run() {
             analyze_ai_log
             ,continue_ai_conversation
             ,set_ai_window_open
+            ,toggle_ai_window
             ,list_ai_history,
             load_ai_history,
             save_ai_history,
