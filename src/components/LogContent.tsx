@@ -36,6 +36,8 @@ interface Props {
   error?: string;
   active?: boolean;
   aiOpenToken?: number;
+  aiOpen?: boolean;
+  onAiClose?: () => void;
 }
 
 const PAGE = 200;
@@ -159,7 +161,7 @@ function runtimeToStored(
   };
 }
 
-export function LogContent({ session, activeKey, status = 'ready', error, active = true, aiOpenToken }: Props) {
+export function LogContent({ session, activeKey, status = 'ready', error, active = true, aiOpenToken, aiOpen = false, onAiClose }: Props) {
   const { t } = useI18n();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [percent, setPercent] = useState(100);
@@ -870,7 +872,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
   }
 
   return (
-    <div className="col log-content-panel">
+    <div className={'col log-content-panel' + (aiOpen ? ' with-ai' : '')}>
       {indexing && (
         <div className="index-bar">
           <span>
@@ -1072,7 +1074,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
         />
       )}
 
-      {(aiPanelOpen || aiBusy || aiError || aiResult) && (
+      {(aiOpen || aiPanelOpen || aiBusy || aiError || aiResult) && (
         <div className="ai-result-pop" role="dialog" aria-label="AI 日志分析">
           <div className="pop-head">
             <button type="button" className="settings-close" onClick={async () => { setAiHistory(await api.listAiHistory()); setAiHistoryOpen((open) => !open); }}>历史</button>
@@ -1085,6 +1087,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
                 setAiResult(null);
                 setAiError(null);
                 setAiPanelOpen(false);
+                onAiClose?.();
                 void api.setAiWindowOpen(false);
               }}
             >

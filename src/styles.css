@@ -1464,6 +1464,7 @@ body.resizing {
   flex: 1;
   position: relative;
 }
+.log-content-panel.with-ai { padding-right: 440px; box-sizing: border-box; }
 
 .log-field-bar {
   position: relative;
@@ -2741,7 +2742,7 @@ body.resizing {
   line-height: 1.45;
 }
 .ai-result-pop {
-  position: fixed;
+  position: absolute;
   top: 0;
   right: 0;
   bottom: 0;

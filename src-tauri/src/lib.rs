@@ -31,7 +31,7 @@ use log_fields::{LayoutAnalysis, SamplingPhase};
 use serde::Serialize;
 use std::io::SeekFrom;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::Notify;
 use watcher::{DetectedItem, DirectoryChange, DirectoryChangeBatch, DroppedFileInfo, WatchState};
@@ -61,36 +61,42 @@ pub fn record_process_start() {
 }
 const SHOW_MAIN_MENU_ID: &str = "show-main-window";
 const EXIT_APP_MENU_ID: &str = "exit-logcrate";
+static AI_WINDOW_SNAPSHOT: OnceLock<Mutex<Option<AiWindowSnapshot>>> = OnceLock::new();
+#[derive(Clone, Copy)]
+struct AiWindowSnapshot { position: PhysicalPosition<i32>, size: PhysicalSize<u32>, maximized: bool }
 #[tauri::command]
 fn set_ai_window_open(app: tauri::AppHandle, open: bool) -> Result<(), String> {
     if open {
-        if let Some(ai) = app.get_webview_window("ai-conversation") { ai.show().map_err(|e| e.to_string())?; ai.set_focus().map_err(|e| e.to_string())?; return Ok(()); }
+        let mut slot = AI_WINDOW_SNAPSHOT.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() { return Ok(()); }
         let main = app.get_window(MAIN_WINDOW_LABEL).ok_or_else(|| "主窗口不可用".to_string())?;
+        let maximized = main.is_maximized().map_err(|e| e.to_string())?;
         let position = main.outer_position().map_err(|e| e.to_string())?;
         let size = main.outer_size().map_err(|e| e.to_string())?;
+        *slot = Some(AiWindowSnapshot { position, size, maximized });
+        if maximized { main.unmaximize().map_err(|e| e.to_string())?; }
         let monitor = main.current_monitor().map_err(|e| e.to_string())?.ok_or_else(|| "无法确定当前显示器工作区".to_string())?;
         let area = monitor.work_area();
-        let current_right = position.x + size.width as i32 - 6;
+        let current_right = position.x + size.width as i32;
         let available = area.position.x + area.size.width as i32 - current_right;
-        if available < 360 { return Err("主窗口右侧空间不足，无法创建独立 AI 窗口".into()); }
-        let width = available.min(440) as f64;
-        tauri::WebviewWindowBuilder::new(&app, "ai-conversation", tauri::WebviewUrl::App("index.html?aiWindow=1".into()))
-            .title("LogCrate AI")
-            .decorations(false)
-            .inner_size(width, size.height as f64)
-            .min_inner_size(360.0, 480.0)
-            .position(current_right as f64, position.y as f64)
-            .resizable(true)
-            .build().map_err(|e| e.to_string())?;
+        let width = available.min(440);
+        if width < 360 { *slot = None; if maximized { let _ = main.maximize(); } return Err("主窗口右侧空间不足，无法打开 AI 页面".into()); }
+        main.set_size(PhysicalSize::new(size.width + width as u32, size.height)).map_err(|e| e.to_string())?;
     } else if let Some(ai) = app.get_webview_window("ai-conversation") {
-        ai.close().map_err(|e| e.to_string())?;
+        let _ = ai.close();
+    } else if let Some(snapshot) = AI_WINDOW_SNAPSHOT.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let main = app.get_window(MAIN_WINDOW_LABEL).ok_or_else(|| "主窗口不可用".to_string())?;
+        main.set_size(snapshot.size).map_err(|e| e.to_string())?;
+        main.set_position(snapshot.position).map_err(|e| e.to_string())?;
+        if snapshot.maximized { main.maximize().map_err(|e| e.to_string())?; }
     }
     Ok(())
 }
 
 #[tauri::command]
 fn toggle_ai_window(app: tauri::AppHandle) -> Result<(), String> {
-    set_ai_window_open(app.clone(), app.get_webview_window("ai-conversation").is_none())
+    let open = AI_WINDOW_SNAPSHOT.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|e| e.into_inner()).is_none();
+    set_ai_window_open(app, open)
 }
 
 fn synchronize_ai_windows(window: &tauri::Window, event: &tauri::WindowEvent) {
