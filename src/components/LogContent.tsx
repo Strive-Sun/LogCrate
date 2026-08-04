@@ -14,6 +14,7 @@ import type {
   OpenSessionResult,
 } from '../api';
 import { fmtNum, fmtSize } from '../util/format';
+import { errorMessage } from '../util/update';
 import {
   clearSavedLogFieldLayout,
   loadLogFieldLayout,
@@ -247,7 +248,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
     try {
       setAiResult(await api.analyzeAiLog(provider.id, selectedText));
     } catch (error) {
-      setAiError(error instanceof Error ? error.message : 'AI 分析失败');
+      setAiError(errorMessage(error));
     } finally {
       setAiBusy(false);
     }

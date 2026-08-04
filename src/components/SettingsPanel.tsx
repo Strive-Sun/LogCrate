@@ -6,7 +6,7 @@ import {
   type AppUpdateProgress,
   type FileSearchFeatureState,
 } from '../api';
-import { formatBytes, type UpdateStatus } from '../util/update';
+import { errorMessage, formatBytes, type UpdateStatus } from '../util/update';
 import { useI18n } from '../i18n/I18nProvider';
 import type { UiTemplate } from '../util/uiTemplate';
 
@@ -118,7 +118,7 @@ export function SettingsPanel(props: Props) {
       setApiKey('');
       setProviderMessage('已保存（密钥存储在系统密钥链）');
     } catch (error) {
-      setProviderMessage(error instanceof Error ? error.message : '保存失败');
+      setProviderMessage(errorMessage(error));
     } finally {
       setProviderBusy(false);
     }
@@ -216,7 +216,7 @@ export function SettingsPanel(props: Props) {
                       void api
                         .testAiProvider(item.id)
                         .then(() => setProviderMessage('连接成功'))
-                        .catch(() => setProviderMessage('连接失败'))
+                        .catch((error) => setProviderMessage(errorMessage(error)))
                     }
                   >
                     测试

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test, { afterEach, before } from 'node:test';
 import { JSDOM } from 'jsdom';
 import type { ComponentProps } from 'react';
+import { api } from '../api';
 import { I18nProvider } from '../i18n/I18nProvider';
 import { SettingsPanel } from './SettingsPanel';
 import { TopBar } from './TopBar';
@@ -124,6 +125,37 @@ test('AI provider settings expose Responses paths and require confirmation for i
     assert.equal((permission as HTMLInputElement).checked, true);
   } finally {
     window.confirm = originalConfirm;
+  }
+});
+
+test('AI provider test displays a string error returned by Tauri', async () => {
+  const providerId = 'error-provider';
+  const originalTestAiProvider = api.testAiProvider;
+  await api.saveAiProvider(
+    {
+      id: providerId,
+      name: 'Error provider',
+      baseUrl: 'https://example.test/v1',
+      model: 'model',
+      keyConfigured: true,
+      protocol: 'responses',
+      endpointMode: 'base',
+      allowInsecureHttp: false,
+    },
+    'test-key',
+  );
+  api.testAiProvider = async () => {
+    throw 'AI provider returned HTTP 400';
+  };
+  try {
+    renderSettings();
+    harness.fireEvent.click(harness.screen.getByRole('button', { name: /AI 供应商/ }));
+    await harness.screen.findByText('Error provider');
+    harness.fireEvent.click(harness.screen.getByRole('button', { name: '测试' }));
+    assert.ok(await harness.screen.findByText('AI provider returned HTTP 400'));
+  } finally {
+    api.testAiProvider = originalTestAiProvider;
+    await api.deleteAiProvider(providerId);
   }
 });
 
