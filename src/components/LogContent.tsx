@@ -1071,10 +1071,14 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
             </button>
           </div>
           {aiHistoryOpen && <div className="ai-history-list">
+            {aiHistory.length > 0 && <button type="button" className="settings-button" onClick={async () => { await api.clearAiHistory(); setAiHistory([]); }}>清空历史</button>}
             {aiHistory.length === 0 ? <div className="settings-hint">暂无历史记录</div> : aiHistory.map((item) => (
-              <button key={item.id} type="button" className="ai-history-item" onClick={async () => { const record = await api.loadAiHistory(item.id); const assistant = [...record.messages].reverse().find((message) => message.role === 'assistant'); if (assistant) setAiResult({ providerId: record.providerId, model: record.model, content: assistant.content }); setAiHistoryOpen(false); }}>
-                <span>{item.title}</span><small>{new Date(item.updatedAt).toLocaleString()}</small>
-              </button>
+              <div key={item.id} className="ai-history-item">
+                <button type="button" onClick={async () => { const record = await api.loadAiHistory(item.id); const assistant = [...record.messages].reverse().find((message) => message.role === 'assistant'); if (assistant) setAiResult({ providerId: record.providerId, model: record.model, content: assistant.content }); setAiHistoryOpen(false); }}>
+                  <span>{item.title}</span><small>{new Date(item.updatedAt).toLocaleString()}</small>
+                </button>
+                <button type="button" aria-label={`删除历史 ${item.title}`} onClick={async () => { await api.deleteAiHistory(item.id); setAiHistory((items) => items.filter((history) => history.id !== item.id)); }}>删除</button>
+              </div>
             ))}
           </div>}
           <div className="ai-result-body">
