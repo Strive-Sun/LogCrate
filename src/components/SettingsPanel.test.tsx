@@ -97,6 +97,36 @@ test('AI provider settings follow the current version and stay collapsed until r
   assert.ok(harness.screen.getByRole('combobox', { name: '预设供应商' }));
 });
 
+test('AI provider settings expose Responses paths and require confirmation for intranet HTTP', () => {
+  renderSettings();
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: /AI 供应商/ }));
+
+  const protocol = harness.screen.getByRole('combobox', { name: 'API 协议' });
+  harness.fireEvent.change(protocol, { target: { value: 'responses' } });
+  assert.equal((protocol as HTMLSelectElement).value, 'responses');
+
+  const endpoint = harness.screen.getByRole('textbox', { name: 'API 请求地址' });
+  harness.fireEvent.change(endpoint, {
+    target: { value: 'http://api-ai-coding.example.internal/api/v1/codex' },
+  });
+  assert.ok(harness.screen.getByText(/API Key 和所选日志可能在内网中以明文传输/));
+
+  const permission = harness.screen.getByRole('checkbox', {
+    name: /我了解风险，仅允许当前供应商/,
+  });
+  const originalConfirm = window.confirm;
+  try {
+    window.confirm = () => false;
+    harness.fireEvent.click(permission);
+    assert.equal((permission as HTMLInputElement).checked, false);
+    window.confirm = () => true;
+    harness.fireEvent.click(permission);
+    assert.equal((permission as HTMLInputElement).checked, true);
+  } finally {
+    window.confirm = originalConfirm;
+  }
+});
+
 test('settings shows four template previews and switches through click or arrow keys', () => {
   const requested: string[] = [];
   renderSettings({ onUiTemplateChange: (template) => requested.push(template) });

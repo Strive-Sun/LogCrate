@@ -316,7 +316,10 @@ export function SettingsPanel(props: Props) {
                   setProvider({
                     ...provider,
                     baseUrl,
-                    allowInsecureHttp: isNonLocalHttp(baseUrl) ? provider.allowInsecureHttp : false,
+                    allowInsecureHttp:
+                      baseUrl === provider.baseUrl && isNonLocalHttp(baseUrl)
+                        ? provider.allowInsecureHttp
+                        : false,
                   });
                 }}
               />

@@ -534,4 +534,18 @@ mod tests {
             Some("first\nsecond")
         );
     }
+
+    #[test]
+    fn old_stored_providers_receive_safe_protocol_defaults() {
+        let provider: StoredAiProvider = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "name": "Legacy",
+            "baseUrl": "https://api.example.com/v1",
+            "model": "legacy-model"
+        }))
+        .expect("legacy provider should deserialize");
+        assert_eq!(provider.protocol, AiProtocol::ChatCompletions);
+        assert_eq!(provider.endpoint_mode, AiEndpointMode::Base);
+        assert!(!provider.allow_insecure_http);
+    }
 }
