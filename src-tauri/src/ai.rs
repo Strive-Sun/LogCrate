@@ -45,6 +45,8 @@ pub enum AiEndpointMode {
 }
 
 const MAX_ANALYSIS_CHARS: usize = 120_000;
+const SESSION_ID_HEADER: &str = "session-id";
+const THREAD_ID_HEADER: &str = "thread-id";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -184,6 +186,23 @@ fn provider_endpoint(provider: &StoredAiProvider) -> String {
     format!("{}/{suffix}", provider.base_url.trim_end_matches('/'))
 }
 
+fn ai_request_builder(
+    client: &reqwest::Client,
+    provider: &StoredAiProvider,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    let request = client
+        .post(provider_endpoint(provider))
+        .bearer_auth(api_key);
+    if provider.protocol != AiProtocol::Responses {
+        return request;
+    }
+
+    request
+        .header(SESSION_ID_HEADER, uuid::Uuid::now_v7().to_string())
+        .header(THREAD_ID_HEADER, uuid::Uuid::now_v7().to_string())
+}
+
 async fn send_ai_request(
     provider: &StoredAiProvider,
     api_key: &str,
@@ -195,9 +214,7 @@ async fn send_ai_request(
         .timeout(std::time::Duration::from_secs(timeout_seconds))
         .build()
         .map_err(|_| "Unable to create the AI request client".to_string())?;
-    let request = client
-        .post(provider_endpoint(provider))
-        .bearer_auth(api_key);
+    let request = ai_request_builder(&client, provider, api_key);
     let response = match provider.protocol {
         AiProtocol::ChatCompletions => {
             request
@@ -609,6 +626,45 @@ mod tests {
             analysis_content(AiProtocol::Responses, &unexpected).as_deref(),
             Some("{\n  \"unexpected\": 42\n}")
         );
+    }
+
+    #[test]
+    fn responses_requests_include_codex_session_headers_only() {
+        let client = reqwest::Client::new();
+        let responses = stored(AiProtocol::Responses, AiEndpointMode::Base);
+        let request = ai_request_builder(&client, &responses, "test-key")
+            .build()
+            .expect("Responses request should build");
+        let session_id = request
+            .headers()
+            .get(SESSION_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .expect("Responses request should contain session-id");
+        let thread_id = request
+            .headers()
+            .get(THREAD_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .expect("Responses request should contain thread-id");
+        assert_eq!(
+            uuid::Uuid::parse_str(session_id)
+                .expect("session-id should be a UUID")
+                .get_version_num(),
+            7
+        );
+        assert_eq!(
+            uuid::Uuid::parse_str(thread_id)
+                .expect("thread-id should be a UUID")
+                .get_version_num(),
+            7
+        );
+        assert_ne!(session_id, thread_id);
+
+        let chat = stored(AiProtocol::ChatCompletions, AiEndpointMode::Base);
+        let request = ai_request_builder(&client, &chat, "test-key")
+            .build()
+            .expect("Chat Completions request should build");
+        assert!(!request.headers().contains_key(SESSION_ID_HEADER));
+        assert!(!request.headers().contains_key(THREAD_ID_HEADER));
     }
 
     #[test]

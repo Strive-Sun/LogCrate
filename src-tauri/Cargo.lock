@@ -2542,6 +2542,7 @@ dependencies = [
  "tokio",
  "trash",
  "unrar_sys",
+ "uuid",
  "widestring",
  "windows-service",
  "windows-sys 0.61.2",
