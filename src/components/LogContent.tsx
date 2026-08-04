@@ -34,6 +34,7 @@ interface Props {
   status?: 'opening' | 'ready' | 'dormant' | 'error';
   error?: string;
   active?: boolean;
+  aiOpenToken?: number;
 }
 
 const PAGE = 200;
@@ -157,7 +158,7 @@ function runtimeToStored(
   };
 }
 
-export function LogContent({ session, activeKey, status = 'ready', error, active = true }: Props) {
+export function LogContent({ session, activeKey, status = 'ready', error, active = true, aiOpenToken }: Props) {
   const { t } = useI18n();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [percent, setPercent] = useState(100);
@@ -213,6 +214,13 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
   const [aiConversationText, setAiConversationText] = useState('');
   const [aiQuestion, setAiQuestion] = useState('');
   const [aiHistoryId, setAiHistoryId] = useState<string | null>(null);
+  const [aiPanelOpen, setAiPanelOpen] = useState(false);
+
+  useEffect(() => {
+    if (!aiOpenToken || active === false) return;
+    setAiPanelOpen(true);
+    void api.listAiHistory().then(setAiHistory).catch(() => undefined);
+  }, [aiOpenToken, active]);
   const [fieldEncodingVersion, setFieldEncodingVersion] = useState(0);
   const fieldUnsub = useRef<() => void>(() => {});
   const fieldRequestGeneration = useRef(0);
@@ -255,6 +263,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
     try {
       const result = await api.analyzeAiLog(provider.id, selectedText);
       setAiResult(result);
+      setAiPanelOpen(true);
       setAiConversation([{ role: 'user', content: selectedText }, { role: 'assistant', content: result.content }]);
       setAiConversationText(selectedText);
       const now = new Date().toISOString();
@@ -1062,7 +1071,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
         />
       )}
 
-      {(aiBusy || aiError || aiResult) && (
+      {(aiPanelOpen || aiBusy || aiError || aiResult) && (
         <div className="ai-result-pop" role="dialog" aria-label="AI 日志分析">
           <div className="pop-head">
             <button type="button" className="settings-close" onClick={async () => { setAiHistory(await api.listAiHistory()); setAiHistoryOpen((open) => !open); }}>历史</button>
@@ -1074,6 +1083,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
               onClick={() => {
                 setAiResult(null);
                 setAiError(null);
+                setAiPanelOpen(false);
                 void api.setAiWindowOpen(false);
               }}
             >

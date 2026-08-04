@@ -131,6 +131,7 @@ export function App() {
     [t],
   );
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
+  const [aiOpenToken, setAiOpenToken] = useState(0);
   const [uiTemplate, setUiTemplate] = useState(() => loadUiTemplate(localStorage));
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [fileSearchMounted, setFileSearchMounted] = useState(false);
@@ -1231,6 +1232,7 @@ export function App() {
         onUiTemplateChange={changeUiTemplate}
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+        onOpenAi={() => { void api.setAiWindowOpen(true).then(() => setAiOpenToken((value) => value + 1)); }}
         count={count}
         newItems={newItems}
         onOpenItem={(item) => void revealNewItem(item)}
@@ -1397,7 +1399,7 @@ export function App() {
             />
             <div className="log-panels">
               {tabIds(tabLayout).length === 0 ? (
-                <LogContent session={null} activeKey={null} />
+                <LogContent session={null} activeKey={null} aiOpenToken={aiOpenToken} />
               ) : (
                 tabIds(tabLayout).map((id) => {
                   const tab = tabs[id];
@@ -1413,6 +1415,7 @@ export function App() {
                         active={activeKey === id && !fileSearchOpen}
                         status={tab.status}
                         error={tab.error}
+                        aiOpenToken={aiOpenToken}
                       />
                     </div>
                   );

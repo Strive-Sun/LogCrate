@@ -15,6 +15,7 @@ interface Props {
   onUiTemplateChange: (template: UiTemplate) => void;
   theme: 'dark' | 'light';
   onToggleTheme: () => void;
+  onOpenAi?: () => void;
   count: number;
   newItems: NewLogItem[];
   onOpenItem: (item: NewLogItem) => void;
@@ -83,6 +84,8 @@ export function TopBar(props: Props) {
         </button>
       </span>
       <span className="spacer" />
+
+      <button className="top-ai-button" onClick={() => props.onOpenAi?.()} title="打开 AI 对话">AI</button>
 
       <button className="icon-btn" onClick={props.onToggleTheme} title={t('top.toggleTheme')}>
         {props.theme === 'dark' ? '🌙' : '☀️'}

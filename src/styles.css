@@ -2758,6 +2758,8 @@ body.resizing {
   color: #1f2937;
   box-shadow: -12px 0 40px #0003;
 }
+.top-ai-button { min-width: 42px; height: 28px; padding: 0 12px; border: 1px solid #10a37f; border-radius: 8px; background: #fff; color: #0f8a6c; font-weight: 700; cursor: pointer; }
+.top-ai-button:hover { background: #ecfdf8; }
 .ai-result-pop .pop-head {
   flex: 0 0 auto;
   min-height: 42px;
