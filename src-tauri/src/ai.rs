@@ -242,32 +242,85 @@ async fn send_ai_request(
     Ok(body)
 }
 
-fn response_content(protocol: AiProtocol, body: &serde_json::Value) -> Option<String> {
-    let content = match protocol {
-        AiProtocol::ChatCompletions => body
-            .get("choices")?
-            .as_array()?
-            .first()?
-            .get("message")?
-            .get("content")?
-            .as_str()?
-            .to_string(),
-        AiProtocol::Responses => {
-            if let Some(output_text) = body.get("output_text").and_then(serde_json::Value::as_str) {
-                output_text.to_string()
-            } else {
-                body.get("output")?
-                    .as_array()?
-                    .iter()
-                    .filter_map(|item| item.get("content")?.as_array())
-                    .flatten()
-                    .filter_map(|content| content.get("text")?.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n")
+fn chat_content(body: &serde_json::Value) -> Option<String> {
+    body.get("choices")?
+        .as_array()?
+        .first()?
+        .get("message")?
+        .get("content")?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn responses_content(body: &serde_json::Value) -> Option<String> {
+    if let Some(output_text) = body.get("output_text").and_then(serde_json::Value::as_str) {
+        return Some(output_text.to_string());
+    }
+    let content = body
+        .get("output")?
+        .as_array()?
+        .iter()
+        .filter_map(|item| item.get("content")?.as_array())
+        .flatten()
+        .filter_map(|content| content.get("text")?.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!content.trim().is_empty()).then_some(content)
+}
+
+fn collect_compatible_text(value: &serde_json::Value, output: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) if !text.trim().is_empty() => output.push(text.clone()),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_compatible_text(item, output);
             }
         }
+        serde_json::Value::Object(object) => {
+            for key in ["text", "output_text", "content", "message", "answer"] {
+                if let Some(value) = object.get(key) {
+                    collect_compatible_text(value, output);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn response_content(protocol: AiProtocol, body: &serde_json::Value) -> Option<String> {
+    let standard = match protocol {
+        AiProtocol::ChatCompletions => chat_content(body).or_else(|| responses_content(body)),
+        AiProtocol::Responses => responses_content(body).or_else(|| chat_content(body)),
     };
+    if standard
+        .as_ref()
+        .is_some_and(|text| !text.trim().is_empty())
+    {
+        return standard;
+    }
+    let mut parts = Vec::new();
+    for key in [
+        "output",
+        "output_text",
+        "response",
+        "result",
+        "data",
+        "content",
+        "answer",
+    ] {
+        if let Some(value) = body.get(key) {
+            collect_compatible_text(value, &mut parts);
+        }
+    }
+    let content = parts.join("\n");
     (!content.trim().is_empty()).then_some(content)
+}
+
+fn analysis_content(protocol: AiProtocol, body: &serde_json::Value) -> Option<String> {
+    response_content(protocol, body).or_else(|| {
+        let raw = serde_json::to_string_pretty(body).ok()?;
+        (!matches!(body, serde_json::Value::Null) && raw != "{}" && raw != "[]").then_some(raw)
+    })
 }
 
 fn key_entry(provider_id: &str) -> Result<Entry, keyring::Error> {
@@ -407,7 +460,7 @@ pub async fn test_ai_provider(app: AppHandle, provider_id: String) -> Result<(),
     if api_key.is_empty() {
         return Err("AI provider API key is not configured".to_string());
     }
-    let body = send_ai_request(
+    send_ai_request(
         &provider,
         &api_key,
         "This is a connection test. Follow the user request exactly.",
@@ -415,9 +468,7 @@ pub async fn test_ai_provider(app: AppHandle, provider_id: String) -> Result<(),
         10,
     )
     .await?;
-    response_content(provider.protocol, &body)
-        .map(|_| ())
-        .ok_or_else(|| "AI provider returned no compatible content".to_string())
+    Ok(())
 }
 
 #[tauri::command]
@@ -438,7 +489,7 @@ pub async fn analyze_ai_log(
     }
     let system_prompt = "你是日志分析助手。请基于用户提供的日志，使用清晰的中文分段说明：1. 日志包含的主要信息；2. 警告；3. 错误；4. 可能原因；5. 建议。不要臆造日志中不存在的事实，对无法确定的内容明确标注不确定性。";
     let body = send_ai_request(&provider, &api_key, system_prompt, &selected_text, 60).await?;
-    let content = response_content(provider.protocol, &body)
+    let content = analysis_content(provider.protocol, &body)
         .ok_or_else(|| "AI provider returned no analysis content".to_string())?;
     Ok(AiAnalysisResult {
         provider_id,
@@ -545,6 +596,18 @@ mod tests {
         assert_eq!(
             request.get("store").and_then(serde_json::Value::as_bool),
             Some(false)
+        );
+        let compatible = serde_json::json!({
+            "response": {"message": {"content": "company gateway result"}}
+        });
+        assert_eq!(
+            response_content(AiProtocol::Responses, &compatible).as_deref(),
+            Some("company gateway result")
+        );
+        let unexpected = serde_json::json!({"unexpected": 42});
+        assert_eq!(
+            analysis_content(AiProtocol::Responses, &unexpected).as_deref(),
+            Some("{\n  \"unexpected\": 42\n}")
         );
     }
 
