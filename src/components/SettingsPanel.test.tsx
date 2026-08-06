@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test, { afterEach, before } from 'node:test';
 import { JSDOM } from 'jsdom';
 import type { ComponentProps } from 'react';
@@ -192,6 +193,19 @@ test('template choices remain available in a narrow settings viewport', () => {
   } finally {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
   }
+});
+
+test('settings and notification popovers stay anchored to the main top bar', () => {
+  const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  const topBarRule = css.match(/\n\.topbar\s*\{([^}]*)\}/)?.[1] ?? '';
+  const popRule = css.match(/\.pop\s*\{([^}]*)\}/)?.[1] ?? '';
+  const bellRule = css.match(/\.pop\.bell-pop\s*\{([^}]*)\}/)?.[1] ?? '';
+  const settingsRule = css.match(/\.pop\.settings-pop\s*\{([^}]*)\}/)?.[1] ?? '';
+
+  assert.match(topBarRule, /position:\s*relative;/);
+  assert.match(popRule, /position:\s*absolute;/);
+  assert.match(bellRule, /right:\s*44px;/);
+  assert.match(settingsRule, /right:\s*8px;/);
 });
 
 test('disabled search entry cannot be clicked and exposes its settings hint on hover', () => {
