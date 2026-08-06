@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import test, { afterEach, before, beforeEach } from 'node:test';
 import { JSDOM } from 'jsdom';
 import { useState } from 'react';
@@ -403,6 +403,26 @@ test('AI workspace fills a root-level right column with an independently scrolli
     'the captured width must be applied after expansion succeeds',
   );
   assert.match(appSource, /'--main-workspace-width': `\$\{mainWorkspaceWidth\}px`/);
+});
+
+test('AI workspace has no independent window entry, capability, event, or backend sync path', () => {
+  const mainSource = readFileSync(new URL('../main.tsx', import.meta.url), 'utf8');
+  const logSource = readFileSync(new URL('LogContent.tsx', import.meta.url), 'utf8');
+  const tauriAdapter = readFileSync(new URL('../api/tauri.ts', import.meta.url), 'utf8');
+  const tauriMock = readFileSync(new URL('../api/mock.ts', import.meta.url), 'utf8');
+  const backend = readFileSync(new URL('../../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+  const capability = JSON.parse(
+    readFileSync(new URL('../../src-tauri/capabilities/default.json', import.meta.url), 'utf8'),
+  ) as { windows: string[]; permissions: string[] };
+
+  assert.equal(existsSync(new URL('AiConversationWindow.tsx', import.meta.url)), false);
+  assert.doesNotMatch(mainSource, /AiConversationWindow|ai-conversation/);
+  assert.doesNotMatch(logSource, /emitTo\(|ai-conversation/);
+  assert.doesNotMatch(tauriAdapter, /toggleAiWindow|toggle_ai_window/);
+  assert.doesNotMatch(tauriMock, /toggleAiWindow/);
+  assert.doesNotMatch(backend, /ai-conversation|toggle_ai_window|synchronize_ai_windows/);
+  assert.deepEqual(capability.windows, ['main']);
+  assert.equal(capability.permissions.includes('core:window:allow-start-dragging'), false);
 });
 
 test('AI workspace mounts into the root host instead of covering the log panel', () => {

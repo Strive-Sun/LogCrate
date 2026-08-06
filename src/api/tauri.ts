@@ -189,9 +189,6 @@ export const tauriApi = {
   async setAiWindowOpen(open: boolean): Promise<void> {
     await invoke('set_ai_window_open', { open });
   },
-  async toggleAiWindow(): Promise<void> {
-    await invoke('toggle_ai_window');
-  },
   async listAiHistory(): Promise<AiHistorySummary[]> {
     return invoke('list_ai_history');
   },

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { api } from '../api';
 import type {
   LogFieldCondition,
@@ -303,12 +302,6 @@ export function LogContent({
       try {
         const result = await api.analyzeAiLog(provider.id, selectedText);
         setAiResult(result);
-        void getCurrentWebviewWindow().emitTo('ai-conversation', 'ai-result', {
-          providerId: result.providerId,
-          model: result.model,
-          content: result.content,
-          selectedText,
-        });
         setAiConversation([
           { role: 'user', content: selectedText },
           { role: 'assistant', content: result.content },

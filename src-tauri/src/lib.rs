@@ -119,9 +119,6 @@ fn set_ai_window_open(app: tauri::AppHandle, open: bool) -> Result<(), String> {
         ))
         .map_err(|e| e.to_string())?;
     } else {
-        if let Some(ai) = app.get_webview_window("ai-conversation") {
-            let _ = ai.close();
-        }
         if let Some(snapshot) = AI_WINDOW_SNAPSHOT
             .get_or_init(|| Mutex::new(None))
             .lock()
@@ -141,52 +138,6 @@ fn set_ai_window_open(app: tauri::AppHandle, open: bool) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-#[tauri::command]
-fn toggle_ai_window(app: tauri::AppHandle) -> Result<(), String> {
-    let open = AI_WINDOW_SNAPSHOT
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .is_none();
-    set_ai_window_open(app, open)
-}
-
-fn synchronize_ai_windows(window: &tauri::Window, event: &tauri::WindowEvent) {
-    if !matches!(
-        event,
-        tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)
-    ) {
-        return;
-    }
-    let app = window.app_handle();
-    let Some(main) = app.get_window(MAIN_WINDOW_LABEL) else {
-        return;
-    };
-    let Some(ai) = app.get_window("ai-conversation") else {
-        return;
-    };
-    let Ok(main_size) = main.outer_size() else {
-        return;
-    };
-    if window.label() == MAIN_WINDOW_LABEL {
-        let Ok(main_pos) = main.outer_position() else {
-            return;
-        };
-        let expected = PhysicalPosition::new(main_pos.x + main_size.width as i32 - 6, main_pos.y);
-        if ai.outer_position().ok() != Some(expected) {
-            let _ = ai.set_position(expected);
-        }
-    } else if window.label() == "ai-conversation" {
-        let Ok(ai_pos) = ai.outer_position() else {
-            return;
-        };
-        let expected = PhysicalPosition::new(ai_pos.x - main_size.width as i32 + 6, ai_pos.y);
-        if main.outer_position().ok() != Some(expected) {
-            let _ = main.set_position(expected);
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1437,7 +1388,6 @@ pub fn run() {
             }
         }))
         .on_window_event(|window, event| {
-            synchronize_ai_windows(window, event);
             if close_action(window.label()) == LifecycleAction::HideMainWindow {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
@@ -1649,7 +1599,6 @@ pub fn run() {
             inspect_ai_attachments,
             continue_ai_conversation,
             set_ai_window_open,
-            toggle_ai_window,
             list_ai_history,
             load_ai_history,
             save_ai_history,

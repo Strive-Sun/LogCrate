@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "LogCrate 默认权限:核心命令、文件夹选择与签名更新",
-  "windows": ["main", "ai-conversation"],
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-set-size",
@@ -10,7 +10,6 @@
     "core:window:allow-is-maximized",
     "core:window:allow-maximize",
     "core:window:allow-unmaximize",
-    "core:window:allow-start-dragging",
     "dialog:allow-open",
     "dialog:allow-save",
     "updater:default",
