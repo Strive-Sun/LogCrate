@@ -70,7 +70,7 @@ static AI_WINDOW_SNAPSHOT: OnceLock<Mutex<Option<AiWindowSnapshot>>> = OnceLock:
 #[derive(Clone, Copy)]
 struct AiWindowSnapshot {
     position: PhysicalPosition<i32>,
-    size: PhysicalSize<u32>,
+    inner_size: PhysicalSize<u32>,
     maximized: bool,
 }
 #[tauri::command]
@@ -88,10 +88,11 @@ fn set_ai_window_open(app: tauri::AppHandle, open: bool) -> Result<(), String> {
             .ok_or_else(|| "主窗口不可用".to_string())?;
         let maximized = main.is_maximized().map_err(|e| e.to_string())?;
         let position = main.outer_position().map_err(|e| e.to_string())?;
-        let size = main.outer_size().map_err(|e| e.to_string())?;
+        let outer_size = main.outer_size().map_err(|e| e.to_string())?;
+        let inner_size = main.inner_size().map_err(|e| e.to_string())?;
         *slot = Some(AiWindowSnapshot {
             position,
-            size,
+            inner_size,
             maximized,
         });
         if maximized {
@@ -102,7 +103,7 @@ fn set_ai_window_open(app: tauri::AppHandle, open: bool) -> Result<(), String> {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "无法确定当前显示器工作区".to_string())?;
         let area = monitor.work_area();
-        let current_right = position.x + size.width as i32;
+        let current_right = position.x + outer_size.width as i32;
         let available = area.position.x + area.size.width as i32 - current_right;
         let width = available.min(440);
         if width < 360 {
@@ -112,8 +113,11 @@ fn set_ai_window_open(app: tauri::AppHandle, open: bool) -> Result<(), String> {
             }
             return Err("主窗口右侧空间不足，无法打开 AI 页面".into());
         }
-        main.set_size(PhysicalSize::new(size.width + width as u32, size.height))
-            .map_err(|e| e.to_string())?;
+        main.set_size(PhysicalSize::new(
+            inner_size.width + width as u32,
+            inner_size.height,
+        ))
+        .map_err(|e| e.to_string())?;
     } else {
         if let Some(ai) = app.get_webview_window("ai-conversation") {
             let _ = ai.close();
@@ -127,7 +131,8 @@ fn set_ai_window_open(app: tauri::AppHandle, open: bool) -> Result<(), String> {
             let main = app
                 .get_window(MAIN_WINDOW_LABEL)
                 .ok_or_else(|| "主窗口不可用".to_string())?;
-            main.set_size(snapshot.size).map_err(|e| e.to_string())?;
+            main.set_size(snapshot.inner_size)
+                .map_err(|e| e.to_string())?;
             main.set_position(snapshot.position)
                 .map_err(|e| e.to_string())?;
             if snapshot.maximized {
