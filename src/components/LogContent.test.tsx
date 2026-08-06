@@ -231,6 +231,12 @@ test('AI workspace fills a root-level right column with an independently scrolli
   const historyRule =
     css.match(/\.ai-result-pop \.pop-head > button:first-child\s*\{([^}]*)\}/)?.[1] ?? '';
   const bodyRule = css.match(/\.ai-result-body\s*\{([^}]*)\}/)?.[1] ?? '';
+  const historyListRule = css.match(/\.ai-history-list\s*\{([^}]*)\}/)?.[1] ?? '';
+  const historyToolbarRule = css.match(/\.ai-history-toolbar\s*\{([^}]*)\}/)?.[1] ?? '';
+  const historyItemRule = css.match(/\.ai-history-item\s*\{([^}]*)\}/)?.[1] ?? '';
+  const historyMainRule = css.match(/\.ai-history-main\s*\{([^}]*)\}/)?.[1] ?? '';
+  const historyTitleRule = css.match(/\.ai-history-title\s*\{([^}]*)\}/)?.[1] ?? '';
+  const historyDeleteRule = css.match(/\.ai-history-delete\s*\{([^}]*)\}/)?.[1] ?? '';
 
   assert.match(appRule, /display:\s*grid;/);
   assert.match(appRule, /grid-template-rows:\s*40px minmax\(0, 1fr\);/);
@@ -255,6 +261,12 @@ test('AI workspace fills a root-level right column with an independently scrolli
   assert.match(historyRule, /font-weight:\s*400;/);
   assert.match(bodyRule, /min-height:\s*0;/);
   assert.match(bodyRule, /overflow:\s*auto;/);
+  assert.match(historyListRule, /max-height:\s*280px;/);
+  assert.match(historyToolbarRule, /position:\s*sticky;/);
+  assert.match(historyItemRule, /grid-template-columns:\s*minmax\(0, 1fr\) auto;/);
+  assert.match(historyMainRule, /min-width:\s*0;/);
+  assert.match(historyTitleRule, /-webkit-line-clamp:\s*2;/);
+  assert.match(historyDeleteRule, /align-self:\s*center;/);
 
   const captureWidth = appSource.indexOf('const widthBeforeOpen = window.innerWidth;');
   const expandWindow = appSource.indexOf('await api.setAiWindowOpen(true);', captureWidth);

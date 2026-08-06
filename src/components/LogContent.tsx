@@ -1156,24 +1156,28 @@ export function LogContent({
             {aiHistoryOpen && (
               <div className="ai-history-list">
                 {aiHistory.length > 0 && (
-                  <button
-                    type="button"
-                    className="settings-button"
-                    onClick={async () => {
-                      await api.clearAiHistory();
-                      setAiHistory([]);
-                    }}
-                  >
-                    清空历史
-                  </button>
+                  <div className="ai-history-toolbar">
+                    <span>{aiHistory.length} 条记录</span>
+                    <button
+                      type="button"
+                      className="ai-history-clear"
+                      onClick={async () => {
+                        await api.clearAiHistory();
+                        setAiHistory([]);
+                      }}
+                    >
+                      清空历史
+                    </button>
+                  </div>
                 )}
                 {aiHistory.length === 0 ? (
-                  <div className="settings-hint">暂无历史记录</div>
+                  <div className="ai-history-empty">暂无历史记录</div>
                 ) : (
                   aiHistory.map((item) => (
                     <div key={item.id} className="ai-history-item">
                       <button
                         type="button"
+                        className="ai-history-main"
                         onClick={async () => {
                           const record = await api.loadAiHistory(item.id);
                           const assistant = [...record.messages]
@@ -1191,11 +1195,14 @@ export function LogContent({
                           setAiHistoryOpen(false);
                         }}
                       >
-                        <span>{item.title}</span>
-                        <small>{new Date(item.updatedAt).toLocaleString()}</small>
+                        <span className="ai-history-title">{item.title}</span>
+                        <time className="ai-history-time" dateTime={item.updatedAt}>
+                          {new Date(item.updatedAt).toLocaleString()}
+                        </time>
                       </button>
                       <button
                         type="button"
+                        className="ai-history-delete"
                         aria-label={`删除历史 ${item.title}`}
                         onClick={async () => {
                           await api.deleteAiHistory(item.id);
