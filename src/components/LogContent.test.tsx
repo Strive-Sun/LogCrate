@@ -191,7 +191,11 @@ test('AI analysis result opens in a closable drawer body', async () => {
     content: 'Synthetic analysis result',
   });
 
-  const { container } = renderLog({ onAiOpen: () => (aiWorkspaceOpened = true) });
+  const { container } = renderLog({
+    onAiOpen: async () => {
+      aiWorkspaceOpened = true;
+    },
+  });
   harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement, {
     clientX: 20,
     clientY: 20,
@@ -214,6 +218,7 @@ test('AI analysis result opens in a closable drawer body', async () => {
 
 test('AI workspace fills a root-level right column with an independently scrolling body', () => {
   const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
   const appRule = css.match(/\.app\s*\{([^}]*)\}/)?.[1] ?? '';
   const openAppRule = css.match(/\.app\.with-ai\s*\{([^}]*)\}/)?.[1] ?? '';
   const topBarRule = css.match(/\.app > \.topbar\s*\{([^}]*)\}/)?.[1] ?? '';
@@ -231,12 +236,13 @@ test('AI workspace fills a root-level right column with an independently scrolli
   assert.match(appRule, /grid-template-rows:\s*40px minmax\(0, 1fr\);/);
   assert.match(
     openAppRule,
-    /grid-template-columns:\s*minmax\(0, 1fr\) min\(440px, calc\(100vw - 16px\)\);/,
+    /grid-template-columns:\s*var\(--main-workspace-width\) minmax\(0, 1fr\);/,
   );
   assert.match(topBarRule, /grid-column:\s*1;/);
   assert.match(columnsRule, /grid-column:\s*1;/);
-  assert.match(searchLayerRule, /right:\s*min\(440px, calc\(100vw - 16px\)\);/);
+  assert.match(searchLayerRule, /right:\s*calc\(100% - var\(--main-workspace-width\)\);/);
   assert.match(hostRule, /grid-row:\s*1 \/ -1;/);
+  assert.match(hostRule, /width:\s*100%;/);
   assert.match(hostRule, /height:\s*100%;/);
   assert.match(drawerRule, /position:\s*relative;/);
   assert.match(drawerRule, /width:\s*100%;/);
@@ -249,6 +255,20 @@ test('AI workspace fills a root-level right column with an independently scrolli
   assert.match(historyRule, /font-weight:\s*400;/);
   assert.match(bodyRule, /min-height:\s*0;/);
   assert.match(bodyRule, /overflow:\s*auto;/);
+
+  const captureWidth = appSource.indexOf('const widthBeforeOpen = window.innerWidth;');
+  const expandWindow = appSource.indexOf('await api.setAiWindowOpen(true);', captureWidth);
+  const pinWorkspace = appSource.indexOf('setMainWorkspaceWidth(widthBeforeOpen);', expandWindow);
+  assert.ok(captureWidth >= 0, 'the original workspace width must be captured');
+  assert.ok(
+    expandWindow > captureWidth,
+    'the width must be captured before the native window expands',
+  );
+  assert.ok(
+    pinWorkspace > expandWindow,
+    'the captured width must be applied after expansion succeeds',
+  );
+  assert.match(appSource, /'--main-workspace-width': `\$\{mainWorkspaceWidth\}px`/);
 });
 
 test('AI workspace mounts into the root host instead of covering the log panel', () => {

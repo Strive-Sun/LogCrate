@@ -40,8 +40,8 @@ interface Props {
   aiOpenToken?: number;
   aiOpen?: boolean;
   aiWorkspaceHost?: HTMLElement | null;
-  onAiOpen?: () => void;
-  onAiClose?: () => void;
+  onAiOpen?: () => Promise<void>;
+  onAiClose?: () => Promise<void>;
 }
 
 const PAGE = 200;
@@ -233,7 +233,9 @@ export function LogContent({
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiHistory, setAiHistory] = useState<import('../api/types').AiHistorySummary[]>([]);
   const [aiHistoryOpen, setAiHistoryOpen] = useState(false);
-  const [aiConversation, setAiConversation] = useState<import('../api/types').AiHistoryMessage[]>([]);
+  const [aiConversation, setAiConversation] = useState<import('../api/types').AiHistoryMessage[]>(
+    [],
+  );
   const [aiConversationText, setAiConversationText] = useState('');
   const [aiQuestion, setAiQuestion] = useState('');
   const [aiHistoryId, setAiHistoryId] = useState<string | null>(null);
@@ -242,7 +244,10 @@ export function LogContent({
   useEffect(() => {
     if (!aiOpenToken || active === false) return;
     setAiPanelOpen(true);
-    void api.listAiHistory().then(setAiHistory).catch(() => undefined);
+    void api
+      .listAiHistory()
+      .then(setAiHistory)
+      .catch(() => undefined);
   }, [aiOpenToken, active]);
   const [fieldEncodingVersion, setFieldEncodingVersion] = useState(0);
   const fieldUnsub = useRef<() => void>(() => {});
@@ -261,51 +266,75 @@ export function LogContent({
   includeUnparsedRef.current = includeUnparsed;
   indexedLinesRef.current = indexedLines;
 
-  const analyzeSelectedText = useCallback(async (selectedText: string) => {
-    if (!selectedText.trim()) return;
-    setAiError(null);
-    const providers = await api.listAiProviders();
-    if (!providers.length) {
-      setAiError('请先在设置中配置 AI 供应商');
-      return;
-    }
-    const provider = providers[0];
-    if (!provider.keyConfigured) {
-      setAiError('当前供应商尚未配置 API Key，请先在设置中完成配置');
-      return;
-    }
-    const insecureWarning = provider.baseUrl.trim().toLowerCase().startsWith('http://')
-      ? '\n\n警告：该端点使用不安全 HTTP，API Key 和日志内容在传输中不受 TLS 保护。'
-      : '';
-    const confirmed = window.confirm(
-      `将把选中的 ${selectedText.length} 个字符发送到 ${provider.baseUrl}，使用 ${provider.protocol === 'responses' ? 'OpenAI Responses' : 'OpenAI Chat Completions'} 协议和模型 ${provider.model}。${insecureWarning}\n\n是否继续？`,
-    );
-    if (!confirmed) return;
-    try { await api.setAiWindowOpen(true); } catch (error) { setAiError(errorMessage(error)); return; }
-    onAiOpen?.();
-    setAiBusy(true);
-    try {
-      const result = await api.analyzeAiLog(provider.id, selectedText);
-      setAiResult(result);
-      void getCurrentWebviewWindow().emitTo('ai-conversation', 'ai-result', { providerId: result.providerId, model: result.model, content: result.content, selectedText });
-      setAiConversation([{ role: 'user', content: selectedText }, { role: 'assistant', content: result.content }]);
-      setAiConversationText(selectedText);
-      const now = new Date().toISOString();
-      const historyId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      setAiHistoryId(historyId);
-      await api.saveAiHistory({
-        id: historyId,
-        title: selectedText.split(/\r?\n/)[0].slice(0, 80) || 'AI 日志分析',
-        createdAt: now, updatedAt: now, providerId: result.providerId,
-        protocol: provider.protocol, model: result.model, endpointFingerprint: provider.baseUrl,
-        selectedText, messages: [{ role: 'user', content: selectedText }, { role: 'assistant', content: result.content }],
-      });
-    } catch (error) {
-      setAiError(errorMessage(error));
-    } finally {
-      setAiBusy(false);
-    }
-  }, [onAiOpen]);
+  const analyzeSelectedText = useCallback(
+    async (selectedText: string) => {
+      if (!selectedText.trim()) return;
+      setAiError(null);
+      const providers = await api.listAiProviders();
+      if (!providers.length) {
+        setAiError('请先在设置中配置 AI 供应商');
+        return;
+      }
+      const provider = providers[0];
+      if (!provider.keyConfigured) {
+        setAiError('当前供应商尚未配置 API Key，请先在设置中完成配置');
+        return;
+      }
+      const insecureWarning = provider.baseUrl.trim().toLowerCase().startsWith('http://')
+        ? '\n\n警告：该端点使用不安全 HTTP，API Key 和日志内容在传输中不受 TLS 保护。'
+        : '';
+      const confirmed = window.confirm(
+        `将把选中的 ${selectedText.length} 个字符发送到 ${provider.baseUrl}，使用 ${provider.protocol === 'responses' ? 'OpenAI Responses' : 'OpenAI Chat Completions'} 协议和模型 ${provider.model}。${insecureWarning}\n\n是否继续？`,
+      );
+      if (!confirmed) return;
+      try {
+        if (onAiOpen) await onAiOpen();
+        else await api.setAiWindowOpen(true);
+      } catch (error) {
+        setAiError(errorMessage(error));
+        return;
+      }
+      setAiBusy(true);
+      try {
+        const result = await api.analyzeAiLog(provider.id, selectedText);
+        setAiResult(result);
+        void getCurrentWebviewWindow().emitTo('ai-conversation', 'ai-result', {
+          providerId: result.providerId,
+          model: result.model,
+          content: result.content,
+          selectedText,
+        });
+        setAiConversation([
+          { role: 'user', content: selectedText },
+          { role: 'assistant', content: result.content },
+        ]);
+        setAiConversationText(selectedText);
+        const now = new Date().toISOString();
+        const historyId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        setAiHistoryId(historyId);
+        await api.saveAiHistory({
+          id: historyId,
+          title: selectedText.split(/\r?\n/)[0].slice(0, 80) || 'AI 日志分析',
+          createdAt: now,
+          updatedAt: now,
+          providerId: result.providerId,
+          protocol: provider.protocol,
+          model: result.model,
+          endpointFingerprint: provider.baseUrl,
+          selectedText,
+          messages: [
+            { role: 'user', content: selectedText },
+            { role: 'assistant', content: result.content },
+          ],
+        });
+      } catch (error) {
+        setAiError(errorMessage(error));
+      } finally {
+        setAiBusy(false);
+      }
+    },
+    [onAiOpen],
+  );
 
   const clearLineCache = useCallback(() => {
     cacheRequestGeneration.current += 1;
@@ -1098,58 +1127,186 @@ export function LogContent({
       {mountAiWorkspace(
         (aiOpen || aiPanelOpen || aiBusy || aiError || aiResult) && (
           <div className="ai-result-pop" role="dialog" aria-label="AI 日志分析">
-          <div className="pop-head">
-            <button type="button" className="settings-close" onClick={async () => { setAiHistory(await api.listAiHistory()); setAiHistoryOpen((open) => !open); }}>历史记录</button>
-            <span>AI 日志分析</span>
-            <button
-              type="button"
-              className="settings-close"
-              aria-label="关闭 AI 日志分析"
-              onClick={() => {
-                setAiResult(null);
-                setAiError(null);
-                setAiPanelOpen(false);
-                onAiClose?.();
-                void api.setAiWindowOpen(false);
-              }}
-            >
-              ×
-            </button>
-          </div>
-          {aiHistoryOpen && <div className="ai-history-list">
-            {aiHistory.length > 0 && <button type="button" className="settings-button" onClick={async () => { await api.clearAiHistory(); setAiHistory([]); }}>清空历史</button>}
-            {aiHistory.length === 0 ? <div className="settings-hint">暂无历史记录</div> : aiHistory.map((item) => (
-              <div key={item.id} className="ai-history-item">
-                <button type="button" onClick={async () => { const record = await api.loadAiHistory(item.id); const assistant = [...record.messages].reverse().find((message) => message.role === 'assistant'); if (assistant) setAiResult({ providerId: record.providerId, model: record.model, content: assistant.content }); setAiConversation(record.messages); setAiConversationText(record.selectedText); setAiHistoryId(record.id); setAiHistoryOpen(false); }}>
-                  <span>{item.title}</span><small>{new Date(item.updatedAt).toLocaleString()}</small>
-                </button>
-                <button type="button" aria-label={`删除历史 ${item.title}`} onClick={async () => { await api.deleteAiHistory(item.id); setAiHistory((items) => items.filter((history) => history.id !== item.id)); }}>删除</button>
-              </div>
-            ))}
-          </div>}
-          <div className="ai-result-body">
-            {aiBusy && <div className="settings-hint">分析中，请稍候…</div>}
-            {aiError && <div className="update-message error">{aiError}</div>}
-            {!aiResult && !aiBusy && !aiError && <div className="ai-empty-state"><p>选中日志后使用右键“AI 分析”，或从历史对话中继续。</p></div>}
-            {aiResult && (
-              <>
-                <div className="settings-hint">
-                  供应商：{aiResult.providerId} · 模型：{aiResult.model}
-                </div>
-                <div className="ai-chat-messages">
-                  {(aiConversation.length ? aiConversation : [{ role: 'assistant' as const, content: aiResult.content }]).map((message, index) => (
-                    <div key={`${index}-${message.role}`} className={`ai-chat-message ${message.role}`}>
-                      <div className="ai-chat-avatar">{message.role === 'user' ? '你' : 'AI'}</div>
-                      <div className="ai-chat-bubble">{message.content}</div>
+            <div className="pop-head">
+              <button
+                type="button"
+                className="settings-close"
+                onClick={async () => {
+                  setAiHistory(await api.listAiHistory());
+                  setAiHistoryOpen((open) => !open);
+                }}
+              >
+                历史记录
+              </button>
+              <span>AI 日志分析</span>
+              <button
+                type="button"
+                className="settings-close"
+                aria-label="关闭 AI 日志分析"
+                onClick={() => {
+                  setAiResult(null);
+                  setAiError(null);
+                  setAiPanelOpen(false);
+                  void (onAiClose ? onAiClose() : api.setAiWindowOpen(false));
+                }}
+              >
+                ×
+              </button>
+            </div>
+            {aiHistoryOpen && (
+              <div className="ai-history-list">
+                {aiHistory.length > 0 && (
+                  <button
+                    type="button"
+                    className="settings-button"
+                    onClick={async () => {
+                      await api.clearAiHistory();
+                      setAiHistory([]);
+                    }}
+                  >
+                    清空历史
+                  </button>
+                )}
+                {aiHistory.length === 0 ? (
+                  <div className="settings-hint">暂无历史记录</div>
+                ) : (
+                  aiHistory.map((item) => (
+                    <div key={item.id} className="ai-history-item">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const record = await api.loadAiHistory(item.id);
+                          const assistant = [...record.messages]
+                            .reverse()
+                            .find((message) => message.role === 'assistant');
+                          if (assistant)
+                            setAiResult({
+                              providerId: record.providerId,
+                              model: record.model,
+                              content: assistant.content,
+                            });
+                          setAiConversation(record.messages);
+                          setAiConversationText(record.selectedText);
+                          setAiHistoryId(record.id);
+                          setAiHistoryOpen(false);
+                        }}
+                      >
+                        <span>{item.title}</span>
+                        <small>{new Date(item.updatedAt).toLocaleString()}</small>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`删除历史 ${item.title}`}
+                        onClick={async () => {
+                          await api.deleteAiHistory(item.id);
+                          setAiHistory((items) =>
+                            items.filter((history) => history.id !== item.id),
+                          );
+                        }}
+                      >
+                        删除
+                      </button>
                     </div>
-                  ))}
-                </div>
-                <textarea aria-label="继续追问" value={aiQuestion} onChange={(event) => setAiQuestion(event.target.value)} placeholder="继续追问…" />
-                <button type="button" onClick={async () => { const providers = await api.listAiProviders(); const provider = providers.find((item) => item.id === aiResult.providerId) ?? providers[0]; if (!provider || !aiQuestion.trim()) return; setAiBusy(true); try { const question = aiQuestion; const next = await api.continueAiConversation(provider.id, aiConversationText, aiConversation, question); const messages = [...aiConversation, { role: 'user' as const, content: question }, { role: 'assistant' as const, content: next.content }]; setAiResult(next); setAiConversation(messages); if (aiHistoryId) await api.saveAiHistory({ id: aiHistoryId, title: aiConversationText.split(/\r?\n/)[0].slice(0, 80) || 'AI 日志分析', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), providerId: next.providerId, protocol: provider.protocol, model: next.model, endpointFingerprint: provider.baseUrl, selectedText: aiConversationText, messages }); setAiQuestion(''); } catch (error) { setAiError(errorMessage(error)); } finally { setAiBusy(false); } }}>发送追问</button>
-              </>
+                  ))
+                )}
+              </div>
             )}
-          </div>
-          {!aiResult && <div className="ai-empty-composer"><textarea aria-label="AI 问题" value={aiQuestion} onChange={(event) => setAiQuestion(event.target.value)} placeholder="输入问题…" /><span>请先选择日志</span></div>}
+            <div className="ai-result-body">
+              {aiBusy && <div className="settings-hint">分析中，请稍候…</div>}
+              {aiError && <div className="update-message error">{aiError}</div>}
+              {!aiResult && !aiBusy && !aiError && (
+                <div className="ai-empty-state">
+                  <p>选中日志后使用右键“AI 分析”，或从历史对话中继续。</p>
+                </div>
+              )}
+              {aiResult && (
+                <>
+                  <div className="settings-hint">
+                    供应商：{aiResult.providerId} · 模型：{aiResult.model}
+                  </div>
+                  <div className="ai-chat-messages">
+                    {(aiConversation.length
+                      ? aiConversation
+                      : [{ role: 'assistant' as const, content: aiResult.content }]
+                    ).map((message, index) => (
+                      <div
+                        key={`${index}-${message.role}`}
+                        className={`ai-chat-message ${message.role}`}
+                      >
+                        <div className="ai-chat-avatar">
+                          {message.role === 'user' ? '你' : 'AI'}
+                        </div>
+                        <div className="ai-chat-bubble">{message.content}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <textarea
+                    aria-label="继续追问"
+                    value={aiQuestion}
+                    onChange={(event) => setAiQuestion(event.target.value)}
+                    placeholder="继续追问…"
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const providers = await api.listAiProviders();
+                      const provider =
+                        providers.find((item) => item.id === aiResult.providerId) ?? providers[0];
+                      if (!provider || !aiQuestion.trim()) return;
+                      setAiBusy(true);
+                      try {
+                        const question = aiQuestion;
+                        const next = await api.continueAiConversation(
+                          provider.id,
+                          aiConversationText,
+                          aiConversation,
+                          question,
+                        );
+                        const messages = [
+                          ...aiConversation,
+                          { role: 'user' as const, content: question },
+                          { role: 'assistant' as const, content: next.content },
+                        ];
+                        setAiResult(next);
+                        setAiConversation(messages);
+                        if (aiHistoryId)
+                          await api.saveAiHistory({
+                            id: aiHistoryId,
+                            title:
+                              aiConversationText.split(/\r?\n/)[0].slice(0, 80) || 'AI 日志分析',
+                            createdAt: new Date().toISOString(),
+                            updatedAt: new Date().toISOString(),
+                            providerId: next.providerId,
+                            protocol: provider.protocol,
+                            model: next.model,
+                            endpointFingerprint: provider.baseUrl,
+                            selectedText: aiConversationText,
+                            messages,
+                          });
+                        setAiQuestion('');
+                      } catch (error) {
+                        setAiError(errorMessage(error));
+                      } finally {
+                        setAiBusy(false);
+                      }
+                    }}
+                  >
+                    发送追问
+                  </button>
+                </>
+              )}
+            </div>
+            {!aiResult && (
+              <div className="ai-empty-composer">
+                <textarea
+                  aria-label="AI 问题"
+                  value={aiQuestion}
+                  onChange={(event) => setAiQuestion(event.target.value)}
+                  placeholder="输入问题…"
+                />
+                <span>请先选择日志</span>
+              </div>
+            )}
           </div>
         ),
         aiWorkspaceHost,

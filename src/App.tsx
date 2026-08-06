@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { api, isTauri } from './api';
 import { whenStartupInteractive } from './startup';
@@ -132,7 +132,9 @@ export function App() {
   );
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [aiOpen, setAiOpen] = useState(false);
+  const [mainWorkspaceWidth, setMainWorkspaceWidth] = useState<number | null>(null);
   const [aiWorkspaceHost, setAiWorkspaceHost] = useState<HTMLDivElement | null>(null);
+  const aiWindowTransition = useRef(false);
   const [uiTemplate, setUiTemplate] = useState(() => loadUiTemplate(localStorage));
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [fileSearchMounted, setFileSearchMounted] = useState(false);
@@ -1221,8 +1223,38 @@ export function App() {
 
   const hasDirs = tree.length > 0;
 
+  const openAiWorkspace = useCallback(async () => {
+    if (aiOpen || aiWindowTransition.current) return;
+    aiWindowTransition.current = true;
+    const widthBeforeOpen = window.innerWidth;
+    try {
+      await api.setAiWindowOpen(true);
+      setMainWorkspaceWidth(widthBeforeOpen);
+      setAiOpen(true);
+    } finally {
+      aiWindowTransition.current = false;
+    }
+  }, [aiOpen]);
+
+  const closeAiWorkspace = useCallback(async () => {
+    if (!aiOpen || aiWindowTransition.current) return;
+    aiWindowTransition.current = true;
+    try {
+      await api.setAiWindowOpen(false);
+      setAiOpen(false);
+      setMainWorkspaceWidth(null);
+    } finally {
+      aiWindowTransition.current = false;
+    }
+  }, [aiOpen]);
+
+  const appStyle =
+    aiOpen && mainWorkspaceWidth !== null
+      ? ({ '--main-workspace-width': `${mainWorkspaceWidth}px` } as CSSProperties)
+      : undefined;
+
   return (
-    <div className={'app' + (aiOpen ? ' with-ai' : '')}>
+    <div className={'app' + (aiOpen ? ' with-ai' : '')} style={appStyle}>
       <TopBar
         onOpenSearch={openFileSearch}
         searchOpen={fileSearchOpen}
@@ -1233,7 +1265,7 @@ export function App() {
         onUiTemplateChange={changeUiTemplate}
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
-        onOpenAi={() => { const next = !aiOpen; void api.setAiWindowOpen(next).then(() => setAiOpen(next)); }}
+        onOpenAi={() => void (aiOpen ? closeAiWorkspace() : openAiWorkspace())}
         count={count}
         newItems={newItems}
         onOpenItem={(item) => void revealNewItem(item)}
@@ -1405,10 +1437,8 @@ export function App() {
                   activeKey={null}
                   aiOpen={aiOpen}
                   aiWorkspaceHost={aiWorkspaceHost}
-                  onAiOpen={() => setAiOpen(true)}
-                  onAiClose={() => {
-                    void api.setAiWindowOpen(false).then(() => setAiOpen(false));
-                  }}
+                  onAiOpen={openAiWorkspace}
+                  onAiClose={closeAiWorkspace}
                 />
               ) : (
                 tabIds(tabLayout).map((id) => {
@@ -1427,10 +1457,8 @@ export function App() {
                         error={tab.error}
                         aiOpen={aiOpen && activeKey === id}
                         aiWorkspaceHost={aiWorkspaceHost}
-                        onAiOpen={() => setAiOpen(true)}
-                        onAiClose={() => {
-                          void api.setAiWindowOpen(false).then(() => setAiOpen(false));
-                        }}
+                        onAiOpen={openAiWorkspace}
+                        onAiClose={closeAiWorkspace}
                       />
                     </div>
                   );
@@ -1443,11 +1471,7 @@ export function App() {
         )}
       </div>
       {aiOpen && (
-        <div
-          id="ai-workspace-host"
-          className="ai-workspace-host"
-          ref={setAiWorkspaceHost}
-        />
+        <div id="ai-workspace-host" className="ai-workspace-host" ref={setAiWorkspaceHost} />
       )}
     </div>
   );
