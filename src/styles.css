@@ -3889,7 +3889,7 @@ body.resizing {
 :root:is([data-ui-template='aurora'], [data-ui-template='amber'], [data-ui-template='verdant'])
   :where(
     .topbar .search,
-    .settings-button,
+    .settings-button:not(.primary):not(.danger),
     .file-search-settings-actions button,
     .file-search-welcome-actions button
   ) {

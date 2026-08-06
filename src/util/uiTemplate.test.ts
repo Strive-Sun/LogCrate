@@ -90,6 +90,17 @@ describe('界面模板偏好', () => {
     assert.match(globalRules, /\.empty-state \.cta/);
     assert.match(globalRules, /data-ui-template='verdant'/);
 
+    const controlBackground = globalRules.indexOf('background: var(--ui-template-control)');
+    const controlRuleStart = globalRules.lastIndexOf(':root:is(', controlBackground);
+    const controlRule = globalRules.slice(controlRuleStart, controlBackground);
+    assert.notEqual(controlBackground, -1);
+    assert.notEqual(controlRuleStart, -1);
+    assert.match(controlRule, /\.settings-button:not\(\.primary\):not\(\.danger\)/);
+    assert.match(
+      css,
+      /\.settings-button\.danger\s*\{[^}]*background:\s*#c93636;[^}]*color:\s*#fff;/s,
+    );
+
     const templateRules = css.slice(css.indexOf('/* ===== 极光 / 琥珀全局组件材质 ===== */'));
     assert.doesNotMatch(templateRules, /--log-font-size|--log-gutter-width/);
     assert.doesNotMatch(templateRules, /font-family:\s*var\(--log-font\)/);
