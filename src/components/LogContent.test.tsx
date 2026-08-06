@@ -198,7 +198,20 @@ test('AI analysis result opens in a closable drawer body', async () => {
   api.analyzeAiLog = async () => ({
     providerId: 'test-provider',
     model: 'test-model',
-    content: 'Synthetic analysis result',
+    content: [
+      'A concise overview.',
+      '',
+      '## 1. Synthetic event',
+      '',
+      '**日志**',
+      '```text',
+      'ERROR synthetic failure',
+      '```',
+      '**说明**',
+      'Synthetic analysis result',
+      '',
+      '- Evidence-based conclusion',
+    ].join('\n'),
   });
   api.selectAiAttachmentPaths = async () => ['D:\\logs\\context.log'];
   api.inspectAiAttachments = async (_selectedText, attachmentPaths) =>
@@ -248,6 +261,13 @@ test('AI analysis result opens in a closable drawer body', async () => {
     harness.screen.getByText('Synthetic analysis result').textContent,
     'Synthetic analysis result',
   );
+  assert.equal(harness.screen.getByRole('heading', { name: '1. Synthetic event' }).tagName, 'H2');
+  assert.equal(
+    drawer.querySelector('.ai-markdown-code code')?.textContent,
+    'ERROR synthetic failure',
+  );
+  assert.ok(harness.screen.getByRole('button', { name: '复制代码' }));
+  assert.equal(harness.screen.getByText('Evidence-based conclusion').closest('li')?.tagName, 'LI');
   assert.equal(harness.screen.queryByText('发送追问'), null);
   assert.ok(harness.screen.getByRole('button', { name: '添加补充日志文件' }).querySelector('svg'));
   assert.ok(harness.screen.getByRole('button', { name: '发送追问' }).querySelector('svg'));

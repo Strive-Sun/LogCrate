@@ -30,6 +30,7 @@ import {
 import { LogFieldFilterBar } from './LogFieldFilterBar';
 import { LogRow } from './LogRow';
 import { ContextMenu } from './ContextMenu';
+import { AiMessageContent } from './AiMessageContent';
 import { useI18n } from '../i18n/I18nProvider';
 
 interface Props {
@@ -1326,7 +1327,13 @@ export function LogContent({
                           {message.role === 'user' ? '你' : 'AI'}
                         </div>
                         <div className="ai-chat-bubble">
-                          <div className="ai-chat-bubble-content">{message.content}</div>
+                          <div className="ai-chat-bubble-content">
+                            {message.role === 'assistant' ? (
+                              <AiMessageContent content={message.content} />
+                            ) : (
+                              message.content
+                            )}
+                          </div>
                           {message.attachments && message.attachments.length > 0 && (
                             <div className="ai-chat-attachments">
                               {message.attachments.map((attachment) => (

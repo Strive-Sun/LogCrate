@@ -54,6 +54,27 @@ const MAX_AI_ATTACHMENTS: usize = 5;
 const MAX_AI_ATTACHMENT_BYTES: usize = 256 * 1024;
 const SESSION_ID_HEADER: &str = "session-id";
 const THREAD_ID_HEADER: &str = "thread-id";
+const INITIAL_ANALYSIS_INSTRUCTIONS: &str = r#"你是面向日志排查用户的分析助手。请输出简洁、有效的中文 Markdown，不要把 Markdown 标记包在外层代码块中。
+
+先用不超过 3 句话概括日志来源、运行环境和整体结论。随后严格按原日志出现顺序，将有实际含义的日志合并为事件段逐段解析；重复或同类日志必须合并并标注次数，不要逐行复述。
+
+每个事件段固定使用以下结构：
+## N. 事件名称
+**日志**
+```text
+仅引用支撑判断的代表性原始日志
+```
+**说明**
+用 1 至 3 句话说明这段日志表示什么，以及它与前后事件的关系。
+**流程**（只有能从日志直接推导时才写）
+```text
+步骤 A → 步骤 B → 步骤 C
+```
+**结论**
+用一句话标明“正常”“异常”或“无法确定”，异常时只写有日志证据的原因。
+
+只有存在真实警告、错误或风险时，最后增加“## 需要关注”，最多列 3 项，并给出可执行的下一步。不要机械输出“主要信息/警告/错误/可能原因/建议”五个大章节，不要重复相同结论，不要堆砌背景知识。不得臆造日志中不存在的调用链、时间、状态或根因；证据不足时明确写“无法从当前日志确定”。"#;
+const FOLLOW_UP_INSTRUCTIONS: &str = r#"你是日志分析助手。请基于原始日志、补充日志和已有对话准确回答用户追问。使用简洁的中文 Markdown；优先引用相关日志代码块并直接给出结论。除非用户要求重新分析，否则不要重复完整报告，不要扩写无关背景，也不得臆造日志中不存在的事实。"#;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -848,8 +869,14 @@ pub async fn analyze_ai_log(
     if api_key.is_empty() {
         return Err("AI provider API key is not configured".to_string());
     }
-    let system_prompt = "你是日志分析助手。请基于用户提供的日志，使用清晰的中文分段说明：1. 日志包含的主要信息；2. 警告；3. 错误；4. 可能原因；5. 建议。不要臆造日志中不存在的事实，对无法确定的内容明确标注不确定性。";
-    let body = send_ai_request(&provider, &api_key, system_prompt, &selected_text, 60).await?;
+    let body = send_ai_request(
+        &provider,
+        &api_key,
+        INITIAL_ANALYSIS_INSTRUCTIONS,
+        &selected_text,
+        60,
+    )
+    .await?;
     let content = analysis_content(provider.protocol, &body)
         .ok_or_else(|| "AI provider returned no analysis content".to_string())?;
     Ok(AiAnalysisResult {
@@ -917,14 +944,7 @@ pub async fn continue_ai_conversation(
     } else {
         format!("原始日志：\n{selected_text}\n\n补充日志：\n{supplemental}\n\n已有对话：\n{context}\n\n用户追问：\n{question}")
     };
-    let body = send_ai_request(
-        &provider,
-        &api_key,
-        "你是日志分析助手，请基于原始日志和已有对话准确回答用户追问。",
-        &input,
-        60,
-    )
-    .await?;
+    let body = send_ai_request(&provider, &api_key, FOLLOW_UP_INSTRUCTIONS, &input, 60).await?;
     let content = analysis_content(provider.protocol, &body)
         .ok_or_else(|| "AI provider returned no analysis content".to_string())?;
     if let Some(record) = stored_history.as_mut() {
@@ -1031,6 +1051,15 @@ mod tests {
         assert!(validate_analysis_text("ERROR something").is_ok());
         assert!(validate_analysis_text(" \n\t ").is_err());
         assert!(validate_analysis_text(&"x".repeat(MAX_ANALYSIS_CHARS + 1)).is_err());
+    }
+
+    #[test]
+    fn analysis_prompts_require_concise_event_sections_and_markdown() {
+        assert!(INITIAL_ANALYSIS_INSTRUCTIONS.contains("按原日志出现顺序"));
+        assert!(INITIAL_ANALYSIS_INSTRUCTIONS.contains("## N. 事件名称"));
+        assert!(INITIAL_ANALYSIS_INSTRUCTIONS.contains("重复或同类日志必须合并"));
+        assert!(INITIAL_ANALYSIS_INSTRUCTIONS.contains("不超过 3 句话"));
+        assert!(FOLLOW_UP_INSTRUCTIONS.contains("不要重复完整报告"));
     }
 
     #[test]
