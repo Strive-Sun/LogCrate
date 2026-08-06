@@ -1422,7 +1422,7 @@ impl FileSearchManager {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     fn operation_snapshot_for_report(&self) -> Option<IndexOperationSnapshot> {
         self.operation_snapshot.lock().unwrap().clone()
     }
