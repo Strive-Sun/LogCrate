@@ -85,7 +85,9 @@ export function TopBar(props: Props) {
       </span>
       <span className="spacer" />
 
-      <button className="top-ai-button" onClick={() => props.onOpenAi?.()} title="打开 AI 对话">AI</button>
+      <button className="top-ai-button" onClick={() => props.onOpenAi?.()} title="打开 AI 对话">
+        AI
+      </button>
 
       <button className="icon-btn" onClick={props.onToggleTheme} title={t('top.toggleTheme')}>
         {props.theme === 'dark' ? '🌙' : '☀️'}
