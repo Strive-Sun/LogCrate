@@ -50,6 +50,9 @@ pub enum AiEndpointMode {
 }
 
 const MAX_ANALYSIS_CHARS: usize = 120_000;
+const MAX_HISTORY_MESSAGES: usize = 12;
+const MAX_HISTORY_CHARS: usize = 48_000;
+const MAX_QUESTION_CHARS: usize = 4_000;
 const MAX_AI_ATTACHMENTS: usize = 5;
 const MAX_AI_ATTACHMENT_BYTES: usize = 256 * 1024;
 const SESSION_ID_HEADER: &str = "session-id";
@@ -377,10 +380,8 @@ fn history_attachments(
 }
 
 fn conversation_context(messages: &[crate::ai_history::AiHistoryMessage]) -> String {
-    let mut recent = messages.iter().rev().take(12).collect::<Vec<_>>();
-    recent.reverse();
-    recent
-        .into_iter()
+    messages
+        .iter()
         .map(|message| {
             let attachments = message
                 .attachments
@@ -401,6 +402,43 @@ fn conversation_context(messages: &[crate::ai_history::AiHistoryMessage]) -> Str
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn validate_conversation_history(
+    messages: &[crate::ai_history::AiHistoryMessage],
+) -> Result<(), String> {
+    if messages.len() > MAX_HISTORY_MESSAGES {
+        return Err(format!("追问历史超过 {MAX_HISTORY_MESSAGES} 条消息限制"));
+    }
+    let mut content_chars = 0usize;
+    for message in messages {
+        if !matches!(message.role.as_str(), "user" | "assistant") {
+            return Err("追问历史包含不允许的角色".into());
+        }
+        content_chars = content_chars.saturating_add(message.content.chars().count());
+        if content_chars > MAX_HISTORY_CHARS {
+            return Err(format!(
+                "追问历史正文合计超过 {MAX_HISTORY_CHARS} 个字符限制"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn recent_stored_history(
+    messages: &[crate::ai_history::AiHistoryMessage],
+) -> &[crate::ai_history::AiHistoryMessage] {
+    &messages[messages.len().saturating_sub(MAX_HISTORY_MESSAGES)..]
+}
+
+fn validate_follow_up_question(question: &str) -> Result<(), String> {
+    if question.trim().is_empty() {
+        return Err("请输入追问内容".into());
+    }
+    if question.chars().count() > MAX_QUESTION_CHARS {
+        return Err(format!("追问内容超过 {MAX_QUESTION_CHARS} 个字符限制"));
+    }
+    Ok(())
 }
 
 fn provider_protocol_label(protocol: AiProtocol) -> &'static str {
@@ -492,6 +530,37 @@ fn ai_request_builder(
         .header(reqwest::header::ACCEPT, "text/event-stream")
 }
 
+fn ai_request_body(
+    provider: &StoredAiProvider,
+    instructions: &str,
+    input: &str,
+) -> serde_json::Value {
+    match provider.protocol {
+        AiProtocol::ChatCompletions => serde_json::to_value(ChatRequest {
+            model: &provider.model,
+            temperature: 0.1,
+            messages: [
+                ChatMessage {
+                    role: "system",
+                    content: instructions,
+                },
+                ChatMessage {
+                    role: "user",
+                    content: input,
+                },
+            ],
+        }),
+        AiProtocol::Responses => serde_json::to_value(ResponsesRequest {
+            model: &provider.model,
+            instructions,
+            input,
+            store: false,
+            stream: true,
+        }),
+    }
+    .expect("AI request payload is serializable")
+}
+
 async fn send_ai_request(
     provider: &StoredAiProvider,
     api_key: &str,
@@ -504,40 +573,11 @@ async fn send_ai_request(
         .build()
         .map_err(|_| "Unable to create the AI request client".to_string())?;
     let request = ai_request_builder(&client, provider, api_key);
-    let response = match provider.protocol {
-        AiProtocol::ChatCompletions => {
-            request
-                .json(&ChatRequest {
-                    model: &provider.model,
-                    temperature: 0.1,
-                    messages: [
-                        ChatMessage {
-                            role: "system",
-                            content: instructions,
-                        },
-                        ChatMessage {
-                            role: "user",
-                            content: input,
-                        },
-                    ],
-                })
-                .send()
-                .await
-        }
-        AiProtocol::Responses => {
-            request
-                .json(&ResponsesRequest {
-                    model: &provider.model,
-                    instructions,
-                    input,
-                    store: false,
-                    stream: true,
-                })
-                .send()
-                .await
-        }
-    }
-    .map_err(|_| "AI provider request failed".to_string())?;
+    let response = request
+        .json(&ai_request_body(provider, instructions, input))
+        .send()
+        .await
+        .map_err(|_| "AI provider request failed".to_string())?;
     let status = response.status();
     let content_type = response
         .headers()
@@ -910,18 +950,12 @@ pub async fn continue_ai_conversation(
     history_update: Option<AiHistoryUpdate>,
 ) -> Result<AiAnalysisResult, String> {
     validate_analysis_text(&selected_text)?;
-    if question.trim().is_empty() {
-        return Err("请输入追问内容".into());
-    }
-    if question.chars().count() > 4_000 {
-        return Err("追问内容超过 4000 个字符限制".into());
-    }
+    validate_follow_up_question(&question)?;
+    validate_conversation_history(&history)?;
     let provider = read_stored_providers(&app)?
         .into_iter()
         .find(|p| p.id == provider_id)
         .ok_or_else(|| "AI provider was not found".to_string())?;
-    let api_key = read_api_key(&provider.id)
-        .map_err(|_| "Unable to access the API key in the system credential store".to_string())?;
     let mut stored_history = history_update
         .as_ref()
         .map(|update| update.id.as_str())
@@ -929,14 +963,17 @@ pub async fn continue_ai_conversation(
         .transpose()?;
     if let Some(record) = stored_history.as_ref() {
         validate_history_target(record, &provider)?;
+        validate_conversation_history(recent_stored_history(&record.messages))?;
     }
     let attachments = load_ai_attachments_async(selected_text.clone(), attachment_paths).await?;
-    if let Some(record) = stored_history.as_ref() {
-        validate_accumulated_attachment_chars(&selected_text, &record.messages, &attachments)?;
-    }
+    let attachment_history = stored_history
+        .as_ref()
+        .map(|record| record.messages.as_slice())
+        .unwrap_or(&history);
+    validate_accumulated_attachment_chars(&selected_text, attachment_history, &attachments)?;
     let context = stored_history
         .as_ref()
-        .map(|record| conversation_context(&record.messages))
+        .map(|record| conversation_context(recent_stored_history(&record.messages)))
         .unwrap_or_else(|| conversation_context(&history));
     let supplemental = attachment_context(&attachments);
     let input = if supplemental.is_empty() {
@@ -944,6 +981,8 @@ pub async fn continue_ai_conversation(
     } else {
         format!("原始日志：\n{selected_text}\n\n补充日志：\n{supplemental}\n\n已有对话：\n{context}\n\n用户追问：\n{question}")
     };
+    let api_key = read_api_key(&provider.id)
+        .map_err(|_| "Unable to access the API key in the system credential store".to_string())?;
     let body = send_ai_request(&provider, &api_key, FOLLOW_UP_INSTRUCTIONS, &input, 60).await?;
     let content = analysis_content(provider.protocol, &body)
         .ok_or_else(|| "AI provider returned no analysis content".to_string())?;
@@ -1158,9 +1197,108 @@ mod tests {
     }
 
     #[test]
+    fn follow_up_history_accepts_only_bounded_user_and_assistant_messages() {
+        let valid = vec![
+            crate::ai_history::AiHistoryMessage {
+                role: "user".into(),
+                content: "x".repeat(MAX_HISTORY_CHARS - 1),
+                attachments: Vec::new(),
+            },
+            crate::ai_history::AiHistoryMessage {
+                role: "assistant".into(),
+                content: "好".into(),
+                attachments: Vec::new(),
+            },
+        ];
+        assert!(validate_conversation_history(&valid).is_ok());
+
+        for role in ["system", "developer", "tool", "unknown"] {
+            let mut invalid = valid.clone();
+            invalid[0].role = role.into();
+            let error = validate_conversation_history(&invalid).unwrap_err();
+            assert!(error.contains("不允许的角色"));
+        }
+
+        let too_many = (0..=MAX_HISTORY_MESSAGES)
+            .map(|index| crate::ai_history::AiHistoryMessage {
+                role: if index % 2 == 0 { "user" } else { "assistant" }.into(),
+                content: "bounded".into(),
+                attachments: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        assert!(validate_conversation_history(&too_many)
+            .unwrap_err()
+            .contains("超过 12 条"));
+
+        let too_long = vec![crate::ai_history::AiHistoryMessage {
+            role: "user".into(),
+            content: "界".repeat(MAX_HISTORY_CHARS + 1),
+            attachments: Vec::new(),
+        }];
+        assert!(validate_conversation_history(&too_long)
+            .unwrap_err()
+            .contains("超过 48000 个字符"));
+    }
+
+    #[test]
+    fn follow_up_question_and_stored_history_boundaries_reject_without_silent_truncation() {
+        assert!(validate_follow_up_question("问题").is_ok());
+        assert!(validate_follow_up_question(&"问".repeat(MAX_QUESTION_CHARS)).is_ok());
+        assert!(validate_follow_up_question("  ").is_err());
+        assert!(validate_follow_up_question(&"问".repeat(MAX_QUESTION_CHARS + 1)).is_err());
+
+        let messages = (0..14)
+            .map(|index| crate::ai_history::AiHistoryMessage {
+                role: if index % 2 == 0 { "user" } else { "assistant" }.into(),
+                content: index.to_string(),
+                attachments: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let recent = recent_stored_history(&messages);
+        assert_eq!(recent.len(), MAX_HISTORY_MESSAGES);
+        assert_eq!(
+            recent.first().map(|message| message.content.as_str()),
+            Some("2")
+        );
+        assert!(validate_conversation_history(recent).is_ok());
+    }
+
+    #[test]
+    fn both_protocol_payloads_use_the_same_validated_follow_up_context() {
+        let messages = vec![crate::ai_history::AiHistoryMessage {
+            role: "user".into(),
+            content: "数据库为何超时？".into(),
+            attachments: Vec::new(),
+        }];
+        validate_conversation_history(&messages).unwrap();
+        let input = format!(
+            "原始日志：\nERROR timeout\n\n已有对话：\n{}\n\n用户追问：\n下一步？",
+            conversation_context(&messages)
+        );
+
+        let chat = ai_request_body(
+            &stored(AiProtocol::ChatCompletions, AiEndpointMode::Base),
+            FOLLOW_UP_INSTRUCTIONS,
+            &input,
+        );
+        assert_eq!(chat["messages"][0]["role"], "system");
+        assert_eq!(chat["messages"][1]["role"], "user");
+        assert_eq!(chat["messages"][1]["content"], input);
+
+        let responses = ai_request_body(
+            &stored(AiProtocol::Responses, AiEndpointMode::Base),
+            FOLLOW_UP_INSTRUCTIONS,
+            &input,
+        );
+        assert_eq!(responses["instructions"], FOLLOW_UP_INSTRUCTIONS);
+        assert_eq!(responses["input"], input);
+        assert_eq!(responses["store"], false);
+    }
+
+    #[test]
     fn restored_history_requires_the_same_provider_target() {
         let provider = stored(AiProtocol::ChatCompletions, AiEndpointMode::Base);
-        let mut record = crate::ai_history::AiHistoryRecord {
+        let record = crate::ai_history::AiHistoryRecord {
             id: "history".into(),
             title: "title".into(),
             created_at: "created".into(),
@@ -1173,8 +1311,19 @@ mod tests {
             messages: Vec::new(),
         };
         assert!(validate_history_target(&record, &provider).is_ok());
-        record.endpoint_fingerprint = "https://changed.example/v1".into();
-        assert!(validate_history_target(&record, &provider).is_err());
+        for changed in ["provider", "protocol", "model", "endpoint"] {
+            let mut changed_record = record.clone();
+            match changed {
+                "provider" => changed_record.provider_id = "different".into(),
+                "protocol" => changed_record.protocol = "responses".into(),
+                "model" => changed_record.model = "different-model".into(),
+                "endpoint" => {
+                    changed_record.endpoint_fingerprint = "https://changed.example/v1".into()
+                }
+                _ => unreachable!(),
+            }
+            assert!(validate_history_target(&changed_record, &provider).is_err());
+        }
     }
 
     #[test]

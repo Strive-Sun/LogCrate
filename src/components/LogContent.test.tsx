@@ -424,6 +424,7 @@ test('AI workspace has no independent window entry, capability, event, or backen
   assert.equal(existsSync(new URL('AiConversationWindow.tsx', import.meta.url)), false);
   assert.doesNotMatch(mainSource, /AiConversationWindow|ai-conversation/);
   assert.doesNotMatch(logSource, /emitTo\(|ai-conversation/);
+  assert.match(logSource, /conversationBeforeSend\.slice\(-12\)/);
   assert.doesNotMatch(tauriAdapter, /toggleAiWindow|toggle_ai_window/);
   assert.doesNotMatch(tauriMock, /toggleAiWindow/);
   assert.doesNotMatch(backend, /ai-conversation|toggle_ai_window|synchronize_ai_windows/);

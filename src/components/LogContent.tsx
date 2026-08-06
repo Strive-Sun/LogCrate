@@ -937,7 +937,7 @@ export function LogContent({
       const next = await api.continueAiConversation(
         provider.id,
         aiConversationText,
-        conversationBeforeSend,
+        conversationBeforeSend.slice(-12),
         question,
         attachments.map((attachment) => attachment.path),
         aiHistoryId ?? undefined,
