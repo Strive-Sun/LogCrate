@@ -1366,7 +1366,9 @@ export function LogContent({
                       disabled={aiBusy}
                       onClick={() => void addAiAttachments()}
                     >
-                      +
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M12 5v14M5 12h14" />
+                      </svg>
                     </button>
                     <textarea
                       rows={1}
@@ -1393,7 +1395,9 @@ export function LogContent({
                       disabled={aiBusy || !aiQuestion.trim()}
                       onClick={() => void sendAiFollowUp()}
                     >
-                      ↑
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M12 19V5M6.5 10.5 12 5l5.5 5.5" />
+                      </svg>
                     </button>
                   </div>
                 </div>

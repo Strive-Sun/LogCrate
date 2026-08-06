@@ -236,8 +236,8 @@ test('AI analysis result opens in a closable drawer body', async () => {
     'Synthetic analysis result',
   );
   assert.equal(harness.screen.queryByText('发送追问'), null);
-  assert.ok(harness.screen.getByRole('button', { name: '添加补充日志文件' }));
-  assert.ok(harness.screen.getByRole('button', { name: '发送追问' }));
+  assert.ok(harness.screen.getByRole('button', { name: '添加补充日志文件' }).querySelector('svg'));
+  assert.ok(harness.screen.getByRole('button', { name: '发送追问' }).querySelector('svg'));
   assert.match(
     harness.screen.getByRole('textbox', { name: '继续追问' }).getAttribute('placeholder') ?? '',
     /日志错误、时间线、调用链或根因/,
@@ -308,6 +308,8 @@ test('AI workspace fills a root-level right column with an independently scrolli
   const composerRowRule = css.match(/\.ai-composer-row\s*\{([^}]*)\}/)?.[1] ?? '';
   const composerButtonRule =
     css.match(/\.ai-composer-add,\s*\.ai-composer-send\s*\{([^}]*)\}/)?.[1] ?? '';
+  const composerIconRule =
+    css.match(/\.ai-composer-add > svg,\s*\.ai-composer-send > svg\s*\{([^}]*)\}/)?.[1] ?? '';
   const composerSendRules = [...css.matchAll(/\.ai-composer-send\s*\{([^}]*)\}/g)];
   const composerSendRule = composerSendRules.at(-1)?.[1] ?? '';
 
@@ -342,6 +344,10 @@ test('AI workspace fills a root-level right column with an independently scrolli
   assert.match(historyDeleteRule, /align-self:\s*center;/);
   assert.match(composerRowRule, /grid-template-columns:\s*34px minmax\(0, 1fr\) 34px;/);
   assert.match(composerButtonRule, /border-radius:\s*50%;/);
+  assert.match(composerButtonRule, /place-items:\s*center;/);
+  assert.match(composerIconRule, /display:\s*block;/);
+  assert.match(composerIconRule, /width:\s*19px;/);
+  assert.match(composerIconRule, /height:\s*19px;/);
   assert.match(composerSendRule, /background:\s*#111827;/);
 
   const captureWidth = appSource.indexOf('const widthBeforeOpen = window.innerWidth;');

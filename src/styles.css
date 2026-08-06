@@ -3141,12 +3141,21 @@ body.resizing {
   border-radius: 50%;
   cursor: pointer;
 }
+.ai-composer-add > svg,
+.ai-composer-send > svg {
+  display: block;
+  width: 19px;
+  height: 19px;
+  overflow: visible;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 .ai-composer-add {
   background: #f3f4f6;
   color: #374151;
-  font-size: 24px;
-  font-weight: 300;
-  line-height: 1;
 }
 .ai-composer-add:hover:not(:disabled) {
   background: #e5e7eb;
@@ -3154,8 +3163,6 @@ body.resizing {
 .ai-composer-send {
   background: #111827;
   color: #fff;
-  font-size: 20px;
-  line-height: 1;
 }
 .ai-composer-send:hover:not(:disabled) {
   background: #000;
