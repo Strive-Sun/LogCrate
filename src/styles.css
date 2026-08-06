@@ -3027,25 +3027,142 @@ body.resizing {
   white-space: nowrap;
   padding-bottom: 10px;
 }
-.ai-result-body > textarea {
-  width: 100%;
-  min-height: 54px;
-  resize: none;
+.ai-composer-shell {
+  flex: 0 0 auto;
+  padding: 10px 14px 12px;
+  border-top: 1px solid #e5e7eb;
+  background: #fff;
+}
+.ai-composer {
+  overflow: hidden;
   border: 1px solid #d1d5db;
-  border-radius: 14px;
-  padding: 10px 12px;
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: 0 4px 14px rgb(15 23 42 / 8%);
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+.ai-composer:focus-within {
+  border-color: #94a3b8;
+  box-shadow:
+    0 0 0 2px rgb(16 163 127 / 10%),
+    0 4px 14px rgb(15 23 42 / 8%);
+}
+.ai-composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 9px 10px 0;
+}
+.ai-attachment-chip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  gap: 5px;
+  padding: 4px 5px 4px 8px;
+  border: 1px solid #dbe4ea;
+  border-radius: 999px;
+  background: #f3f6f8;
+  color: #334155;
+  font-size: 11px;
+}
+.ai-attachment-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-attachment-chip small {
+  color: #64748b;
+  font-size: 9px;
+  white-space: nowrap;
+}
+.ai-attachment-chip button {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+}
+.ai-attachment-chip button:hover {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+.ai-composer-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 34px;
+  align-items: end;
+  gap: 7px;
+  padding: 7px;
+}
+.ai-composer-row > textarea {
+  align-self: center;
+  width: 100%;
+  min-height: 34px;
+  max-height: 112px;
+  field-sizing: content;
+  overflow-y: auto;
+  resize: none;
+  padding: 7px 2px 5px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #1f2937;
   font: inherit;
+  line-height: 1.45;
   box-sizing: border-box;
 }
-.ai-result-body > button {
-  float: right;
-  margin-top: 6px;
+.ai-composer-row > textarea::placeholder {
+  color: #9ca3af;
+}
+.ai-composer-add,
+.ai-composer-send {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  place-items: center;
   border: 0;
-  border-radius: 999px;
-  background: #10a37f;
-  color: white;
-  padding: 6px 14px;
+  border-radius: 50%;
   cursor: pointer;
+}
+.ai-composer-add {
+  background: #f3f4f6;
+  color: #374151;
+  font-size: 24px;
+  font-weight: 300;
+  line-height: 1;
+}
+.ai-composer-add:hover:not(:disabled) {
+  background: #e5e7eb;
+}
+.ai-composer-send {
+  background: #111827;
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+}
+.ai-composer-send:hover:not(:disabled) {
+  background: #000;
+}
+.ai-composer-add:disabled,
+.ai-composer-send:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+.ai-composer-note {
+  padding: 6px 4px 0;
+  color: #9ca3af;
+  font-size: 9px;
+  line-height: 1.35;
+  text-align: center;
 }
 .ai-result-content {
   overflow-wrap: anywhere;

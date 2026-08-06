@@ -14,6 +14,7 @@ import type {
   LogLine,
   LogSearchMatch,
   AiAnalysisResult,
+  AiAttachmentSummary,
   OpenSessionResult,
 } from '../api';
 import { fmtNum, fmtSize } from '../util/format';
@@ -238,6 +239,7 @@ export function LogContent({
   );
   const [aiConversationText, setAiConversationText] = useState('');
   const [aiQuestion, setAiQuestion] = useState('');
+  const [aiAttachments, setAiAttachments] = useState<AiAttachmentSummary[]>([]);
   const [aiHistoryId, setAiHistoryId] = useState<string | null>(null);
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
 
@@ -252,6 +254,7 @@ export function LogContent({
   const [fieldEncodingVersion, setFieldEncodingVersion] = useState(0);
   const fieldUnsub = useRef<() => void>(() => {});
   const fieldRequestGeneration = useRef(0);
+  const aiSendingRef = useRef(false);
   const fieldAnchor = useRef(1);
   const fieldRestoreAnchor = useRef<number | null>(null);
   const fieldUserInteracted = useRef(false);
@@ -309,6 +312,7 @@ export function LogContent({
           { role: 'assistant', content: result.content },
         ]);
         setAiConversationText(selectedText);
+        setAiAttachments([]);
         const now = new Date().toISOString();
         const historyId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         setAiHistoryId(historyId);
@@ -893,6 +897,72 @@ export function LogContent({
     await rebuildForEncoding(activeKey, encoding);
   }
 
+  async function addAiAttachments() {
+    try {
+      const selectedPaths = await api.selectAiAttachmentPaths();
+      if (!selectedPaths.length) return;
+      const summaries = await api.inspectAiAttachments(aiConversationText, [
+        ...aiAttachments.map((attachment) => attachment.path),
+        ...selectedPaths,
+      ]);
+      setAiAttachments(summaries);
+      setAiError(null);
+    } catch (error) {
+      setAiError(errorMessage(error));
+    }
+  }
+
+  async function sendAiFollowUp() {
+    if (!aiResult || aiBusy || aiSendingRef.current || !aiQuestion.trim()) return;
+    const providers = await api.listAiProviders();
+    const provider = providers.find((item) => item.id === aiResult.providerId) ?? providers[0];
+    if (!provider) return;
+    aiSendingRef.current = true;
+    setAiBusy(true);
+    setAiError(null);
+    try {
+      const question = aiQuestion;
+      const attachments = aiAttachments;
+      const next = await api.continueAiConversation(
+        provider.id,
+        aiConversationText,
+        aiConversation,
+        question,
+        attachments.map((attachment) => attachment.path),
+      );
+      const visibleQuestion = attachments.length
+        ? `${question}\n\n附件：${attachments.map((attachment) => attachment.name).join('、')}`
+        : question;
+      const messages = [
+        ...aiConversation,
+        { role: 'user' as const, content: visibleQuestion },
+        { role: 'assistant' as const, content: next.content },
+      ];
+      setAiResult(next);
+      setAiConversation(messages);
+      if (aiHistoryId)
+        await api.saveAiHistory({
+          id: aiHistoryId,
+          title: aiConversationText.split(/\r?\n/)[0].slice(0, 80) || 'AI 日志分析',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          providerId: next.providerId,
+          protocol: provider.protocol,
+          model: next.model,
+          endpointFingerprint: provider.baseUrl,
+          selectedText: aiConversationText,
+          messages,
+        });
+      setAiQuestion('');
+      setAiAttachments([]);
+    } catch (error) {
+      setAiError(errorMessage(error));
+    } finally {
+      aiSendingRef.current = false;
+      setAiBusy(false);
+    }
+  }
+
   if (!session && !activeKey) {
     return (
       <div className="col log-content-panel">
@@ -1146,6 +1216,8 @@ export function LogContent({
                 onClick={() => {
                   setAiResult(null);
                   setAiError(null);
+                  setAiQuestion('');
+                  setAiAttachments([]);
                   setAiPanelOpen(false);
                   void (onAiClose ? onAiClose() : api.setAiWindowOpen(false));
                 }}
@@ -1191,6 +1263,8 @@ export function LogContent({
                             });
                           setAiConversation(record.messages);
                           setAiConversationText(record.selectedText);
+                          setAiQuestion('');
+                          setAiAttachments([]);
                           setAiHistoryId(record.id);
                           setAiHistoryOpen(false);
                         }}
@@ -1247,62 +1321,78 @@ export function LogContent({
                       </div>
                     ))}
                   </div>
-                  <textarea
-                    aria-label="继续追问"
-                    value={aiQuestion}
-                    onChange={(event) => setAiQuestion(event.target.value)}
-                    placeholder="继续追问…"
-                  />
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      const providers = await api.listAiProviders();
-                      const provider =
-                        providers.find((item) => item.id === aiResult.providerId) ?? providers[0];
-                      if (!provider || !aiQuestion.trim()) return;
-                      setAiBusy(true);
-                      try {
-                        const question = aiQuestion;
-                        const next = await api.continueAiConversation(
-                          provider.id,
-                          aiConversationText,
-                          aiConversation,
-                          question,
-                        );
-                        const messages = [
-                          ...aiConversation,
-                          { role: 'user' as const, content: question },
-                          { role: 'assistant' as const, content: next.content },
-                        ];
-                        setAiResult(next);
-                        setAiConversation(messages);
-                        if (aiHistoryId)
-                          await api.saveAiHistory({
-                            id: aiHistoryId,
-                            title:
-                              aiConversationText.split(/\r?\n/)[0].slice(0, 80) || 'AI 日志分析',
-                            createdAt: new Date().toISOString(),
-                            updatedAt: new Date().toISOString(),
-                            providerId: next.providerId,
-                            protocol: provider.protocol,
-                            model: next.model,
-                            endpointFingerprint: provider.baseUrl,
-                            selectedText: aiConversationText,
-                            messages,
-                          });
-                        setAiQuestion('');
-                      } catch (error) {
-                        setAiError(errorMessage(error));
-                      } finally {
-                        setAiBusy(false);
-                      }
-                    }}
-                  >
-                    发送追问
-                  </button>
                 </>
               )}
             </div>
+            {aiResult && (
+              <div className="ai-composer-shell">
+                <div className="ai-composer">
+                  {aiAttachments.length > 0 && (
+                    <div className="ai-composer-attachments" aria-label="待发送附件">
+                      {aiAttachments.map((attachment) => (
+                        <span key={attachment.path} className="ai-attachment-chip">
+                          <span title={attachment.name}>{attachment.name}</span>
+                          <small>{fmtNum(attachment.charCount)} 字符</small>
+                          <button
+                            type="button"
+                            aria-label={`移除附件 ${attachment.name}`}
+                            onClick={() =>
+                              setAiAttachments((items) =>
+                                items.filter((item) => item.path !== attachment.path),
+                              )
+                            }
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="ai-composer-row">
+                    <button
+                      type="button"
+                      className="ai-composer-add"
+                      aria-label="添加补充日志文件"
+                      title="添加补充日志文件"
+                      disabled={aiBusy}
+                      onClick={() => void addAiAttachments()}
+                    >
+                      +
+                    </button>
+                    <textarea
+                      rows={1}
+                      aria-label="继续追问"
+                      value={aiQuestion}
+                      onInput={(event) => setAiQuestion(event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (
+                          event.key !== 'Enter' ||
+                          event.shiftKey ||
+                          event.nativeEvent.isComposing
+                        )
+                          return;
+                        event.preventDefault();
+                        void sendAiFollowUp();
+                      }}
+                      placeholder="询问日志错误、时间线、调用链或根因…"
+                    />
+                    <button
+                      type="button"
+                      className="ai-composer-send"
+                      aria-label="发送追问"
+                      title="发送追问"
+                      disabled={aiBusy || !aiQuestion.trim()}
+                      onClick={() => void sendAiFollowUp()}
+                    >
+                      ↑
+                    </button>
+                  </div>
+                </div>
+                <div className="ai-composer-note">
+                  附件与追问仅在发送时传给当前供应商；Shift+Enter 换行
+                </div>
+              </div>
+            )}
             {!aiResult && (
               <div className="ai-empty-composer">
                 <textarea

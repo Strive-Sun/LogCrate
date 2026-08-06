@@ -26,6 +26,9 @@ const originalLocateLogFieldAnchor = api.locateLogFieldAnchor;
 const originalClearLogFieldFilter = api.clearLogFieldFilter;
 const originalListAiProviders = api.listAiProviders;
 const originalAnalyzeAiLog = api.analyzeAiLog;
+const originalSelectAiAttachmentPaths = api.selectAiAttachmentPaths;
+const originalInspectAiAttachments = api.inspectAiAttachments;
+const originalContinueAiConversation = api.continueAiConversation;
 const originalPrompt = dom.window.prompt;
 const originalConfirm = dom.window.confirm;
 const originalGetSelection = dom.window.getSelection;
@@ -78,6 +81,9 @@ afterEach(() => {
   api.clearLogFieldFilter = originalClearLogFieldFilter;
   api.listAiProviders = originalListAiProviders;
   api.analyzeAiLog = originalAnalyzeAiLog;
+  api.selectAiAttachmentPaths = originalSelectAiAttachmentPaths;
+  api.inspectAiAttachments = originalInspectAiAttachments;
+  api.continueAiConversation = originalContinueAiConversation;
   dom.window.prompt = originalPrompt;
   dom.window.confirm = originalConfirm;
   dom.window.getSelection = originalGetSelection;
@@ -168,6 +174,7 @@ test('Ctrl+F opens the active log find dialog with the required defaults and opt
 
 test('AI analysis result opens in a closable drawer body', async () => {
   let aiWorkspaceOpened = false;
+  const followUps: Array<{ question: string; attachmentPaths: string[] }> = [];
   dom.window.getSelection = () =>
     ({
       toString: () => 'ERROR synthetic failure',
@@ -190,6 +197,23 @@ test('AI analysis result opens in a closable drawer body', async () => {
     model: 'test-model',
     content: 'Synthetic analysis result',
   });
+  api.selectAiAttachmentPaths = async () => ['D:\\logs\\context.log'];
+  api.inspectAiAttachments = async (_selectedText, attachmentPaths) =>
+    attachmentPaths.map((path) => ({ path, name: 'context.log', charCount: 42 }));
+  api.continueAiConversation = async (
+    _providerId,
+    _selectedText,
+    _history,
+    question,
+    attachmentPaths,
+  ) => {
+    followUps.push({ question, attachmentPaths: attachmentPaths ?? [] });
+    return {
+      providerId: 'test-provider',
+      model: 'test-model',
+      content: `Follow-up response: ${question}`,
+    };
+  };
 
   const { container } = renderLog({
     onAiOpen: async () => {
@@ -211,6 +235,48 @@ test('AI analysis result opens in a closable drawer body', async () => {
     harness.screen.getByText('Synthetic analysis result').textContent,
     'Synthetic analysis result',
   );
+  assert.equal(harness.screen.queryByText('发送追问'), null);
+  assert.ok(harness.screen.getByRole('button', { name: '添加补充日志文件' }));
+  assert.ok(harness.screen.getByRole('button', { name: '发送追问' }));
+  assert.match(
+    harness.screen.getByRole('textbox', { name: '继续追问' }).getAttribute('placeholder') ?? '',
+    /日志错误、时间线、调用链或根因/,
+  );
+
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '添加补充日志文件' }));
+  assert.equal((await harness.screen.findByText('context.log')).textContent, 'context.log');
+  assert.equal(harness.screen.getByText('42 字符').textContent, '42 字符');
+
+  const followUpInput = harness.screen.getByRole('textbox', { name: '继续追问' });
+  harness.fireEvent.input(followUpInput, { target: { value: 'Compare both logs' } });
+  await harness.waitFor(() =>
+    assert.equal((followUpInput as HTMLTextAreaElement).value, 'Compare both logs'),
+  );
+  harness.fireEvent.keyDown(followUpInput, { key: 'Enter', shiftKey: true });
+  harness.fireEvent.keyDown(followUpInput, { key: 'Enter', isComposing: true });
+  assert.deepEqual(followUps, []);
+
+  harness.fireEvent.keyDown(followUpInput, { key: 'Enter' });
+  assert.equal(
+    (await harness.screen.findByText('Follow-up response: Compare both logs')).textContent,
+    'Follow-up response: Compare both logs',
+  );
+  assert.deepEqual(followUps, [
+    { question: 'Compare both logs', attachmentPaths: ['D:\\logs\\context.log'] },
+  ]);
+  assert.equal((followUpInput as HTMLTextAreaElement).value, '');
+  assert.equal(harness.screen.queryByText('42 字符'), null);
+
+  harness.fireEvent.input(followUpInput, { target: { value: 'Summarize the root cause' } });
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '发送追问' }));
+  assert.equal(
+    (await harness.screen.findByText('Follow-up response: Summarize the root cause')).textContent,
+    'Follow-up response: Summarize the root cause',
+  );
+  assert.deepEqual(followUps[1], {
+    question: 'Summarize the root cause',
+    attachmentPaths: [],
+  });
 
   harness.fireEvent.click(harness.screen.getByRole('button', { name: '关闭 AI 日志分析' }));
   assert.equal(harness.screen.queryByRole('dialog', { name: 'AI 日志分析' }), null);
@@ -237,6 +303,11 @@ test('AI workspace fills a root-level right column with an independently scrolli
   const historyMainRule = css.match(/\.ai-history-main\s*\{([^}]*)\}/)?.[1] ?? '';
   const historyTitleRule = css.match(/\.ai-history-title\s*\{([^}]*)\}/)?.[1] ?? '';
   const historyDeleteRule = css.match(/\.ai-history-delete\s*\{([^}]*)\}/)?.[1] ?? '';
+  const composerRowRule = css.match(/\.ai-composer-row\s*\{([^}]*)\}/)?.[1] ?? '';
+  const composerButtonRule =
+    css.match(/\.ai-composer-add,\s*\.ai-composer-send\s*\{([^}]*)\}/)?.[1] ?? '';
+  const composerSendRules = [...css.matchAll(/\.ai-composer-send\s*\{([^}]*)\}/g)];
+  const composerSendRule = composerSendRules.at(-1)?.[1] ?? '';
 
   assert.match(appRule, /display:\s*grid;/);
   assert.match(appRule, /grid-template-rows:\s*40px minmax\(0, 1fr\);/);
@@ -267,6 +338,9 @@ test('AI workspace fills a root-level right column with an independently scrolli
   assert.match(historyMainRule, /min-width:\s*0;/);
   assert.match(historyTitleRule, /-webkit-line-clamp:\s*2;/);
   assert.match(historyDeleteRule, /align-self:\s*center;/);
+  assert.match(composerRowRule, /grid-template-columns:\s*34px minmax\(0, 1fr\) 34px;/);
+  assert.match(composerButtonRule, /border-radius:\s*50%;/);
+  assert.match(composerSendRule, /background:\s*#111827;/);
 
   const captureWidth = appSource.indexOf('const widthBeforeOpen = window.innerWidth;');
   const expandWindow = appSource.indexOf('await api.setAiWindowOpen(true);', captureWidth);

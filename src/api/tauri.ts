@@ -152,6 +152,15 @@ export const tauriApi = {
   async analyzeAiLog(providerId: string, selectedText: string): Promise<AiAnalysisResult> {
     return invoke('analyze_ai_log', { providerId, selectedText });
   },
+  async selectAiAttachmentPaths(): Promise<string[]> {
+    const selected = await openDialog({
+      title: '选择补充日志文件',
+      directory: false,
+      multiple: true,
+    });
+    if (!selected) return [];
+    return Array.isArray(selected) ? selected : [selected];
+  },
   async inspectAiAttachments(
     selectedText: string,
     attachmentPaths: string[],

@@ -306,6 +306,9 @@ export const mockApi = {
       content: `主要信息：选中的日志共 ${selectedText.length} 个字符。\n\n警告：请结合上下文进一步确认。\n\n错误：未发现可由 mock 确认的错误。\n\n建议：检查 ERROR/WARN 行及其前后文。`,
     };
   },
+  async selectAiAttachmentPaths(): Promise<string[]> {
+    return [];
+  },
   async inspectAiAttachments(
     selectedText: string,
     attachmentPaths: string[],
