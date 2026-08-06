@@ -202,13 +202,59 @@ fn decrypt_records(
     serde_json::from_slice(&plain).map_err(|_| "AI 历史记录内容无效".to_string())
 }
 
+fn encrypt_records_with_key<F>(
+    records: &[AiHistoryRecord],
+    nonce: &[u8; 12],
+    key_provider: F,
+) -> Result<Vec<u8>, String>
+where
+    F: FnOnce() -> Result<[u8; 32], String>,
+{
+    let encryption_key = key_provider()?;
+    encrypt_records(records, &encryption_key, nonce)
+}
+
+fn decrypt_records_with_key<F>(
+    bytes: &[u8],
+    key_provider: F,
+) -> Result<Vec<AiHistoryRecord>, String>
+where
+    F: FnOnce() -> Result<[u8; 32], String>,
+{
+    let encryption_key = key_provider()?;
+    decrypt_records(bytes, &encryption_key)
+}
+
+fn upsert_record(
+    records: &mut Vec<AiHistoryRecord>,
+    record: AiHistoryRecord,
+) -> Result<(), String> {
+    if let Some(existing) = records.iter_mut().find(|item| item.id == record.id) {
+        *existing = record;
+        return Ok(());
+    }
+    if records.len() >= MAX_RECORDS {
+        return Err("AI 历史记录已达到 100 条上限，请先删除旧记录".into());
+    }
+    records.insert(0, record);
+    Ok(())
+}
+
+fn delete_record(records: &mut Vec<AiHistoryRecord>, id: &str) {
+    records.retain(|record| record.id != id);
+}
+
+fn clear_records(records: &mut Vec<AiHistoryRecord>) {
+    records.clear();
+}
+
 fn read(app: &AppHandle) -> Result<Vec<AiHistoryRecord>, String> {
     let file = path(app)?;
     if !file.exists() {
         return Ok(Vec::new());
     }
     let bytes = fs::read(file).map_err(|_| "无法读取 AI 历史记录".to_string())?;
-    decrypt_records(&bytes, &key()?)
+    decrypt_records_with_key(&bytes, key)
 }
 
 fn write(app: &AppHandle, records: &[AiHistoryRecord]) -> Result<(), String> {
@@ -217,7 +263,7 @@ fn write(app: &AppHandle, records: &[AiHistoryRecord]) -> Result<(), String> {
     }
     let mut nonce = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce);
-    let bytes = encrypt_records(records, &key()?, &nonce)?;
+    let bytes = encrypt_records_with_key(records, &nonce, key)?;
     let file = path(app)?;
     if let Some(parent) = file.parent() {
         fs::create_dir_all(parent).map_err(|_| "无法创建历史记录目录".to_string())?;
@@ -237,11 +283,7 @@ pub(crate) fn save_ai_history_record(
     record: AiHistoryRecord,
 ) -> Result<(), String> {
     let mut records = read(app)?;
-    if let Some(existing) = records.iter_mut().find(|item| item.id == record.id) {
-        *existing = record;
-    } else {
-        records.insert(0, record);
-    }
+    upsert_record(&mut records, record)?;
     write(app, &records)
 }
 
@@ -272,16 +314,16 @@ pub fn save_ai_history(app: AppHandle, record: AiHistoryRecord) -> Result<(), St
 
 #[tauri::command]
 pub fn delete_ai_history(app: AppHandle, id: String) -> Result<(), String> {
-    let records = read(&app)?
-        .into_iter()
-        .filter(|record| record.id != id)
-        .collect::<Vec<_>>();
+    let mut records = read(&app)?;
+    delete_record(&mut records, &id);
     write(&app, &records)
 }
 
 #[tauri::command]
 pub fn clear_ai_history(app: AppHandle) -> Result<(), String> {
-    write(&app, &[])
+    let mut records = Vec::new();
+    clear_records(&mut records);
+    write(&app, &records)
 }
 
 #[cfg(test)]
@@ -347,5 +389,99 @@ mod tests {
         assert!(serialized.contains("context.log"));
         assert!(serialized.contains("charCount"));
         assert!(!serialized.contains("attachment secret payload"));
+    }
+
+    #[test]
+    fn history_capacity_allows_one_hundred_updates_and_rejects_new_records_beyond_it() {
+        let template = record_with_attachment();
+        let mut records = (0..MAX_RECORDS)
+            .map(|index| {
+                let mut record = template.clone();
+                record.id = format!("history-{index}");
+                record
+            })
+            .collect::<Vec<_>>();
+
+        let mut existing = template.clone();
+        existing.id = "history-42".into();
+        existing.title = "updated".into();
+        upsert_record(&mut records, existing).expect("existing records remain updatable");
+        assert_eq!(records.len(), MAX_RECORDS);
+        assert_eq!(records[42].title, "updated");
+
+        let mut overflow = template;
+        overflow.id = "history-overflow".into();
+        assert!(upsert_record(&mut records, overflow)
+            .unwrap_err()
+            .contains("100 条上限"));
+        assert_eq!(records.len(), MAX_RECORDS);
+        assert!(!records.iter().any(|record| record.id == "history-overflow"));
+    }
+
+    #[test]
+    fn history_delete_and_clear_mutations_remove_only_the_requested_records() {
+        let template = record_with_attachment();
+        let mut records = ["first", "second", "third"]
+            .into_iter()
+            .map(|id| {
+                let mut record = template.clone();
+                record.id = id.into();
+                record
+            })
+            .collect::<Vec<_>>();
+
+        delete_record(&mut records, "second");
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "third"]
+        );
+        delete_record(&mut records, "missing");
+        assert_eq!(records.len(), 2);
+
+        clear_records(&mut records);
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn key_provider_failures_never_produce_or_restore_plaintext_history() {
+        let records = vec![record_with_attachment()];
+        let nonce = [3u8; 12];
+        let key_error = || Err("系统密钥链不可用".to_string());
+        assert_eq!(
+            encrypt_records_with_key(&records, &nonce, key_error).unwrap_err(),
+            "系统密钥链不可用"
+        );
+
+        let encrypted =
+            encrypt_records_with_key(&records, &nonce, || Ok([4u8; 32])).expect("encrypt");
+        assert!(!String::from_utf8_lossy(&encrypted).contains("original secret log"));
+        assert_eq!(
+            decrypt_records_with_key(&encrypted, || Err("无法读取系统密钥链".into())).unwrap_err(),
+            "无法读取系统密钥链"
+        );
+    }
+
+    #[test]
+    fn damaged_or_wrong_key_ciphertext_fails_authentication_without_plaintext_fallback() {
+        let records = vec![record_with_attachment()];
+        let encryption_key = [5u8; 32];
+        let mut envelope: Envelope = serde_json::from_slice(
+            &encrypt_records(&records, &encryption_key, &[6u8; 12]).expect("encrypt"),
+        )
+        .expect("envelope");
+        envelope.ciphertext[0] ^= 0x80;
+        let damaged = serde_json::to_vec(&envelope).expect("damaged envelope");
+
+        assert!(decrypt_records(&damaged, &encryption_key)
+            .unwrap_err()
+            .contains("解密失败"));
+        let intact = encrypt_records(&records, &encryption_key, &[7u8; 12]).expect("encrypt");
+        assert!(decrypt_records(&intact, &[8u8; 32])
+            .unwrap_err()
+            .contains("解密失败"));
+        assert!(!String::from_utf8_lossy(&damaged).contains("attachment secret payload"));
     }
 }
