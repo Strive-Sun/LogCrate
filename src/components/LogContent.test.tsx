@@ -379,10 +379,13 @@ test('AI workspace waits for its root host without flashing over the log panel',
 
 test('empty AI workspace omits the branded icon and title', () => {
   const { container } = renderLog({ aiOpen: true });
+  const drawer = harness.screen.getByRole('dialog', { name: 'AI 日志分析' });
 
   assert.equal(container.querySelector('.ai-empty-icon'), null);
   assert.equal(harness.screen.queryByText('LogCrate AI'), null);
   assert.ok(harness.screen.getByText('选中日志后使用右键“AI 分析”，或从历史对话中继续。'));
+  assert.equal(harness.within(drawer).queryByRole('textbox'), null);
+  assert.ok(harness.within(drawer).getByText(/请先选中日志内容.*建立对话后按 Enter 发送/));
 });
 
 test('find action forwards all options and Escape closes the lightweight dialog', async () => {

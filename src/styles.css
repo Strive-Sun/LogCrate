@@ -3027,29 +3027,13 @@ body.resizing {
   font-size: 13px;
 }
 .ai-empty-composer {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-  padding: 10px 14px 14px;
+  padding: 13px 18px;
   border-top: 1px solid #e5e7eb;
   background: #fff;
-}
-.ai-empty-composer textarea {
-  flex: 1;
-  min-height: 42px;
-  max-height: 110px;
-  resize: vertical;
-  border: 1px solid #d1d5db;
-  border-radius: 14px;
-  padding: 10px 12px;
-  font: inherit;
-  box-sizing: border-box;
-}
-.ai-empty-composer span {
-  color: #9ca3af;
-  font-size: 11px;
-  white-space: nowrap;
-  padding-bottom: 10px;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
 }
 .ai-composer-shell {
   flex: 0 0 auto;

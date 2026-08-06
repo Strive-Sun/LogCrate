@@ -1403,14 +1403,8 @@ export function LogContent({
               </div>
             )}
             {!aiResult && (
-              <div className="ai-empty-composer">
-                <textarea
-                  aria-label="AI 问题"
-                  value={aiQuestion}
-                  onChange={(event) => setAiQuestion(event.target.value)}
-                  placeholder="输入问题…"
-                />
-                <span>请先选择日志</span>
+              <div className="ai-empty-composer" role="status">
+                请先选中日志内容并右键“AI 分析”，或打开历史记录；建立对话后按 Enter 发送
               </div>
             )}
           </div>
