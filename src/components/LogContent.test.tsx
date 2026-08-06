@@ -231,6 +231,14 @@ test('AI analysis drawer is fixed to the full right edge with an independently s
   assert.match(bodyRule, /overflow:\s*auto;/);
 });
 
+test('empty AI workspace omits the branded icon and title', () => {
+  const { container } = renderLog({ aiOpen: true });
+
+  assert.equal(container.querySelector('.ai-empty-icon'), null);
+  assert.equal(harness.screen.queryByText('LogCrate AI'), null);
+  assert.ok(harness.screen.getByText('选中日志后使用右键“AI 分析”，或从历史对话中继续。'));
+});
+
 test('find action forwards all options and Escape closes the lightweight dialog', async () => {
   let captured: LogSearchRequest | null = null;
   api.searchLog = async (_entryKey, request) => {

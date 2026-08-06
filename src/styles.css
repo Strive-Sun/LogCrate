@@ -2804,8 +2804,6 @@ body.resizing {
 .ai-chat-message.user .ai-chat-bubble { background: #e8f3ef; border-bottom-right-radius: 5px; }
 .ai-chat-message.assistant .ai-chat-bubble { border-bottom-left-radius: 5px; }
 .ai-empty-state { margin: auto; max-width: 280px; text-align: center; color: #6b7280; }
-.ai-empty-icon { width: 46px; height: 46px; margin: 0 auto 12px; display: grid; place-items: center; border-radius: 14px; background: #10a37f; color: #fff; font-weight: 700; }
-.ai-empty-state h3 { margin: 0 0 8px; color: #202123; }
 .ai-empty-state p { margin: 0; line-height: 1.6; font-size: 13px; }
 .ai-empty-composer { display: flex; align-items: flex-end; gap: 8px; padding: 10px 14px 14px; border-top: 1px solid #e5e7eb; background: #fff; }
 .ai-empty-composer textarea { flex: 1; min-height: 42px; max-height: 110px; resize: vertical; border: 1px solid #d1d5db; border-radius: 14px; padding: 10px 12px; font: inherit; box-sizing: border-box; }

@@ -1108,7 +1108,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
           <div className="ai-result-body">
             {aiBusy && <div className="settings-hint">分析中，请稍候…</div>}
             {aiError && <div className="update-message error">{aiError}</div>}
-            {!aiResult && !aiBusy && !aiError && <div className="ai-empty-state"><div className="ai-empty-icon">AI</div><h3>LogCrate AI</h3><p>选中日志后使用右键“AI 分析”，或从历史对话中继续。</p></div>}
+            {!aiResult && !aiBusy && !aiError && <div className="ai-empty-state"><p>选中日志后使用右键“AI 分析”，或从历史对话中继续。</p></div>}
             {aiResult && (
               <>
                 <div className="settings-hint">
