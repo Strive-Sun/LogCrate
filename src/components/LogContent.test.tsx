@@ -200,6 +200,7 @@ test('AI analysis result opens in a closable drawer body', async () => {
   const drawer = await harness.screen.findByRole('dialog', { name: 'AI 日志分析' });
   assert.ok(drawer.classList.contains('ai-result-pop'));
   assert.ok(drawer.querySelector('.ai-result-body'));
+  assert.ok(harness.screen.getByRole('button', { name: '历史记录' }));
   assert.equal(
     harness.screen.getByText('Synthetic analysis result').textContent,
     'Synthetic analysis result',
@@ -212,6 +213,9 @@ test('AI analysis result opens in a closable drawer body', async () => {
 test('AI analysis drawer is fixed to the full right edge with an independently scrolling body', () => {
   const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
   const drawerRule = css.match(/\.ai-result-pop\s*\{([^}]*)\}/)?.[1] ?? '';
+  const headerRule = css.match(/\.ai-result-pop \.pop-head\s*\{([^}]*)\}/)?.[1] ?? '';
+  const historyRule =
+    css.match(/\.ai-result-pop \.pop-head > button:first-child\s*\{([^}]*)\}/)?.[1] ?? '';
   const bodyRule = css.match(/\.ai-result-body\s*\{([^}]*)\}/)?.[1] ?? '';
 
   assert.match(drawerRule, /top:\s*0;/);
@@ -219,6 +223,10 @@ test('AI analysis drawer is fixed to the full right edge with an independently s
   assert.match(drawerRule, /bottom:\s*0;/);
   assert.match(drawerRule, /width:\s*min\(440px, calc\(100vw - 16px\)\);/);
   assert.match(drawerRule, /overflow:\s*hidden;/);
+  assert.match(headerRule, /display:\s*grid;/);
+  assert.match(headerRule, /grid-template-columns:\s*1fr auto 1fr;/);
+  assert.match(historyRule, /font-size:\s*12px;/);
+  assert.match(historyRule, /font-weight:\s*400;/);
   assert.match(bodyRule, /min-height:\s*0;/);
   assert.match(bodyRule, /overflow:\s*auto;/);
 });

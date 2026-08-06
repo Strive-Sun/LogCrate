@@ -1077,7 +1077,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
       {(aiOpen || aiPanelOpen || aiBusy || aiError || aiResult) && (
         <div className="ai-result-pop" role="dialog" aria-label="AI 日志分析">
           <div className="pop-head">
-            <button type="button" className="settings-close" onClick={async () => { setAiHistory(await api.listAiHistory()); setAiHistoryOpen((open) => !open); }}>历史</button>
+            <button type="button" className="settings-close" onClick={async () => { setAiHistory(await api.listAiHistory()); setAiHistoryOpen((open) => !open); }}>历史记录</button>
             <span>AI 日志分析</span>
             <button
               type="button"

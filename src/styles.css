@@ -2779,15 +2779,16 @@ body.resizing {
 .ai-result-pop .pop-head {
   flex: 0 0 auto;
   min-height: 42px;
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
   padding: 0 10px;
   border-bottom: 1px solid #e5e7eb;
   background: #fff;
 }
-.ai-result-pop .pop-head > button:first-child { min-width: 82px; white-space: nowrap; padding: 5px 6px; color: #374151; font-weight: 600; }
-.ai-result-pop .pop-head > span { min-width: 0; flex: 1; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ai-result-pop .pop-head > button:first-child { justify-self: start; white-space: nowrap; padding: 5px 6px; color: #374151; font-size: 12px; font-weight: 400; }
+.ai-result-pop .pop-head > span { min-width: 0; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ai-result-pop .pop-head > button:last-child { justify-self: end; }
 .ai-result-body {
   flex: 1 1 auto;
   min-height: 0;
