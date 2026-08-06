@@ -2786,7 +2786,7 @@ body.resizing {
   border-bottom: 1px solid #e5e7eb;
   background: #fff;
 }
-.ai-result-pop .pop-head > button:first-child { justify-self: start; white-space: nowrap; padding: 5px 6px; color: #374151; font-size: 12px; font-weight: 400; }
+.ai-result-pop .pop-head > button:first-child { width: auto; justify-self: start; white-space: nowrap; padding: 5px 6px; color: #374151; font-size: 12px; font-weight: 400; }
 .ai-result-pop .pop-head > span { min-width: 0; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ai-result-pop .pop-head > button:last-child { justify-self: end; }
 .ai-result-body {

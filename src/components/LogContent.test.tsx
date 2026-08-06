@@ -225,6 +225,7 @@ test('AI analysis drawer is fixed to the full right edge with an independently s
   assert.match(drawerRule, /overflow:\s*hidden;/);
   assert.match(headerRule, /display:\s*grid;/);
   assert.match(headerRule, /grid-template-columns:\s*1fr auto 1fr;/);
+  assert.match(historyRule, /width:\s*auto;/);
   assert.match(historyRule, /font-size:\s*12px;/);
   assert.match(historyRule, /font-weight:\s*400;/);
   assert.match(bodyRule, /min-height:\s*0;/);
