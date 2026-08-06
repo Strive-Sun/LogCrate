@@ -1298,7 +1298,7 @@ mod tests {
 
     #[test]
     fn chromium_metadata_after_level_does_not_pollute_level_candidates() {
-        let lines = vec![
+        let lines = [
             "[0722/135413.464:INFO 0 bvclive_api.cc:31 bvclive_live_open] input".to_string(),
             "[0722/135413.465:ERROR 0 encoder.cc:86 Open] failed".to_string(),
             "[0722/135413.466:ERROR 0 stats_reporter.cc:59 StatsReporter] failed".to_string(),
