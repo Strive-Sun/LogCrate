@@ -5,6 +5,7 @@
 
 #![allow(dead_code)] // Provider commands consume this module in the next task.
 
+use futures_util::StreamExt;
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -12,6 +13,7 @@ use std::{
     fs::File,
     io::Read,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager};
 
@@ -55,8 +57,108 @@ const MAX_HISTORY_CHARS: usize = 48_000;
 const MAX_QUESTION_CHARS: usize = 4_000;
 const MAX_AI_ATTACHMENTS: usize = 5;
 const MAX_AI_ATTACHMENT_BYTES: usize = 256 * 1024;
+const MAX_AI_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const SESSION_ID_HEADER: &str = "session-id";
 const THREAD_ID_HEADER: &str = "thread-id";
+
+#[derive(Debug, Clone, Copy)]
+struct AiRequestPolicy {
+    connect_timeout: Duration,
+    stream_idle_timeout: Duration,
+    total_timeout: Duration,
+    max_response_bytes: usize,
+}
+
+impl AiRequestPolicy {
+    fn analysis() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(10),
+            stream_idle_timeout: Duration::from_secs(30),
+            total_timeout: Duration::from_secs(120),
+            max_response_bytes: MAX_AI_RESPONSE_BYTES,
+        }
+    }
+
+    fn provider_test() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(5),
+            stream_idle_timeout: Duration::from_secs(5),
+            total_timeout: Duration::from_secs(10),
+            max_response_bytes: MAX_AI_RESPONSE_BYTES,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AiRequestFailureCode {
+    ConnectTimeout,
+    StreamIdleTimeout,
+    TotalTimeout,
+    Transport,
+    Http,
+    InvalidResponse,
+    ResponseTooLarge,
+    ChannelClosed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AiRequestStage {
+    Connect,
+    AwaitingResponse,
+    ResponseStream,
+    Parse,
+    FrontendHandoff,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiRequestFailure {
+    code: AiRequestFailureCode,
+    stage: AiRequestStage,
+    elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    http_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body_bytes: Option<usize>,
+}
+
+impl std::fmt::Display for AiRequestFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "AI request failed: {:?} during {:?} after {} ms",
+            self.code, self.stage, self.elapsed_ms
+        )?;
+        if let Some(status) = self.http_status {
+            write!(formatter, "; HTTP {status}")?;
+        }
+        if let Some(content_type) = self.content_type.as_deref() {
+            write!(formatter, "; Content-Type: {content_type}")?;
+        }
+        if let Some(bytes) = self.body_bytes {
+            write!(formatter, "; body: {bytes} bytes")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AiResponseTiming {
+    response_headers_ms: u64,
+    first_content_ms: Option<u64>,
+    stream_receive_ms: u64,
+    total_ms: u64,
+}
+
+#[derive(Debug)]
+struct AiRequestOutcome {
+    body: serde_json::Value,
+    timing: AiResponseTiming,
+}
 const INITIAL_ANALYSIS_INSTRUCTIONS: &str = r#"你是面向日志排查用户的分析助手。请输出简洁、有效的中文 Markdown，不要把 Markdown 标记包在外层代码块中。
 
 先用不超过 3 句话概括日志来源、运行环境和整体结论。随后严格按原日志出现顺序，将有实际含义的日志合并为事件段逐段解析；重复或同类日志必须合并并标注次数，不要逐行复述。
@@ -561,46 +663,415 @@ fn ai_request_body(
     .expect("AI request payload is serializable")
 }
 
-async fn send_ai_request(
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn sanitized_content_type(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_graphic() || *character == ' ')
+        .take(128)
+        .collect()
+}
+
+fn transport_failure_kind(
+    is_timeout: bool,
+    is_connect: bool,
+) -> (AiRequestFailureCode, AiRequestStage) {
+    if is_timeout {
+        return (
+            AiRequestFailureCode::ConnectTimeout,
+            AiRequestStage::Connect,
+        );
+    }
+    if is_connect {
+        return (AiRequestFailureCode::Transport, AiRequestStage::Connect);
+    }
+    (
+        AiRequestFailureCode::Transport,
+        AiRequestStage::AwaitingResponse,
+    )
+}
+
+fn request_failure(
+    code: AiRequestFailureCode,
+    stage: AiRequestStage,
+    started: Instant,
+) -> AiRequestFailure {
+    AiRequestFailure {
+        code,
+        stage,
+        elapsed_ms: duration_ms(started.elapsed()),
+        http_status: None,
+        content_type: None,
+        body_bytes: None,
+    }
+}
+
+#[derive(Debug, Default)]
+struct SseDecoder {
+    pending_line: Vec<u8>,
+    event_data: Vec<String>,
+    content: String,
+    fallback_content: Option<String>,
+    completed: bool,
+}
+
+impl SseDecoder {
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, ()> {
+        self.pending_line.extend_from_slice(chunk);
+        let mut consumed = 0;
+        let mut deltas = Vec::new();
+        while let Some(line_end) = self.pending_line[consumed..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|position| consumed + position)
+        {
+            let mut line = &self.pending_line[consumed..line_end];
+            if line.last() == Some(&b'\r') {
+                line = &line[..line.len() - 1];
+            }
+            let owned_line = line.to_vec();
+            self.process_line(&owned_line, &mut deltas)?;
+            consumed = line_end + 1;
+        }
+        if consumed > 0 {
+            self.pending_line.drain(..consumed);
+        }
+        Ok(deltas)
+    }
+
+    fn finish(mut self) -> Result<(serde_json::Value, Vec<String>), ()> {
+        let mut deltas = Vec::new();
+        if !self.pending_line.is_empty() {
+            let mut line = std::mem::take(&mut self.pending_line);
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            self.process_line(&line, &mut deltas)?;
+        }
+        self.dispatch_event(&mut deltas)?;
+        if !self.completed {
+            return Err(());
+        }
+        let content = if self.content.trim().is_empty() {
+            self.fallback_content.unwrap_or_default()
+        } else {
+            self.content
+        };
+        if content.trim().is_empty() {
+            return Err(());
+        }
+        Ok((serde_json::json!({"output_text": content}), deltas))
+    }
+
+    fn process_line(&mut self, line: &[u8], deltas: &mut Vec<String>) -> Result<(), ()> {
+        if line.is_empty() {
+            return self.dispatch_event(deltas);
+        }
+        if line.first() == Some(&b':') {
+            return Ok(());
+        }
+        let line = std::str::from_utf8(line).map_err(|_| ())?;
+        let Some(data) = line.strip_prefix("data:") else {
+            return Ok(());
+        };
+        self.event_data
+            .push(data.strip_prefix(' ').unwrap_or(data).to_string());
+        Ok(())
+    }
+
+    fn dispatch_event(&mut self, deltas: &mut Vec<String>) -> Result<(), ()> {
+        if self.event_data.is_empty() {
+            return Ok(());
+        }
+        let data = std::mem::take(&mut self.event_data).join("\n");
+        if data.trim().is_empty() {
+            return Ok(());
+        }
+        if data.trim() == "[DONE]" {
+            self.completed = true;
+            return Ok(());
+        }
+        let event = serde_json::from_str::<serde_json::Value>(&data).map_err(|_| ())?;
+        if event.get("type").and_then(serde_json::Value::as_str) == Some("response.completed") {
+            self.completed = true;
+        }
+        if let Some(delta) = stream_delta_text(&event) {
+            self.content.push_str(&delta);
+            deltas.push(delta);
+        } else if let Some(content) = response_content(AiProtocol::Responses, &event)
+            .or_else(|| response_content(AiProtocol::ChatCompletions, &event))
+        {
+            self.fallback_content = Some(content);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+enum AiBodyReceiver {
+    Probe(Vec<u8>),
+    Sse(SseDecoder),
+    Buffered(Vec<u8>),
+}
+
+impl AiBodyReceiver {
+    fn new(explicit_sse: bool) -> Self {
+        if explicit_sse {
+            Self::Sse(SseDecoder::default())
+        } else {
+            Self::Probe(Vec::new())
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, ()> {
+        match self {
+            Self::Sse(decoder) => decoder.push(chunk),
+            Self::Buffered(buffer) => {
+                buffer.extend_from_slice(chunk);
+                Ok(Vec::new())
+            }
+            Self::Probe(buffer) => {
+                buffer.extend_from_slice(chunk);
+                let Some(is_sse) = probe_sse_prefix(buffer) else {
+                    return Ok(Vec::new());
+                };
+                let buffered = std::mem::take(buffer);
+                if is_sse {
+                    let mut decoder = SseDecoder::default();
+                    let deltas = decoder.push(&buffered)?;
+                    *self = Self::Sse(decoder);
+                    Ok(deltas)
+                } else {
+                    *self = Self::Buffered(buffered);
+                    Ok(Vec::new())
+                }
+            }
+        }
+    }
+
+    fn accumulated_content_bytes(&self) -> usize {
+        match self {
+            Self::Sse(decoder) => decoder.content.len(),
+            Self::Probe(_) | Self::Buffered(_) => 0,
+        }
+    }
+
+    fn finish(self) -> Result<(serde_json::Value, Vec<String>), ()> {
+        match self {
+            Self::Sse(decoder) => decoder.finish(),
+            Self::Buffered(buffer) | Self::Probe(buffer) => {
+                let body = String::from_utf8(buffer).map_err(|_| ())?;
+                parse_ai_response(&body)
+                    .map(|body| (body, Vec::new()))
+                    .ok_or(())
+            }
+        }
+    }
+}
+
+fn probe_sse_prefix(buffer: &[u8]) -> Option<bool> {
+    let trimmed = buffer
+        .iter()
+        .copied()
+        .skip_while(u8::is_ascii_whitespace)
+        .collect::<Vec<_>>();
+    if trimmed.is_empty() {
+        return None;
+    }
+    const PREFIXES: [&[u8]; 5] = [b"data:", b"event:", b"id:", b"retry:", b":"];
+    if PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix)) {
+        return Some(true);
+    }
+    if PREFIXES.iter().any(|prefix| prefix.starts_with(&trimmed)) {
+        return None;
+    }
+    Some(false)
+}
+
+async fn send_ai_request<F>(
     provider: &StoredAiProvider,
     api_key: &str,
     instructions: &str,
     input: &str,
-    timeout_seconds: u64,
-) -> Result<serde_json::Value, String> {
+    policy: AiRequestPolicy,
+    mut on_delta: F,
+) -> Result<AiRequestOutcome, AiRequestFailure>
+where
+    F: FnMut(&str) -> Result<(), ()>,
+{
+    let started = Instant::now();
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_seconds))
+        .connect_timeout(policy.connect_timeout)
         .build()
-        .map_err(|_| "Unable to create the AI request client".to_string())?;
+        .map_err(|_| {
+            request_failure(
+                AiRequestFailureCode::Transport,
+                AiRequestStage::Connect,
+                started,
+            )
+        })?;
     let request = ai_request_builder(&client, provider, api_key);
-    let response = request
-        .json(&ai_request_body(provider, instructions, input))
-        .send()
-        .await
-        .map_err(|_| "AI provider request failed".to_string())?;
+    let response = tokio::time::timeout(
+        policy.total_timeout,
+        request
+            .json(&ai_request_body(provider, instructions, input))
+            .send(),
+    )
+    .await
+    .map_err(|_| {
+        request_failure(
+            AiRequestFailureCode::TotalTimeout,
+            AiRequestStage::AwaitingResponse,
+            started,
+        )
+    })?
+    .map_err(|error| {
+        let (code, stage) = transport_failure_kind(error.is_timeout(), error.is_connect());
+        request_failure(code, stage, started)
+    })?;
+    let response_headers_ms = duration_ms(started.elapsed());
     let status = response.status();
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .unwrap_or("unknown")
-        .to_string();
-    let raw_body = response
-        .bytes()
-        .await
-        .map_err(|_| "AI provider returned an invalid response".to_string())?;
+        .unwrap_or("unknown");
+    let content_type = sanitized_content_type(content_type);
     if !status.is_success() {
-        return Err(format!("AI provider returned HTTP {}", status.as_u16()));
+        let mut failure = request_failure(
+            AiRequestFailureCode::Http,
+            AiRequestStage::AwaitingResponse,
+            started,
+        );
+        failure.http_status = Some(status.as_u16());
+        failure.content_type = Some(content_type);
+        failure.body_bytes = Some(0);
+        return Err(failure);
     }
-    let body_size = raw_body.len();
-    let raw_body = String::from_utf8_lossy(&raw_body);
-    parse_ai_response(&raw_body).ok_or_else(|| {
-        format!(
-            "AI provider returned an invalid response (HTTP {}; Content-Type: {}; body: {} bytes)",
-            status.as_u16(),
-            content_type,
-            body_size
-        )
+    let explicit_sse = content_type
+        .to_ascii_lowercase()
+        .contains("text/event-stream");
+    let mut receiver = AiBodyReceiver::new(explicit_sse);
+    let mut stream = response.bytes_stream();
+    let mut body_bytes = 0usize;
+    let mut first_content_ms = None;
+    loop {
+        let elapsed = started.elapsed();
+        if elapsed >= policy.total_timeout {
+            return Err(request_failure(
+                AiRequestFailureCode::TotalTimeout,
+                AiRequestStage::ResponseStream,
+                started,
+            ));
+        }
+        let remaining = policy.total_timeout.saturating_sub(elapsed);
+        let wait = policy.stream_idle_timeout.min(remaining);
+        let next = tokio::time::timeout(wait, stream.next()).await;
+        let chunk = match next {
+            Err(_) => {
+                let code = if remaining <= policy.stream_idle_timeout {
+                    AiRequestFailureCode::TotalTimeout
+                } else {
+                    AiRequestFailureCode::StreamIdleTimeout
+                };
+                return Err(request_failure(
+                    code,
+                    AiRequestStage::ResponseStream,
+                    started,
+                ));
+            }
+            Ok(Some(Ok(chunk))) => chunk,
+            Ok(Some(Err(_))) => {
+                let mut failure = request_failure(
+                    AiRequestFailureCode::Transport,
+                    AiRequestStage::ResponseStream,
+                    started,
+                );
+                failure.content_type = Some(content_type.clone());
+                failure.body_bytes = Some(body_bytes);
+                return Err(failure);
+            }
+            Ok(None) => break,
+        };
+        body_bytes = body_bytes.saturating_add(chunk.len());
+        if body_bytes > policy.max_response_bytes {
+            let mut failure = request_failure(
+                AiRequestFailureCode::ResponseTooLarge,
+                AiRequestStage::ResponseStream,
+                started,
+            );
+            failure.content_type = Some(content_type.clone());
+            failure.body_bytes = Some(body_bytes);
+            return Err(failure);
+        }
+        let deltas = receiver.push(&chunk).map_err(|_| {
+            let mut failure = request_failure(
+                AiRequestFailureCode::InvalidResponse,
+                AiRequestStage::Parse,
+                started,
+            );
+            failure.content_type = Some(content_type.clone());
+            failure.body_bytes = Some(body_bytes);
+            failure
+        })?;
+        let accumulated_bytes = body_bytes.saturating_add(receiver.accumulated_content_bytes());
+        if accumulated_bytes > policy.max_response_bytes {
+            let mut failure = request_failure(
+                AiRequestFailureCode::ResponseTooLarge,
+                AiRequestStage::ResponseStream,
+                started,
+            );
+            failure.content_type = Some(content_type.clone());
+            failure.body_bytes = Some(accumulated_bytes);
+            return Err(failure);
+        }
+        for delta in deltas {
+            first_content_ms.get_or_insert_with(|| duration_ms(started.elapsed()));
+            on_delta(&delta).map_err(|_| {
+                let mut failure = request_failure(
+                    AiRequestFailureCode::ChannelClosed,
+                    AiRequestStage::FrontendHandoff,
+                    started,
+                );
+                failure.body_bytes = Some(body_bytes);
+                failure
+            })?;
+        }
+    }
+    let (body, final_deltas) = receiver.finish().map_err(|_| {
+        let mut failure = request_failure(
+            AiRequestFailureCode::InvalidResponse,
+            AiRequestStage::Parse,
+            started,
+        );
+        failure.content_type = Some(content_type);
+        failure.body_bytes = Some(body_bytes);
+        failure
+    })?;
+    for delta in final_deltas {
+        first_content_ms.get_or_insert_with(|| duration_ms(started.elapsed()));
+        on_delta(&delta).map_err(|_| {
+            let mut failure = request_failure(
+                AiRequestFailureCode::ChannelClosed,
+                AiRequestStage::FrontendHandoff,
+                started,
+            );
+            failure.body_bytes = Some(body_bytes);
+            failure
+        })?;
+    }
+    let total_ms = duration_ms(started.elapsed());
+    Ok(AiRequestOutcome {
+        body,
+        timing: AiResponseTiming {
+            response_headers_ms,
+            first_content_ms: first_content_ms.or(Some(total_ms)),
+            stream_receive_ms: total_ms.saturating_sub(response_headers_ms),
+            total_ms,
+        },
     })
 }
 
@@ -887,9 +1358,11 @@ pub async fn test_ai_provider(app: AppHandle, provider_id: String) -> Result<(),
         &api_key,
         "This is a connection test. Follow the user request exactly.",
         "Reply with OK.",
-        10,
+        AiRequestPolicy::provider_test(),
+        |_| Ok(()),
     )
-    .await?;
+    .await
+    .map_err(|failure| failure.to_string())?;
     Ok(())
 }
 
@@ -909,15 +1382,17 @@ pub async fn analyze_ai_log(
     if api_key.is_empty() {
         return Err("AI provider API key is not configured".to_string());
     }
-    let body = send_ai_request(
+    let outcome = send_ai_request(
         &provider,
         &api_key,
         INITIAL_ANALYSIS_INSTRUCTIONS,
         &selected_text,
-        60,
+        AiRequestPolicy::analysis(),
+        |_| Ok(()),
     )
-    .await?;
-    let content = analysis_content(provider.protocol, &body)
+    .await
+    .map_err(|failure| failure.to_string())?;
+    let content = analysis_content(provider.protocol, &outcome.body)
         .ok_or_else(|| "AI provider returned no analysis content".to_string())?;
     Ok(AiAnalysisResult {
         provider_id,
@@ -983,8 +1458,17 @@ pub async fn continue_ai_conversation(
     };
     let api_key = read_api_key(&provider.id)
         .map_err(|_| "Unable to access the API key in the system credential store".to_string())?;
-    let body = send_ai_request(&provider, &api_key, FOLLOW_UP_INSTRUCTIONS, &input, 60).await?;
-    let content = analysis_content(provider.protocol, &body)
+    let outcome = send_ai_request(
+        &provider,
+        &api_key,
+        FOLLOW_UP_INSTRUCTIONS,
+        &input,
+        AiRequestPolicy::analysis(),
+        |_| Ok(()),
+    )
+    .await
+    .map_err(|failure| failure.to_string())?;
+    let content = analysis_content(provider.protocol, &outcome.body)
         .ok_or_else(|| "AI provider returned no analysis content".to_string())?;
     if let Some(record) = stored_history.as_mut() {
         if let Some(update) = history_update {
@@ -1012,6 +1496,11 @@ pub async fn continue_ai_conversation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::Write as _,
+        net::{TcpListener, TcpStream},
+        thread::{self, JoinHandle},
+    };
 
     struct TempAttachment {
         root: PathBuf,
@@ -1060,6 +1549,49 @@ mod tests {
             protocol,
             endpoint_mode,
             allow_insecure_http: false,
+        }
+    }
+
+    fn local_stream_provider(
+        handler: impl FnOnce(TcpStream) + Send + 'static,
+    ) -> (StoredAiProvider, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("local AI test listener");
+        let address = listener.local_addr().expect("local AI test address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("local AI test connection");
+            let mut request = [0u8; 8192];
+            let _ = stream.read(&mut request);
+            handler(stream);
+        });
+        (
+            StoredAiProvider {
+                id: "local".into(),
+                name: "Local".into(),
+                base_url: format!("http://{address}/responses"),
+                model: "model-1".into(),
+                protocol: AiProtocol::Responses,
+                endpoint_mode: AiEndpointMode::Full,
+                allow_insecure_http: false,
+            },
+            handle,
+        )
+    }
+
+    fn write_sse_headers(stream: &mut TcpStream) {
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .expect("SSE response headers");
+        stream.flush().expect("flush SSE response headers");
+    }
+
+    fn short_policy(idle_ms: u64, total_ms: u64, max_response_bytes: usize) -> AiRequestPolicy {
+        AiRequestPolicy {
+            connect_timeout: Duration::from_millis(200),
+            stream_idle_timeout: Duration::from_millis(idle_ms),
+            total_timeout: Duration::from_millis(total_ms),
+            max_response_bytes,
         }
     }
 
@@ -1432,6 +1964,223 @@ mod tests {
             analysis_content(AiProtocol::ChatCompletions, &body).as_deref(),
             Some("chat result")
         );
+    }
+
+    #[test]
+    fn incremental_sse_decoder_handles_chunk_boundaries_crlf_multiline_data_and_heartbeats() {
+        let payload = concat!(
+            ": keepalive\r\n\r\n",
+            "event: response.output_text.delta\r\n",
+            "data: {\"type\":\"response.output_text.delta\",\r\n",
+            "data: \"delta\":\"first\"}\r\n\r\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\" second\"}\n\n",
+            "data: [DONE]\n\n"
+        );
+        for chunk_size in 1..=9 {
+            let mut decoder = SseDecoder::default();
+            let mut deltas = Vec::new();
+            for chunk in payload.as_bytes().chunks(chunk_size) {
+                deltas.extend(decoder.push(chunk).expect("valid split SSE"));
+            }
+            let (body, final_deltas) = decoder.finish().expect("completed split SSE");
+            deltas.extend(final_deltas);
+            assert_eq!(deltas, ["first", " second"], "chunk size {chunk_size}");
+            assert_eq!(body["output_text"], "first second");
+        }
+    }
+
+    #[test]
+    fn incremental_sse_decoder_rejects_invalid_events_after_partial_content() {
+        let mut decoder = SseDecoder::default();
+        assert_eq!(
+            decoder
+                .push(b"data: {\"delta\":\"partial\"}\n\n")
+                .expect("first valid event"),
+            ["partial"]
+        );
+        assert!(decoder.push(b"data: not-json\n\n").is_err());
+    }
+
+    #[test]
+    fn incremental_sse_decoder_accepts_responses_completed_as_a_terminal_event() {
+        let mut decoder = SseDecoder::default();
+        let events = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+            "data: {\"type\":\"response.completed\"}\n\n"
+        );
+        assert_eq!(
+            decoder.push(events.as_bytes()).expect("valid events"),
+            ["done"]
+        );
+        let (body, _) = decoder.finish().expect("response.completed terminal event");
+        assert_eq!(body["output_text"], "done");
+    }
+
+    #[test]
+    fn response_probe_distinguishes_sse_json_and_plain_text_without_full_buffering() {
+        assert_eq!(probe_sse_prefix(b"da"), None);
+        assert_eq!(probe_sse_prefix(b" data:"), Some(true));
+        assert_eq!(probe_sse_prefix(b"\r\n: heartbeat"), Some(true));
+        assert_eq!(probe_sse_prefix(br#"{"output_text":"ok"}"#), Some(false));
+        assert_eq!(probe_sse_prefix(b"plain text"), Some(false));
+    }
+
+    #[test]
+    fn transport_failures_keep_connect_timeout_and_stage_categories_distinct() {
+        assert_eq!(
+            transport_failure_kind(true, true),
+            (
+                AiRequestFailureCode::ConnectTimeout,
+                AiRequestStage::Connect
+            )
+        );
+        assert_eq!(
+            transport_failure_kind(false, true),
+            (AiRequestFailureCode::Transport, AiRequestStage::Connect)
+        );
+        assert_eq!(
+            transport_failure_kind(false, false),
+            (
+                AiRequestFailureCode::Transport,
+                AiRequestStage::AwaitingResponse
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_stream_deltas_before_completion_and_records_stage_timings() {
+        let (provider, server) = local_stream_provider(|mut stream| {
+            write_sse_headers(&mut stream);
+            for part in [
+                b"da".as_slice(),
+                b"ta: {\"delta\":\"first\"}\r\n\r".as_slice(),
+                b"\ndata: {\"delta\":\" second\"}\n\ndata: [DONE]\n\n".as_slice(),
+            ] {
+                stream.write_all(part).expect("SSE response chunk");
+                stream.flush().expect("flush SSE response chunk");
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let mut deltas = Vec::new();
+        let outcome = send_ai_request(
+            &provider,
+            "test-key",
+            "instructions",
+            "input",
+            short_policy(200, 2_000, 1024),
+            |delta| {
+                deltas.push(delta.to_string());
+                Ok(())
+            },
+        )
+        .await
+        .expect("incremental Responses request");
+        server.join().expect("local SSE server");
+
+        assert_eq!(deltas, ["first", " second"]);
+        assert_eq!(outcome.body["output_text"], "first second");
+        assert!(outcome.timing.first_content_ms.is_some());
+        assert!(outcome.timing.total_ms >= outcome.timing.response_headers_ms);
+        assert_eq!(
+            outcome.timing.stream_receive_ms,
+            outcome
+                .timing
+                .total_ms
+                .saturating_sub(outcome.timing.response_headers_ms)
+        );
+    }
+
+    #[tokio::test]
+    async fn response_stream_distinguishes_idle_total_and_size_failures() {
+        let (idle_provider, idle_server) = local_stream_provider(|mut stream| {
+            write_sse_headers(&mut stream);
+            stream
+                .write_all(b"data: {\"delta\":\"partial\"}\n\n")
+                .expect("partial SSE response");
+            stream.flush().expect("flush partial SSE response");
+            thread::sleep(Duration::from_millis(100));
+        });
+        let mut partial = Vec::new();
+        let idle = send_ai_request(
+            &idle_provider,
+            "test-key",
+            "instructions",
+            "input",
+            short_policy(20, 500, 1024),
+            |delta| {
+                partial.push(delta.to_string());
+                Ok(())
+            },
+        )
+        .await
+        .expect_err("idle stream should fail");
+        idle_server.join().expect("idle SSE server");
+        assert_eq!(partial, ["partial"]);
+        assert_eq!(idle.code, AiRequestFailureCode::StreamIdleTimeout);
+        assert_eq!(idle.stage, AiRequestStage::ResponseStream);
+
+        let (truncated_provider, truncated_server) = local_stream_provider(|mut stream| {
+            write_sse_headers(&mut stream);
+            stream
+                .write_all(b"data: {\"delta\":\"partial\"}\n\n")
+                .expect("truncated SSE response");
+        });
+        let mut truncated_partial = Vec::new();
+        let truncated = send_ai_request(
+            &truncated_provider,
+            "test-key",
+            "instructions",
+            "input",
+            short_policy(200, 500, 1024),
+            |delta| {
+                truncated_partial.push(delta.to_string());
+                Ok(())
+            },
+        )
+        .await
+        .expect_err("truncated stream should fail");
+        truncated_server.join().expect("truncated SSE server");
+        assert_eq!(truncated_partial, ["partial"]);
+        assert_eq!(truncated.code, AiRequestFailureCode::InvalidResponse);
+        assert_eq!(truncated.stage, AiRequestStage::Parse);
+
+        let (total_provider, total_server) = local_stream_provider(|_stream| {
+            thread::sleep(Duration::from_millis(100));
+        });
+        let total = send_ai_request(
+            &total_provider,
+            "test-key",
+            "instructions",
+            "input",
+            short_policy(200, 20, 1024),
+            |_| Ok(()),
+        )
+        .await
+        .expect_err("request should reach total timeout");
+        total_server.join().expect("total timeout server");
+        assert_eq!(total.code, AiRequestFailureCode::TotalTimeout);
+        assert_eq!(total.stage, AiRequestStage::AwaitingResponse);
+
+        let (large_provider, large_server) = local_stream_provider(|mut stream| {
+            write_sse_headers(&mut stream);
+            stream
+                .write_all(b"data: {\"delta\":\"response larger than test boundary\"}\n\n")
+                .expect("oversized SSE response");
+        });
+        let large = send_ai_request(
+            &large_provider,
+            "test-key",
+            "instructions",
+            "input",
+            short_policy(200, 500, 64),
+            |_| Ok(()),
+        )
+        .await
+        .expect_err("oversized response should fail");
+        large_server.join().expect("oversized SSE server");
+        assert_eq!(large.code, AiRequestFailureCode::ResponseTooLarge);
+        assert_eq!(large.stage, AiRequestStage::ResponseStream);
+        assert!(large.body_bytes.is_some_and(|bytes| bytes > 64));
     }
 
     #[test]
