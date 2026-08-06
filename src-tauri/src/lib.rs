@@ -20,8 +20,8 @@ mod startup_trace;
 mod watcher;
 
 use ai::{
-    analyze_ai_log, continue_ai_conversation, delete_ai_provider, list_ai_providers,
-    save_ai_provider, test_ai_provider,
+    analyze_ai_log, continue_ai_conversation, delete_ai_provider, inspect_ai_attachments,
+    list_ai_providers, save_ai_provider, test_ai_provider,
 };
 use ai_history::{
     clear_ai_history, delete_ai_history, list_ai_history, load_ai_history, save_ai_history,
@@ -1646,6 +1646,7 @@ pub fn run() {
             delete_ai_provider,
             test_ai_provider,
             analyze_ai_log,
+            inspect_ai_attachments,
             continue_ai_conversation,
             set_ai_window_open,
             toggle_ai_window,

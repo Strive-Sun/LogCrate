@@ -40,3 +40,25 @@ test('AI mock analysis rejects blank selections and returns structured content',
   assert.match(result.content, /ERROR/);
   await mockApi.deleteAiProvider('analysis');
 });
+
+test('AI attachment contract bounds selection and returns safe display metadata', async () => {
+  const summaries = await mockApi.inspectAiAttachments('ERROR failed', [
+    'D:\\logs\\server.log',
+    '/tmp/worker.txt',
+  ]);
+  assert.deepEqual(
+    summaries.map(({ name, charCount }) => ({ name, charCount })),
+    [
+      { name: 'server.log', charCount: 0 },
+      { name: 'worker.txt', charCount: 0 },
+    ],
+  );
+  await assert.rejects(
+    () =>
+      mockApi.inspectAiAttachments(
+        'ERROR failed',
+        Array.from({ length: 6 }, (_, index) => `attachment-${index}.log`),
+      ),
+    /最多添加 5 个附件/,
+  );
+});

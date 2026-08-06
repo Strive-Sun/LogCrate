@@ -152,16 +152,48 @@ export const tauriApi = {
   async analyzeAiLog(providerId: string, selectedText: string): Promise<AiAnalysisResult> {
     return invoke('analyze_ai_log', { providerId, selectedText });
   },
-  async continueAiConversation(providerId: string, selectedText: string, history: import('./types').AiHistoryMessage[], question: string): Promise<AiAnalysisResult> {
-    return invoke('continue_ai_conversation', { providerId, selectedText, history, question });
+  async inspectAiAttachments(
+    selectedText: string,
+    attachmentPaths: string[],
+  ): Promise<import('./types').AiAttachmentSummary[]> {
+    return invoke('inspect_ai_attachments', { selectedText, attachmentPaths });
   },
-  async setAiWindowOpen(open: boolean): Promise<void> { await invoke('set_ai_window_open', { open }); },
-  async toggleAiWindow(): Promise<void> { await invoke('toggle_ai_window'); },
-  async listAiHistory(): Promise<AiHistorySummary[]> { return invoke('list_ai_history'); },
-  async loadAiHistory(id: string): Promise<AiHistoryRecord> { return invoke('load_ai_history', { id }); },
-  async saveAiHistory(record: AiHistoryRecord): Promise<void> { await invoke('save_ai_history', { record }); },
-  async deleteAiHistory(id: string): Promise<void> { await invoke('delete_ai_history', { id }); },
-  async clearAiHistory(): Promise<void> { await invoke('clear_ai_history'); },
+  async continueAiConversation(
+    providerId: string,
+    selectedText: string,
+    history: import('./types').AiHistoryMessage[],
+    question: string,
+    attachmentPaths: string[] = [],
+  ): Promise<AiAnalysisResult> {
+    return invoke('continue_ai_conversation', {
+      providerId,
+      selectedText,
+      history,
+      question,
+      attachmentPaths,
+    });
+  },
+  async setAiWindowOpen(open: boolean): Promise<void> {
+    await invoke('set_ai_window_open', { open });
+  },
+  async toggleAiWindow(): Promise<void> {
+    await invoke('toggle_ai_window');
+  },
+  async listAiHistory(): Promise<AiHistorySummary[]> {
+    return invoke('list_ai_history');
+  },
+  async loadAiHistory(id: string): Promise<AiHistoryRecord> {
+    return invoke('load_ai_history', { id });
+  },
+  async saveAiHistory(record: AiHistoryRecord): Promise<void> {
+    await invoke('save_ai_history', { record });
+  },
+  async deleteAiHistory(id: string): Promise<void> {
+    await invoke('delete_ai_history', { id });
+  },
+  async clearAiHistory(): Promise<void> {
+    await invoke('clear_ai_history');
+  },
   async fileRevision(path: string): Promise<FileRevision> {
     return invoke<FileRevision>('file_revision', { path: resolveOuterSourcePath(path) });
   },

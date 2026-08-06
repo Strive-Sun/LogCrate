@@ -390,12 +390,33 @@ export interface AiAnalysisResult {
   content: string;
 }
 
-export interface AiHistoryMessage { role: 'user' | 'assistant'; content: string }
+export interface AiAttachmentSummary {
+  path: string;
+  name: string;
+  charCount: number;
+}
+
+export interface AiHistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
 export interface AiHistoryRecord {
-  id: string; title: string; createdAt: string; updatedAt: string;
-  providerId: string; protocol: 'chatCompletions' | 'responses'; model: string;
-  endpointFingerprint: string; selectedText: string; messages: AiHistoryMessage[];
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  providerId: string;
+  protocol: 'chatCompletions' | 'responses';
+  model: string;
+  endpointFingerprint: string;
+  selectedText: string;
+  messages: AiHistoryMessage[];
 }
 export interface AiHistorySummary {
-  id: string; title: string; createdAt: string; updatedAt: string; providerId: string; model: string;
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  providerId: string;
+  model: string;
 }

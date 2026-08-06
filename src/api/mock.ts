@@ -306,7 +306,25 @@ export const mockApi = {
       content: `主要信息：选中的日志共 ${selectedText.length} 个字符。\n\n警告：请结合上下文进一步确认。\n\n错误：未发现可由 mock 确认的错误。\n\n建议：检查 ERROR/WARN 行及其前后文。`,
     };
   },
-  async continueAiConversation(providerId: string, _selectedText: string, _history: AiHistoryMessage[], question: string): Promise<AiAnalysisResult> {
+  async inspectAiAttachments(
+    selectedText: string,
+    attachmentPaths: string[],
+  ): Promise<import('./types').AiAttachmentSummary[]> {
+    if (attachmentPaths.length > 5) throw new Error('每次最多添加 5 个附件');
+    if (selectedText.length > 120_000) throw new Error('原始日志与附件合计超过 120000 个字符限制');
+    return attachmentPaths.map((path) => ({
+      path,
+      name: path.split(/[\\/]/).pop() || '未命名文件',
+      charCount: 0,
+    }));
+  },
+  async continueAiConversation(
+    providerId: string,
+    _selectedText: string,
+    _history: AiHistoryMessage[],
+    question: string,
+    _attachmentPaths: string[] = [],
+  ): Promise<AiAnalysisResult> {
     if (!question.trim()) throw new Error('请输入追问内容');
     const provider = mockAiProviders.find((item) => item.id === providerId);
     if (!provider) throw new Error('AI provider was not found');
@@ -314,11 +332,33 @@ export const mockApi = {
   },
   async setAiWindowOpen(_open: boolean): Promise<void> {},
   async toggleAiWindow(): Promise<void> {},
-  async listAiHistory(): Promise<AiHistorySummary[]> { return mockAiHistory.map(({ id, title, createdAt, updatedAt, providerId, model }) => ({ id, title, createdAt, updatedAt, providerId, model })); },
-  async loadAiHistory(id: string): Promise<AiHistoryRecord> { const item = mockAiHistory.find((record) => record.id === id); if (!item) throw new Error('AI history not found'); return structuredClone(item); },
-  async saveAiHistory(record: AiHistoryRecord): Promise<void> { mockAiHistory = [record, ...mockAiHistory.filter((item) => item.id !== record.id)].slice(0, 100); },
-  async deleteAiHistory(id: string): Promise<void> { mockAiHistory = mockAiHistory.filter((item) => item.id !== id); },
-  async clearAiHistory(): Promise<void> { mockAiHistory = []; },
+  async listAiHistory(): Promise<AiHistorySummary[]> {
+    return mockAiHistory.map(({ id, title, createdAt, updatedAt, providerId, model }) => ({
+      id,
+      title,
+      createdAt,
+      updatedAt,
+      providerId,
+      model,
+    }));
+  },
+  async loadAiHistory(id: string): Promise<AiHistoryRecord> {
+    const item = mockAiHistory.find((record) => record.id === id);
+    if (!item) throw new Error('AI history not found');
+    return structuredClone(item);
+  },
+  async saveAiHistory(record: AiHistoryRecord): Promise<void> {
+    mockAiHistory = [record, ...mockAiHistory.filter((item) => item.id !== record.id)].slice(
+      0,
+      100,
+    );
+  },
+  async deleteAiHistory(id: string): Promise<void> {
+    mockAiHistory = mockAiHistory.filter((item) => item.id !== id);
+  },
+  async clearAiHistory(): Promise<void> {
+    mockAiHistory = [];
+  },
   async fileRevision(_path: string): Promise<FileRevision> {
     return { exists: true, revision: 'mock:1' };
   },

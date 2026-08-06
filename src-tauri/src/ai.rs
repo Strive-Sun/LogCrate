@@ -7,7 +7,12 @@
 
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{
+    collections::HashSet,
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
 use tauri::{AppHandle, Manager};
 
 const KEYRING_SERVICE: &str = "com.logcrate.ai-provider";
@@ -45,6 +50,8 @@ pub enum AiEndpointMode {
 }
 
 const MAX_ANALYSIS_CHARS: usize = 120_000;
+const MAX_AI_ATTACHMENTS: usize = 5;
+const MAX_AI_ATTACHMENT_BYTES: usize = 256 * 1024;
 const SESSION_ID_HEADER: &str = "session-id";
 const THREAD_ID_HEADER: &str = "thread-id";
 
@@ -54,6 +61,20 @@ pub struct AiAnalysisResult {
     pub provider_id: String,
     pub model: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAttachmentSummary {
+    pub path: String,
+    pub name: String,
+    pub char_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoadedAiAttachment {
+    summary: AiAttachmentSummary,
+    content: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -174,6 +195,155 @@ fn validate_analysis_text(text: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn attachment_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("未命名文件")
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+fn is_archive_attachment(path: &Path) -> bool {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "zip" | "7z" | "rar" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst"
+    )
+}
+
+fn decode_attachment(bytes: &[u8], name: &str) -> Result<String, String> {
+    let decoded = if bytes.starts_with(&[0xff, 0xfe]) {
+        let (text, _, had_errors) = encoding_rs::UTF_16LE.decode(&bytes[2..]);
+        if had_errors {
+            return Err(format!("附件无法按文本解码: {name}"));
+        }
+        text.into_owned()
+    } else if bytes.starts_with(&[0xfe, 0xff]) {
+        let (text, _, had_errors) = encoding_rs::UTF_16BE.decode(&bytes[2..]);
+        if had_errors {
+            return Err(format!("附件无法按文本解码: {name}"));
+        }
+        text.into_owned()
+    } else {
+        if bytes.contains(&0) {
+            return Err(format!("附件不是受支持的文本文件: {name}"));
+        }
+        match std::str::from_utf8(bytes) {
+            Ok(text) => text.trim_start_matches('\u{feff}').to_string(),
+            Err(_) => {
+                let (text, _, had_errors) = encoding_rs::GB18030.decode(bytes);
+                if had_errors {
+                    return Err(format!("附件无法按文本解码: {name}"));
+                }
+                text.into_owned()
+            }
+        }
+    };
+    let char_count = decoded.chars().count();
+    let control_count = decoded
+        .chars()
+        .filter(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+        .count();
+    if control_count > 8 && control_count.saturating_mul(20) > char_count {
+        return Err(format!("附件不是受支持的文本文件: {name}"));
+    }
+    Ok(decoded)
+}
+
+fn load_ai_attachments(
+    selected_text: &str,
+    attachment_paths: &[String],
+) -> Result<Vec<LoadedAiAttachment>, String> {
+    if attachment_paths.len() > MAX_AI_ATTACHMENTS {
+        return Err(format!("每次最多添加 {MAX_AI_ATTACHMENTS} 个附件"));
+    }
+    let mut seen = HashSet::new();
+    let mut total_chars = selected_text.chars().count();
+    let mut loaded = Vec::with_capacity(attachment_paths.len());
+    for requested_path in attachment_paths {
+        let requested = Path::new(requested_path);
+        let requested_name = attachment_name(requested);
+        let canonical = std::fs::canonicalize(requested)
+            .map_err(|_| format!("无法读取附件: {requested_name}"))?;
+        let name = attachment_name(&canonical);
+        if !seen.insert(canonical.clone()) {
+            return Err(format!("附件重复添加: {name}"));
+        }
+        if is_archive_attachment(&canonical) {
+            return Err(format!("不支持压缩归档附件: {name}"));
+        }
+        let metadata =
+            std::fs::metadata(&canonical).map_err(|_| format!("无法读取附件: {name}"))?;
+        if !metadata.is_file() {
+            return Err(format!("附件必须是普通文件: {name}"));
+        }
+        if metadata.len() > MAX_AI_ATTACHMENT_BYTES as u64 {
+            return Err(format!("附件超过 256 KiB 限制: {name}"));
+        }
+        let mut file = File::open(&canonical).map_err(|_| format!("无法读取附件: {name}"))?;
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.by_ref()
+            .take((MAX_AI_ATTACHMENT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| format!("无法读取附件: {name}"))?;
+        if bytes.len() > MAX_AI_ATTACHMENT_BYTES {
+            return Err(format!("附件超过 256 KiB 限制: {name}"));
+        }
+        let content = decode_attachment(&bytes, &name)?;
+        let char_count = content.chars().count();
+        total_chars = total_chars.saturating_add(char_count);
+        if total_chars > MAX_ANALYSIS_CHARS {
+            return Err(format!(
+                "原始日志与附件合计超过 {MAX_ANALYSIS_CHARS} 个字符限制"
+            ));
+        }
+        loaded.push(LoadedAiAttachment {
+            summary: AiAttachmentSummary {
+                path: canonical.to_string_lossy().into_owned(),
+                name,
+                char_count,
+            },
+            content,
+        });
+    }
+    Ok(loaded)
+}
+
+fn attachment_context(attachments: &[LoadedAiAttachment]) -> String {
+    attachments
+        .iter()
+        .map(|attachment| {
+            format!(
+                "--- 补充日志文件: {} ---\n{}",
+                attachment.summary.name, attachment.content
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+async fn load_ai_attachments_async(
+    selected_text: String,
+    attachment_paths: Vec<String>,
+) -> Result<Vec<LoadedAiAttachment>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        load_ai_attachments(&selected_text, &attachment_paths)
+    })
+    .await
+    .map_err(|_| "读取附件的后台任务失败".to_string())?
 }
 
 fn provider_endpoint(provider: &StoredAiProvider) -> String {
@@ -594,28 +764,99 @@ pub async fn analyze_ai_log(
 }
 
 #[tauri::command]
+pub async fn inspect_ai_attachments(
+    selected_text: String,
+    attachment_paths: Vec<String>,
+) -> Result<Vec<AiAttachmentSummary>, String> {
+    validate_analysis_text(&selected_text)?;
+    Ok(load_ai_attachments_async(selected_text, attachment_paths)
+        .await?
+        .into_iter()
+        .map(|attachment| attachment.summary)
+        .collect())
+}
+
+#[tauri::command]
 pub async fn continue_ai_conversation(
     app: AppHandle,
     provider_id: String,
     selected_text: String,
     history: Vec<crate::ai_history::AiHistoryMessage>,
     question: String,
+    attachment_paths: Vec<String>,
 ) -> Result<AiAnalysisResult, String> {
     validate_analysis_text(&selected_text)?;
-    if question.trim().is_empty() { return Err("请输入追问内容".into()); }
-    if question.chars().count() > 4_000 { return Err("追问内容超过 4000 个字符限制".into()); }
-    let provider = read_stored_providers(&app)?.into_iter().find(|p| p.id == provider_id).ok_or_else(|| "AI provider was not found".to_string())?;
-    let api_key = read_api_key(&provider.id).map_err(|_| "Unable to access the API key in the system credential store".to_string())?;
-    let context = history.into_iter().rev().take(12).map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>().join("\n\n");
-    let input = format!("原始日志：\n{selected_text}\n\n已有对话：\n{context}\n\n用户追问：\n{question}");
-    let body = send_ai_request(&provider, &api_key, "你是日志分析助手，请基于原始日志和已有对话准确回答用户追问。", &input, 60).await?;
-    let content = analysis_content(provider.protocol, &body).ok_or_else(|| "AI provider returned no analysis content".to_string())?;
-    Ok(AiAnalysisResult { provider_id, model: provider.model, content })
+    if question.trim().is_empty() {
+        return Err("请输入追问内容".into());
+    }
+    if question.chars().count() > 4_000 {
+        return Err("追问内容超过 4000 个字符限制".into());
+    }
+    let provider = read_stored_providers(&app)?
+        .into_iter()
+        .find(|p| p.id == provider_id)
+        .ok_or_else(|| "AI provider was not found".to_string())?;
+    let api_key = read_api_key(&provider.id)
+        .map_err(|_| "Unable to access the API key in the system credential store".to_string())?;
+    let attachments = load_ai_attachments_async(selected_text.clone(), attachment_paths).await?;
+    let context = history
+        .into_iter()
+        .rev()
+        .take(12)
+        .map(|m| format!("{}: {}", m.role, m.content))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let supplemental = attachment_context(&attachments);
+    let input = if supplemental.is_empty() {
+        format!("原始日志：\n{selected_text}\n\n已有对话：\n{context}\n\n用户追问：\n{question}")
+    } else {
+        format!("原始日志：\n{selected_text}\n\n补充日志：\n{supplemental}\n\n已有对话：\n{context}\n\n用户追问：\n{question}")
+    };
+    let body = send_ai_request(
+        &provider,
+        &api_key,
+        "你是日志分析助手，请基于原始日志和已有对话准确回答用户追问。",
+        &input,
+        60,
+    )
+    .await?;
+    let content = analysis_content(provider.protocol, &body)
+        .ok_or_else(|| "AI provider returned no analysis content".to_string())?;
+    Ok(AiAnalysisResult {
+        provider_id,
+        model: provider.model,
+        content,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TempAttachment {
+        root: PathBuf,
+        path: PathBuf,
+    }
+
+    impl TempAttachment {
+        fn new(name: &str, bytes: &[u8]) -> Self {
+            let root = std::env::temp_dir().join(format!("logcrate-ai-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(&root).expect("temporary attachment directory");
+            let path = root.join(name);
+            std::fs::write(&path, bytes).expect("temporary attachment contents");
+            Self { root, path }
+        }
+
+        fn path_string(&self) -> String {
+            self.path.to_string_lossy().into_owned()
+        }
+    }
+
+    impl Drop for TempAttachment {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
 
     fn config(base_url: &str) -> AiProviderConfig {
         AiProviderConfig {
@@ -669,6 +910,76 @@ mod tests {
         assert!(validate_analysis_text("ERROR something").is_ok());
         assert!(validate_analysis_text(" \n\t ").is_err());
         assert!(validate_analysis_text(&"x".repeat(MAX_ANALYSIS_CHARS + 1)).is_err());
+    }
+
+    #[test]
+    fn loads_bounded_text_attachments_and_builds_labeled_context() {
+        let utf8 = TempAttachment::new("server.log", "ERROR 数据库超时".as_bytes());
+        let (gb18030, _, _) = encoding_rs::GB18030.encode("WARN 连接重试");
+        let legacy = TempAttachment::new("legacy.txt", &gb18030);
+        let attachments =
+            load_ai_attachments("original log", &[utf8.path_string(), legacy.path_string()])
+                .expect("valid text attachments");
+
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(attachments[0].summary.name, "server.log");
+        assert_eq!(attachments[0].summary.char_count, 11);
+        assert!(attachments[0].summary.path.ends_with("server.log"));
+        assert_eq!(attachments[1].content, "WARN 连接重试");
+        let context = attachment_context(&attachments);
+        assert!(context.contains("--- 补充日志文件: server.log ---"));
+        assert!(context.contains("ERROR 数据库超时"));
+        assert!(context.contains("WARN 连接重试"));
+    }
+
+    #[test]
+    fn rejects_attachment_count_size_type_duplicates_and_total_char_overflow() {
+        let too_many = vec!["missing.log".to_string(); MAX_AI_ATTACHMENTS + 1];
+        assert!(load_ai_attachments("base", &too_many)
+            .expect_err("attachment count should be bounded")
+            .contains("最多添加 5 个附件"));
+
+        let archive = TempAttachment::new("bundle.zip", b"plain-looking bytes");
+        assert!(load_ai_attachments("base", &[archive.path_string()])
+            .expect_err("archives should be rejected")
+            .contains("bundle.zip"));
+
+        let binary = TempAttachment::new("dump.bin", b"prefix\0payload");
+        assert!(load_ai_attachments("base", &[binary.path_string()])
+            .expect_err("binary data should be rejected")
+            .contains("dump.bin"));
+
+        let oversized =
+            TempAttachment::new("oversized.log", &vec![b'x'; MAX_AI_ATTACHMENT_BYTES + 1]);
+        assert!(load_ai_attachments("base", &[oversized.path_string()])
+            .expect_err("oversized files should be rejected")
+            .contains("256 KiB"));
+
+        let duplicate = TempAttachment::new("duplicate.log", b"same file");
+        assert!(
+            load_ai_attachments("base", &[duplicate.path_string(), duplicate.path_string()])
+                .expect_err("duplicate paths should be rejected")
+                .contains("重复添加")
+        );
+
+        let overflow = TempAttachment::new("overflow.log", b"xx");
+        assert!(load_ai_attachments(
+            &"x".repeat(MAX_ANALYSIS_CHARS - 1),
+            &[overflow.path_string()]
+        )
+        .expect_err("combined context should be bounded")
+        .contains("合计超过 120000 个字符"));
+    }
+
+    #[test]
+    fn attachment_read_errors_do_not_expose_parent_directories() {
+        let private_parent = std::env::temp_dir()
+            .join("private-customer-name")
+            .join("missing.log");
+        let error = load_ai_attachments("base", &[private_parent.to_string_lossy().into_owned()])
+            .expect_err("missing attachments should fail");
+        assert!(error.contains("missing.log"));
+        assert!(!error.contains("private-customer-name"));
     }
 
     #[test]
