@@ -167,6 +167,7 @@ test('Ctrl+F opens the active log find dialog with the required defaults and opt
 });
 
 test('AI analysis result opens in a closable drawer body', async () => {
+  let aiWorkspaceOpened = false;
   dom.window.getSelection = () =>
     ({
       toString: () => 'ERROR synthetic failure',
@@ -190,7 +191,7 @@ test('AI analysis result opens in a closable drawer body', async () => {
     content: 'Synthetic analysis result',
   });
 
-  const { container } = renderLog();
+  const { container } = renderLog({ onAiOpen: () => (aiWorkspaceOpened = true) });
   harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement, {
     clientX: 20,
     clientY: 20,
@@ -199,6 +200,7 @@ test('AI analysis result opens in a closable drawer body', async () => {
 
   const drawer = await harness.screen.findByRole('dialog', { name: 'AI 日志分析' });
   assert.ok(drawer.classList.contains('ai-result-pop'));
+  assert.equal(aiWorkspaceOpened, true);
   assert.ok(drawer.querySelector('.ai-result-body'));
   assert.ok(harness.screen.getByRole('button', { name: '历史记录' }));
   assert.equal(
@@ -210,18 +212,35 @@ test('AI analysis result opens in a closable drawer body', async () => {
   assert.equal(harness.screen.queryByRole('dialog', { name: 'AI 日志分析' }), null);
 });
 
-test('AI analysis drawer is fixed to the full right edge with an independently scrolling body', () => {
+test('AI workspace fills a root-level right column with an independently scrolling body', () => {
   const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  const appRule = css.match(/\.app\s*\{([^}]*)\}/)?.[1] ?? '';
+  const openAppRule = css.match(/\.app\.with-ai\s*\{([^}]*)\}/)?.[1] ?? '';
+  const topBarRule = css.match(/\.app > \.topbar\s*\{([^}]*)\}/)?.[1] ?? '';
+  const columnsRule = css.match(/\.app > \.cols\s*\{([^}]*)\}/)?.[1] ?? '';
+  const searchLayerRule =
+    css.match(/\.app\.with-ai > \.file-search-keep-alive\s*\{([^}]*)\}/)?.[1] ?? '';
+  const hostRule = css.match(/\.ai-workspace-host\s*\{([^}]*)\}/)?.[1] ?? '';
   const drawerRule = css.match(/\.ai-result-pop\s*\{([^}]*)\}/)?.[1] ?? '';
   const headerRule = css.match(/\.ai-result-pop \.pop-head\s*\{([^}]*)\}/)?.[1] ?? '';
   const historyRule =
     css.match(/\.ai-result-pop \.pop-head > button:first-child\s*\{([^}]*)\}/)?.[1] ?? '';
   const bodyRule = css.match(/\.ai-result-body\s*\{([^}]*)\}/)?.[1] ?? '';
 
-  assert.match(drawerRule, /top:\s*0;/);
-  assert.match(drawerRule, /right:\s*0;/);
-  assert.match(drawerRule, /bottom:\s*0;/);
-  assert.match(drawerRule, /width:\s*min\(440px, calc\(100vw - 16px\)\);/);
+  assert.match(appRule, /display:\s*grid;/);
+  assert.match(appRule, /grid-template-rows:\s*40px minmax\(0, 1fr\);/);
+  assert.match(
+    openAppRule,
+    /grid-template-columns:\s*minmax\(0, 1fr\) min\(440px, calc\(100vw - 16px\)\);/,
+  );
+  assert.match(topBarRule, /grid-column:\s*1;/);
+  assert.match(columnsRule, /grid-column:\s*1;/);
+  assert.match(searchLayerRule, /right:\s*min\(440px, calc\(100vw - 16px\)\);/);
+  assert.match(hostRule, /grid-row:\s*1 \/ -1;/);
+  assert.match(hostRule, /height:\s*100%;/);
+  assert.match(drawerRule, /position:\s*relative;/);
+  assert.match(drawerRule, /width:\s*100%;/);
+  assert.match(drawerRule, /height:\s*100%;/);
   assert.match(drawerRule, /overflow:\s*hidden;/);
   assert.match(headerRule, /display:\s*grid;/);
   assert.match(headerRule, /grid-template-columns:\s*1fr auto 1fr;/);
@@ -230,6 +249,24 @@ test('AI analysis drawer is fixed to the full right edge with an independently s
   assert.match(historyRule, /font-weight:\s*400;/);
   assert.match(bodyRule, /min-height:\s*0;/);
   assert.match(bodyRule, /overflow:\s*auto;/);
+});
+
+test('AI workspace mounts into the root host instead of covering the log panel', () => {
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  const { container } = renderLog({ aiOpen: true, aiWorkspaceHost: host });
+
+  const drawer = harness.screen.getByRole('dialog', { name: 'AI 日志分析' });
+  assert.equal(drawer.parentElement, host);
+  assert.equal(container.querySelector('.ai-result-pop'), null);
+  host.remove();
+});
+
+test('AI workspace waits for its root host without flashing over the log panel', () => {
+  const { container } = renderLog({ aiOpen: true, aiWorkspaceHost: null });
+
+  assert.equal(container.querySelector('.ai-result-pop'), null);
+  assert.equal(harness.screen.queryByRole('dialog', { name: 'AI 日志分析' }), null);
 });
 
 test('empty AI workspace omits the branded icon and title', () => {

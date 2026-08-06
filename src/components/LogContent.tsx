@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { api } from '../api';
@@ -37,12 +39,19 @@ interface Props {
   active?: boolean;
   aiOpenToken?: number;
   aiOpen?: boolean;
+  aiWorkspaceHost?: HTMLElement | null;
+  onAiOpen?: () => void;
   onAiClose?: () => void;
 }
 
 const PAGE = 200;
 const MAX_CACHED_LINES = 5_000;
 const ENCODINGS = ['UTF-8', 'GBK', 'GB18030', 'UTF-16LE', 'UTF-16BE'];
+
+function mountAiWorkspace(node: ReactNode, host?: HTMLElement | null): ReactNode {
+  if (host === undefined) return node;
+  return host ? createPortal(node, host) : null;
+}
 
 async function copySelectedText(text: string): Promise<void> {
   if (!text) return;
@@ -161,7 +170,18 @@ function runtimeToStored(
   };
 }
 
-export function LogContent({ session, activeKey, status = 'ready', error, active = true, aiOpenToken, aiOpen = false, onAiClose }: Props) {
+export function LogContent({
+  session,
+  activeKey,
+  status = 'ready',
+  error,
+  active = true,
+  aiOpenToken,
+  aiOpen = false,
+  aiWorkspaceHost,
+  onAiOpen,
+  onAiClose,
+}: Props) {
   const { t } = useI18n();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [percent, setPercent] = useState(100);
@@ -262,6 +282,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
     );
     if (!confirmed) return;
     try { await api.setAiWindowOpen(true); } catch (error) { setAiError(errorMessage(error)); return; }
+    onAiOpen?.();
     setAiBusy(true);
     try {
       const result = await api.analyzeAiLog(provider.id, selectedText);
@@ -284,7 +305,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
     } finally {
       setAiBusy(false);
     }
-  }, []);
+  }, [onAiOpen]);
 
   const clearLineCache = useCallback(() => {
     cacheRequestGeneration.current += 1;
@@ -872,7 +893,7 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
   }
 
   return (
-    <div className={'col log-content-panel' + (aiOpen ? ' with-ai' : '')}>
+    <div className="col log-content-panel">
       {indexing && (
         <div className="index-bar">
           <span>
@@ -1074,8 +1095,9 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
         />
       )}
 
-      {(aiOpen || aiPanelOpen || aiBusy || aiError || aiResult) && (
-        <div className="ai-result-pop" role="dialog" aria-label="AI 日志分析">
+      {mountAiWorkspace(
+        (aiOpen || aiPanelOpen || aiBusy || aiError || aiResult) && (
+          <div className="ai-result-pop" role="dialog" aria-label="AI 日志分析">
           <div className="pop-head">
             <button type="button" className="settings-close" onClick={async () => { setAiHistory(await api.listAiHistory()); setAiHistoryOpen((open) => !open); }}>历史记录</button>
             <span>AI 日志分析</span>
@@ -1128,7 +1150,9 @@ export function LogContent({ session, activeKey, status = 'ready', error, active
             )}
           </div>
           {!aiResult && <div className="ai-empty-composer"><textarea aria-label="AI 问题" value={aiQuestion} onChange={(event) => setAiQuestion(event.target.value)} placeholder="输入问题…" /><span>请先选择日志</span></div>}
-        </div>
+          </div>
+        ),
+        aiWorkspaceHost,
       )}
 
       <div className="col-foot log-status-foot">

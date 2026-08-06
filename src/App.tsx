@@ -132,6 +132,7 @@ export function App() {
   );
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [aiOpen, setAiOpen] = useState(false);
+  const [aiWorkspaceHost, setAiWorkspaceHost] = useState<HTMLDivElement | null>(null);
   const [uiTemplate, setUiTemplate] = useState(() => loadUiTemplate(localStorage));
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [fileSearchMounted, setFileSearchMounted] = useState(false);
@@ -1221,7 +1222,7 @@ export function App() {
   const hasDirs = tree.length > 0;
 
   return (
-    <div className="app">
+    <div className={'app' + (aiOpen ? ' with-ai' : '')}>
       <TopBar
         onOpenSearch={openFileSearch}
         searchOpen={fileSearchOpen}
@@ -1399,7 +1400,16 @@ export function App() {
             />
             <div className="log-panels">
               {tabIds(tabLayout).length === 0 ? (
-                <LogContent session={null} activeKey={null} aiOpen={aiOpen} onAiClose={() => { void api.setAiWindowOpen(false).then(() => setAiOpen(false)); }} />
+                <LogContent
+                  session={null}
+                  activeKey={null}
+                  aiOpen={aiOpen}
+                  aiWorkspaceHost={aiWorkspaceHost}
+                  onAiOpen={() => setAiOpen(true)}
+                  onAiClose={() => {
+                    void api.setAiWindowOpen(false).then(() => setAiOpen(false));
+                  }}
+                />
               ) : (
                 tabIds(tabLayout).map((id) => {
                   const tab = tabs[id];
@@ -1416,7 +1426,11 @@ export function App() {
                         status={tab.status}
                         error={tab.error}
                         aiOpen={aiOpen && activeKey === id}
-                        onAiClose={() => { void api.setAiWindowOpen(false).then(() => setAiOpen(false)); }}
+                        aiWorkspaceHost={aiWorkspaceHost}
+                        onAiOpen={() => setAiOpen(true)}
+                        onAiClose={() => {
+                          void api.setAiWindowOpen(false).then(() => setAiOpen(false));
+                        }}
                       />
                     </div>
                   );
@@ -1428,6 +1442,13 @@ export function App() {
           <EmptyState onAddDir={addDir} />
         )}
       </div>
+      {aiOpen && (
+        <div
+          id="ai-workspace-host"
+          className="ai-workspace-host"
+          ref={setAiWorkspaceHost}
+        />
+      )}
     </div>
   );
 }
