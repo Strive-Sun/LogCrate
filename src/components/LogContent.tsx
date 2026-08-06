@@ -14,6 +14,8 @@ import type {
   LogSearchMatch,
   AiAnalysisResult,
   AiAttachmentSummary,
+  AiRequestFailure,
+  AiStreamEvent,
   OpenSessionResult,
 } from '../api';
 import { fmtNum, fmtSize } from '../util/format';
@@ -48,6 +50,49 @@ interface Props {
 const PAGE = 200;
 const MAX_CACHED_LINES = 5_000;
 const ENCODINGS = ['UTF-8', 'GBK', 'GB18030', 'UTF-16LE', 'UTF-16BE'];
+type AiDisplayResult = Omit<AiAnalysisResult, 'timing'> & Partial<Pick<AiAnalysisResult, 'timing'>>;
+
+const AI_FAILURE_CODES = new Set<AiRequestFailure['code']>([
+  'connect_timeout',
+  'stream_idle_timeout',
+  'total_timeout',
+  'transport',
+  'http',
+  'invalid_response',
+  'response_too_large',
+  'channel_closed',
+]);
+const AI_FAILURE_STAGES = new Set<AiRequestFailure['stage']>([
+  'connect',
+  'awaiting_response',
+  'response_stream',
+  'parse',
+  'frontend_handoff',
+]);
+
+export function formatAiRequestFailure(error: unknown): string {
+  if (!error || typeof error !== 'object') return errorMessage(error);
+  const failure = error as Partial<AiRequestFailure>;
+  if (
+    !failure.code ||
+    !AI_FAILURE_CODES.has(failure.code) ||
+    !failure.stage ||
+    !AI_FAILURE_STAGES.has(failure.stage) ||
+    typeof failure.elapsedMs !== 'number' ||
+    !Number.isFinite(failure.elapsedMs)
+  ) {
+    return errorMessage(error);
+  }
+  const details = [
+    `错误类别：${failure.code}`,
+    `阶段：${failure.stage}`,
+    `耗时：${Math.max(0, Math.round(failure.elapsedMs))} ms`,
+  ];
+  if (failure.httpStatus !== undefined) details.push(`HTTP：${failure.httpStatus}`);
+  if (failure.contentType) details.push(`Content-Type：${failure.contentType}`);
+  if (failure.bodyBytes !== undefined) details.push(`累计：${fmtSize(failure.bodyBytes)}`);
+  return details.join(' · ');
+}
 
 function mountAiWorkspace(node: ReactNode, host?: HTMLElement | null): ReactNode {
   if (host === undefined) return node;
@@ -230,9 +275,14 @@ export function LogContent({
     selectedText: string;
   } | null>(null);
   const [logScrollLeft, setLogScrollLeft] = useState(0);
-  const [aiResult, setAiResult] = useState<AiAnalysisResult | null>(null);
+  const [aiResult, setAiResult] = useState<AiDisplayResult | null>(null);
+  const [aiRequestTarget, setAiRequestTarget] = useState<{
+    providerId: string;
+    model: string;
+  } | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [aiIncomplete, setAiIncomplete] = useState(false);
   const [aiHistory, setAiHistory] = useState<import('../api/types').AiHistorySummary[]>([]);
   const [aiHistoryOpen, setAiHistoryOpen] = useState(false);
   const [aiConversation, setAiConversation] = useState<import('../api/types').AiHistoryMessage[]>(
@@ -256,6 +306,11 @@ export function LogContent({
   const fieldUnsub = useRef<() => void>(() => {});
   const fieldRequestGeneration = useRef(0);
   const aiSendingRef = useRef(false);
+  const aiRequestGeneration = useRef(0);
+  const aiDeltaFrame = useRef<number | null>(null);
+  const aiDeltaBuffer = useRef('');
+  const aiStreamingMessageIndex = useRef(-1);
+  const aiSuccessfulConversation = useRef<import('../api/types').AiHistoryMessage[]>([]);
   const fieldAnchor = useRef(1);
   const fieldRestoreAnchor = useRef<number | null>(null);
   const fieldUserInteracted = useRef(false);
@@ -269,6 +324,65 @@ export function LogContent({
   fieldModeRef.current = fieldMode;
   includeUnparsedRef.current = includeUnparsed;
   indexedLinesRef.current = indexedLines;
+
+  const flushAiDeltas = useCallback((generation: number) => {
+    if (generation !== aiRequestGeneration.current) return;
+    if (aiDeltaFrame.current !== null) {
+      window.cancelAnimationFrame(aiDeltaFrame.current);
+      aiDeltaFrame.current = null;
+    }
+    const delta = aiDeltaBuffer.current;
+    aiDeltaBuffer.current = '';
+    if (!delta) return;
+    const messageIndex = aiStreamingMessageIndex.current;
+    setAiConversation((messages) =>
+      messages.map((message, index) =>
+        index === messageIndex && message.role === 'assistant'
+          ? { ...message, content: message.content + delta }
+          : message,
+      ),
+    );
+  }, []);
+
+  const queueAiDelta = useCallback(
+    (generation: number, event: AiStreamEvent) => {
+      if (generation !== aiRequestGeneration.current || event.type !== 'delta') return;
+      aiDeltaBuffer.current += event.content;
+      if (aiDeltaFrame.current !== null) return;
+      aiDeltaFrame.current = window.requestAnimationFrame(() => {
+        aiDeltaFrame.current = null;
+        flushAiDeltas(generation);
+      });
+    },
+    [flushAiDeltas],
+  );
+
+  const beginAiStream = useCallback((messages: import('../api/types').AiHistoryMessage[]) => {
+    aiRequestGeneration.current += 1;
+    if (aiDeltaFrame.current !== null) window.cancelAnimationFrame(aiDeltaFrame.current);
+    aiDeltaFrame.current = null;
+    aiDeltaBuffer.current = '';
+    aiStreamingMessageIndex.current = messages.length - 1;
+    setAiConversation(messages);
+    setAiIncomplete(false);
+    return aiRequestGeneration.current;
+  }, []);
+
+  const finishAiStream = useCallback(
+    (generation: number, content: string) => {
+      if (generation !== aiRequestGeneration.current) return;
+      flushAiDeltas(generation);
+      const messageIndex = aiStreamingMessageIndex.current;
+      setAiConversation((messages) =>
+        messages.map((message, index) =>
+          index === messageIndex && message.role === 'assistant'
+            ? { ...message, content }
+            : message,
+        ),
+      );
+    },
+    [flushAiDeltas],
+  );
 
   const analyzeSelectedText = useCallback(
     async (selectedText: string) => {
@@ -298,19 +412,47 @@ export function LogContent({
         setAiError(errorMessage(error));
         return;
       }
+      setAiRequestTarget({ providerId: provider.id, model: provider.model });
+      setAiResult(null);
+      setAiConversationText(selectedText);
+      setAiAttachments([]);
+      setAiHistoryId(null);
+      aiSendingRef.current = false;
+      aiSuccessfulConversation.current = [];
+      const initialMessages = [
+        { role: 'user' as const, content: selectedText },
+        { role: 'assistant' as const, content: '' },
+      ];
+      const generation = beginAiStream(initialMessages);
       setAiBusy(true);
+      let result: AiAnalysisResult;
       try {
-        const result = await api.analyzeAiLog(provider.id, selectedText);
-        setAiResult(result);
-        setAiConversation([
-          { role: 'user', content: selectedText },
-          { role: 'assistant', content: result.content },
-        ]);
-        setAiConversationText(selectedText);
-        setAiAttachments([]);
-        const now = new Date().toISOString();
-        const historyId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        setAiHistoryId(historyId);
+        result = await api.analyzeAiLog(provider.id, selectedText, (event) =>
+          queueAiDelta(generation, event),
+        );
+      } catch (error) {
+        if (generation === aiRequestGeneration.current) {
+          flushAiDeltas(generation);
+          setAiIncomplete(true);
+          setAiError(formatAiRequestFailure(error));
+        }
+        return;
+      } finally {
+        if (generation === aiRequestGeneration.current) setAiBusy(false);
+      }
+      if (generation !== aiRequestGeneration.current) return;
+      finishAiStream(generation, result.content);
+      const successfulMessages = [
+        initialMessages[0],
+        { role: 'assistant' as const, content: result.content },
+      ];
+      aiSuccessfulConversation.current = successfulMessages;
+      setAiResult(result);
+      setAiIncomplete(false);
+      const now = new Date().toISOString();
+      const historyId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      setAiHistoryId(historyId);
+      try {
         await api.saveAiHistory({
           id: historyId,
           title: selectedText.split(/\r?\n/)[0].slice(0, 80) || 'AI 日志分析',
@@ -321,18 +463,13 @@ export function LogContent({
           model: result.model,
           endpointFingerprint: provider.baseUrl,
           selectedText,
-          messages: [
-            { role: 'user', content: selectedText },
-            { role: 'assistant', content: result.content },
-          ],
+          messages: successfulMessages,
         });
       } catch (error) {
         setAiError(errorMessage(error));
-      } finally {
-        setAiBusy(false);
       }
     },
-    [onAiOpen],
+    [beginAiStream, finishAiStream, flushAiDeltas, onAiOpen, queueAiDelta],
   );
 
   const clearLineCache = useCallback(() => {
@@ -385,6 +522,10 @@ export function LogContent({
     () => () => {
       encodingUnsub.current();
       fieldUnsub.current();
+      aiRequestGeneration.current += 1;
+      if (aiDeltaFrame.current !== null) window.cancelAnimationFrame(aiDeltaFrame.current);
+      aiDeltaFrame.current = null;
+      aiDeltaBuffer.current = '';
     },
     [],
   );
@@ -911,7 +1052,7 @@ export function LogContent({
     if (!aiResult || aiBusy || aiSendingRef.current || !aiQuestion.trim()) return;
     const question = aiQuestion;
     const attachments = aiAttachments;
-    const conversationBeforeSend = aiConversation;
+    const conversationBeforeSend = aiSuccessfulConversation.current;
     const optimisticConversation = [
       ...conversationBeforeSend,
       {
@@ -922,19 +1063,27 @@ export function LogContent({
           charCount: attachment.charCount,
         })),
       },
+      { role: 'assistant' as const, content: '' },
     ];
+    const generation = beginAiStream(optimisticConversation);
+    setAiResult((result) =>
+      result
+        ? { providerId: result.providerId, model: result.model, content: result.content }
+        : result,
+    );
     aiSendingRef.current = true;
     setAiBusy(true);
     setAiError(null);
-    setAiConversation(optimisticConversation);
     setAiQuestion('');
     setAiAttachments([]);
+    let next: AiAnalysisResult;
     try {
       const providers = await api.listAiProviders();
       const provider = providers.find((item) => item.id === aiResult.providerId) ?? providers[0];
       if (!provider) throw new Error('请先在设置中配置 AI 供应商');
+      setAiRequestTarget({ providerId: provider.id, model: provider.model });
       const historyUpdatedAt = new Date().toISOString();
-      const next = await api.continueAiConversation(
+      next = await api.continueAiConversation(
         provider.id,
         aiConversationText,
         conversationBeforeSend.slice(-12),
@@ -942,28 +1091,41 @@ export function LogContent({
         attachments.map((attachment) => attachment.path),
         aiHistoryId ?? undefined,
         historyUpdatedAt,
+        (event) => queueAiDelta(generation, event),
       );
-      setAiResult(next);
-      setAiConversation([
-        ...optimisticConversation,
-        { role: 'assistant' as const, content: next.content },
-      ]);
     } catch (error) {
-      setAiError(errorMessage(error));
+      if (generation === aiRequestGeneration.current) {
+        flushAiDeltas(generation);
+        setAiIncomplete(true);
+        setAiError(formatAiRequestFailure(error));
+        setAiQuestion(question);
+        setAiAttachments(attachments);
+      }
+      return;
     } finally {
       aiSendingRef.current = false;
-      setAiBusy(false);
+      if (generation === aiRequestGeneration.current) setAiBusy(false);
     }
+    if (generation !== aiRequestGeneration.current) return;
+    finishAiStream(generation, next.content);
+    const successfulConversation = optimisticConversation.map((message, index) =>
+      index === optimisticConversation.length - 1 ? { ...message, content: next.content } : message,
+    );
+    aiSuccessfulConversation.current = successfulConversation;
+    setAiResult(next);
+    setAiIncomplete(false);
   }
 
   useEffect(() => {
-    if (!aiResult) return;
+    if (!aiResult && !aiRequestTarget) return;
     const frame = window.requestAnimationFrame(() => {
       const body = aiResultBodyRef.current;
       if (body) body.scrollTop = body.scrollHeight;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [aiBusy, aiConversation.length, aiResult]);
+  }, [aiBusy, aiConversation.length, aiRequestTarget, aiResult]);
+
+  const aiDisplayTarget = aiResult ?? aiRequestTarget;
 
   if (!session && !activeKey) {
     return (
@@ -1197,7 +1359,7 @@ export function LogContent({
       )}
 
       {mountAiWorkspace(
-        (aiOpen || aiPanelOpen || aiBusy || aiError || aiResult) && (
+        (aiOpen || aiPanelOpen || aiBusy || aiError || aiDisplayTarget) && (
           <div className="ai-result-pop" role="dialog" aria-label="AI 日志分析">
             <div className="pop-head">
               <button
@@ -1216,8 +1378,18 @@ export function LogContent({
                 className="settings-close"
                 aria-label="关闭 AI 日志分析"
                 onClick={() => {
+                  aiRequestGeneration.current += 1;
+                  if (aiDeltaFrame.current !== null)
+                    window.cancelAnimationFrame(aiDeltaFrame.current);
+                  aiDeltaFrame.current = null;
+                  aiDeltaBuffer.current = '';
+                  aiSendingRef.current = false;
+                  aiSuccessfulConversation.current = [];
                   setAiResult(null);
+                  setAiRequestTarget(null);
                   setAiError(null);
+                  setAiIncomplete(false);
+                  setAiBusy(false);
                   setAiQuestion('');
                   setAiAttachments([]);
                   setAiPanelOpen(false);
@@ -1257,17 +1429,27 @@ export function LogContent({
                           const assistant = [...record.messages]
                             .reverse()
                             .find((message) => message.role === 'assistant');
-                          if (assistant)
-                            setAiResult({
-                              providerId: record.providerId,
-                              model: record.model,
-                              content: assistant.content,
-                            });
+                          setAiResult(
+                            assistant
+                              ? {
+                                  providerId: record.providerId,
+                                  model: record.model,
+                                  content: assistant.content,
+                                }
+                              : null,
+                          );
+                          setAiRequestTarget({
+                            providerId: record.providerId,
+                            model: record.model,
+                          });
+                          aiSuccessfulConversation.current = record.messages;
                           setAiConversation(record.messages);
                           setAiConversationText(record.selectedText);
                           setAiQuestion('');
                           setAiAttachments([]);
                           setAiHistoryId(record.id);
+                          setAiIncomplete(false);
+                          setAiError(null);
                           setAiHistoryOpen(false);
                         }}
                       >
@@ -1295,22 +1477,28 @@ export function LogContent({
               </div>
             )}
             <div className="ai-result-body" ref={aiResultBodyRef}>
-              {aiBusy && !aiResult && <div className="settings-hint">分析中，请稍候…</div>}
               {aiError && <div className="update-message error">{aiError}</div>}
-              {!aiResult && !aiBusy && !aiError && (
+              {!aiDisplayTarget && !aiBusy && !aiError && (
                 <div className="ai-empty-state">
                   <p>选中日志后使用右键“AI 分析”，或从历史对话中继续。</p>
                 </div>
               )}
-              {aiResult && (
+              {aiDisplayTarget && (
                 <>
                   <div className="settings-hint">
-                    供应商：{aiResult.providerId} · 模型：{aiResult.model}
+                    供应商：{aiDisplayTarget.providerId} · 模型：{aiDisplayTarget.model}
                   </div>
+                  {aiResult?.timing && (
+                    <div className="ai-response-timing" role="status">
+                      响应头 {aiResult.timing.responseHeadersMs} ms · 首字{' '}
+                      {aiResult.timing.firstContentMs ?? aiResult.timing.totalMs} ms · 流接收{' '}
+                      {aiResult.timing.streamReceiveMs} ms · 总计 {aiResult.timing.totalMs} ms
+                    </div>
+                  )}
                   <div className="ai-chat-messages">
                     {(aiConversation.length
                       ? aiConversation
-                      : [{ role: 'assistant' as const, content: aiResult.content }]
+                      : [{ role: 'assistant' as const, content: aiResult?.content ?? '' }]
                     ).map((message, index) => (
                       <div
                         key={`${index}-${message.role}`}
@@ -1327,6 +1515,13 @@ export function LogContent({
                               message.content
                             )}
                           </div>
+                          {aiIncomplete &&
+                            message.role === 'assistant' &&
+                            index === aiConversation.length - 1 && (
+                              <div className="ai-incomplete-label" role="status">
+                                未完成 · 本段不会保存到历史或用于后续上下文
+                              </div>
+                            )}
                           {message.attachments && message.attachments.length > 0 && (
                             <div className="ai-chat-attachments">
                               {message.attachments.map((attachment) => (
@@ -1430,7 +1625,7 @@ export function LogContent({
                 </div>
               </div>
             )}
-            {!aiResult && (
+            {!aiDisplayTarget && (
               <div className="ai-empty-composer" role="status">
                 请先选中日志内容并右键“AI 分析”，或打开历史记录；建立对话后按 Enter 发送
               </div>

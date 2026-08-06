@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { mockApi } from './mock';
 
@@ -35,10 +36,27 @@ test('AI mock analysis rejects blank selections and returns structured content',
     endpointMode: 'base',
     allowInsecureHttp: false,
   });
-  const result = await mockApi.analyzeAiLog('analysis', 'ERROR failed');
+  const deltas: string[] = [];
+  const result = await mockApi.analyzeAiLog('analysis', 'ERROR failed', (event) =>
+    deltas.push(event.content),
+  );
   assert.equal(result.providerId, 'analysis');
   assert.match(result.content, /ERROR/);
+  assert.equal(deltas.join(''), result.content);
+  assert.ok(result.timing.totalMs >= result.timing.firstContentMs!);
   await mockApi.deleteAiProvider('analysis');
+});
+
+test('Tauri AI adapter creates one request-local Channel for each invoke', () => {
+  const source = readFileSync(new URL('tauri.ts', import.meta.url), 'utf8');
+  assert.match(source, /new Channel<AiStreamEvent>\(\)/);
+  assert.match(source, /channel\.onmessage = \(event\) => onEvent\?\.\(event\)/);
+  assert.match(
+    source,
+    /invoke\('analyze_ai_log', \{ providerId, selectedText, onEvent: channel \}\)/,
+  );
+  assert.match(source, /options: \{[\s\S]*historyUpdate:[\s\S]*onEvent: channel,/);
+  assert.doesNotMatch(source, /const ai(Stream)?Channel\s*=\s*new Channel/);
 });
 
 test('AI attachment contract bounds selection and returns safe display metadata', async () => {

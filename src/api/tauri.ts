@@ -1,7 +1,7 @@
 // 真实 Tauri 后端适配层:暴露与 mockApi 完全相同的方法签名,
 // 内部调用 invoke 并把绝对路径等细节隐藏起来,组件层无需改动。
 
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
@@ -16,6 +16,7 @@ import type {
   AppUpdateProgress,
   AiProviderConfig,
   AiAnalysisResult,
+  AiStreamEvent,
   AiHistoryRecord,
   AiHistorySummary,
   ArchiveEntry,
@@ -149,8 +150,14 @@ export const tauriApi = {
   async testAiProvider(providerId: string): Promise<void> {
     await invoke('test_ai_provider', { providerId });
   },
-  async analyzeAiLog(providerId: string, selectedText: string): Promise<AiAnalysisResult> {
-    return invoke('analyze_ai_log', { providerId, selectedText });
+  async analyzeAiLog(
+    providerId: string,
+    selectedText: string,
+    onEvent?: (event: AiStreamEvent) => void,
+  ): Promise<AiAnalysisResult> {
+    const channel = new Channel<AiStreamEvent>();
+    channel.onmessage = (event) => onEvent?.(event);
+    return invoke('analyze_ai_log', { providerId, selectedText, onEvent: channel });
   },
   async selectAiAttachmentPaths(): Promise<string[]> {
     const selected = await openDialog({
@@ -175,15 +182,21 @@ export const tauriApi = {
     attachmentPaths: string[] = [],
     historyId?: string,
     historyUpdatedAt?: string,
+    onEvent?: (event: AiStreamEvent) => void,
   ): Promise<AiAnalysisResult> {
+    const channel = new Channel<AiStreamEvent>();
+    channel.onmessage = (event) => onEvent?.(event);
     return invoke('continue_ai_conversation', {
       providerId,
       selectedText,
       history,
       question,
-      attachmentPaths,
-      historyUpdate:
-        historyId && historyUpdatedAt ? { id: historyId, updatedAt: historyUpdatedAt } : null,
+      options: {
+        attachmentPaths,
+        historyUpdate:
+          historyId && historyUpdatedAt ? { id: historyId, updatedAt: historyUpdatedAt } : null,
+      },
+      onEvent: channel,
     });
   },
   async setAiWindowOpen(open: boolean): Promise<{ mainWorkspaceWidth: number } | null> {

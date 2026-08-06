@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Manager};
+use tauri::{ipc::Channel, AppHandle, Manager};
 
 const KEYRING_SERVICE: &str = "com.logcrate.ai-provider";
 
@@ -114,7 +114,7 @@ enum AiRequestStage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct AiRequestFailure {
+pub struct AiRequestFailure {
     code: AiRequestFailureCode,
     stage: AiRequestStage,
     elapsed_ms: u64,
@@ -146,12 +146,13 @@ impl std::fmt::Display for AiRequestFailure {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AiResponseTiming {
-    response_headers_ms: u64,
-    first_content_ms: Option<u64>,
-    stream_receive_ms: u64,
-    total_ms: u64,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiResponseTiming {
+    pub response_headers_ms: u64,
+    pub first_content_ms: Option<u64>,
+    pub stream_receive_ms: u64,
+    pub total_ms: u64,
 }
 
 #[derive(Debug)]
@@ -187,6 +188,32 @@ pub struct AiAnalysisResult {
     pub provider_id: String,
     pub model: String,
     pub content: String,
+    pub timing: AiResponseTiming,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AiStreamEvent {
+    Delta { content: String },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum AiCommandError {
+    Request(AiRequestFailure),
+    Message(String),
+}
+
+impl From<AiRequestFailure> for AiCommandError {
+    fn from(value: AiRequestFailure) -> Self {
+        Self::Request(value)
+    }
+}
+
+impl From<String> for AiCommandError {
+    fn from(value: String) -> Self {
+        Self::Message(value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -202,6 +229,13 @@ pub struct AiAttachmentSummary {
 pub struct AiHistoryUpdate {
     pub id: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiFollowUpOptions {
+    pub attachment_paths: Vec<String>,
+    pub history_update: Option<AiHistoryUpdate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1371,7 +1405,8 @@ pub async fn analyze_ai_log(
     app: AppHandle,
     provider_id: String,
     selected_text: String,
-) -> Result<AiAnalysisResult, String> {
+    on_event: Channel<AiStreamEvent>,
+) -> Result<AiAnalysisResult, AiCommandError> {
     validate_analysis_text(&selected_text)?;
     let provider = read_stored_providers(&app)?
         .into_iter()
@@ -1380,7 +1415,7 @@ pub async fn analyze_ai_log(
     let api_key = read_api_key(&provider.id)
         .map_err(|_| "Unable to access the API key in the system credential store".to_string())?;
     if api_key.is_empty() {
-        return Err("AI provider API key is not configured".to_string());
+        return Err("AI provider API key is not configured".to_string().into());
     }
     let outcome = send_ai_request(
         &provider,
@@ -1388,16 +1423,28 @@ pub async fn analyze_ai_log(
         INITIAL_ANALYSIS_INSTRUCTIONS,
         &selected_text,
         AiRequestPolicy::analysis(),
-        |_| Ok(()),
+        |content| {
+            on_event
+                .send(AiStreamEvent::Delta {
+                    content: content.to_string(),
+                })
+                .map_err(|_| ())
+        },
     )
-    .await
-    .map_err(|failure| failure.to_string())?;
-    let content = analysis_content(provider.protocol, &outcome.body)
-        .ok_or_else(|| "AI provider returned no analysis content".to_string())?;
+    .await?;
+    let content = analysis_content(provider.protocol, &outcome.body).ok_or(AiRequestFailure {
+        code: AiRequestFailureCode::InvalidResponse,
+        stage: AiRequestStage::Parse,
+        elapsed_ms: outcome.timing.total_ms,
+        http_status: None,
+        content_type: None,
+        body_bytes: None,
+    })?;
     Ok(AiAnalysisResult {
         provider_id,
         model: provider.model,
         content,
+        timing: outcome.timing,
     })
 }
 
@@ -1421,9 +1468,9 @@ pub async fn continue_ai_conversation(
     selected_text: String,
     history: Vec<crate::ai_history::AiHistoryMessage>,
     question: String,
-    attachment_paths: Vec<String>,
-    history_update: Option<AiHistoryUpdate>,
-) -> Result<AiAnalysisResult, String> {
+    options: AiFollowUpOptions,
+    on_event: Channel<AiStreamEvent>,
+) -> Result<AiAnalysisResult, AiCommandError> {
     validate_analysis_text(&selected_text)?;
     validate_follow_up_question(&question)?;
     validate_conversation_history(&history)?;
@@ -1431,7 +1478,8 @@ pub async fn continue_ai_conversation(
         .into_iter()
         .find(|p| p.id == provider_id)
         .ok_or_else(|| "AI provider was not found".to_string())?;
-    let mut stored_history = history_update
+    let mut stored_history = options
+        .history_update
         .as_ref()
         .map(|update| update.id.as_str())
         .map(|id| crate::ai_history::load_ai_history_record(&app, id))
@@ -1440,7 +1488,8 @@ pub async fn continue_ai_conversation(
         validate_history_target(record, &provider)?;
         validate_conversation_history(recent_stored_history(&record.messages))?;
     }
-    let attachments = load_ai_attachments_async(selected_text.clone(), attachment_paths).await?;
+    let attachments =
+        load_ai_attachments_async(selected_text.clone(), options.attachment_paths).await?;
     let attachment_history = stored_history
         .as_ref()
         .map(|record| record.messages.as_slice())
@@ -1464,14 +1513,25 @@ pub async fn continue_ai_conversation(
         FOLLOW_UP_INSTRUCTIONS,
         &input,
         AiRequestPolicy::analysis(),
-        |_| Ok(()),
+        |content| {
+            on_event
+                .send(AiStreamEvent::Delta {
+                    content: content.to_string(),
+                })
+                .map_err(|_| ())
+        },
     )
-    .await
-    .map_err(|failure| failure.to_string())?;
-    let content = analysis_content(provider.protocol, &outcome.body)
-        .ok_or_else(|| "AI provider returned no analysis content".to_string())?;
+    .await?;
+    let content = analysis_content(provider.protocol, &outcome.body).ok_or(AiRequestFailure {
+        code: AiRequestFailureCode::InvalidResponse,
+        stage: AiRequestStage::Parse,
+        elapsed_ms: outcome.timing.total_ms,
+        http_status: None,
+        content_type: None,
+        body_bytes: None,
+    })?;
     if let Some(record) = stored_history.as_mut() {
-        if let Some(update) = history_update {
+        if let Some(update) = options.history_update {
             record.updated_at = update.updated_at;
         }
         record.messages.push(crate::ai_history::AiHistoryMessage {
@@ -1490,6 +1550,7 @@ pub async fn continue_ai_conversation(
         provider_id,
         model: provider.model,
         content,
+        timing: outcome.timing,
     })
 }
 
@@ -2045,6 +2106,22 @@ mod tests {
                 AiRequestStage::AwaitingResponse
             )
         );
+        let serialized = serde_json::to_value(AiCommandError::Request(AiRequestFailure {
+            code: AiRequestFailureCode::StreamIdleTimeout,
+            stage: AiRequestStage::ResponseStream,
+            elapsed_ms: 30_001,
+            http_status: None,
+            content_type: Some("text/event-stream".to_string()),
+            body_bytes: Some(128),
+        }))
+        .expect("serializable structured request failure");
+        assert_eq!(serialized["code"], "stream_idle_timeout");
+        assert_eq!(serialized["stage"], "response_stream");
+        assert_eq!(serialized["elapsedMs"], 30_001);
+        assert_eq!(serialized["contentType"], "text/event-stream");
+        assert_eq!(serialized["bodyBytes"], 128);
+        assert!(serialized.get("endpoint").is_none());
+        assert!(serialized.get("content").is_none());
     }
 
     #[tokio::test]
@@ -2088,6 +2165,43 @@ mod tests {
                 .total_ms
                 .saturating_sub(outcome.timing.response_headers_ms)
         );
+        let timing = serde_json::to_value(&outcome.timing).expect("serializable timing");
+        assert!(timing.get("responseHeadersMs").is_some());
+        assert!(timing.get("firstContentMs").is_some());
+        assert!(timing.get("streamReceiveMs").is_some());
+        assert!(timing.get("totalMs").is_some());
+    }
+
+    #[tokio::test]
+    async fn response_stream_stops_when_the_request_channel_closes() {
+        let (provider, server) = local_stream_provider(|mut stream| {
+            write_sse_headers(&mut stream);
+            stream
+                .write_all(
+                    concat!(
+                        "data: {\"type\":\"response.output_text.delta\",",
+                        "\"delta\":\"partial\"}\n\n",
+                        "data: {\"type\":\"response.completed\"}\n\n"
+                    )
+                    .as_bytes(),
+                )
+                .expect("SSE response");
+        });
+        let failure = send_ai_request(
+            &provider,
+            "test-key",
+            "instructions",
+            "input",
+            short_policy(200, 500, 1024),
+            |_| Err(()),
+        )
+        .await
+        .expect_err("closed request channel should stop the stream");
+        server.join().expect("closed-channel SSE server");
+
+        assert_eq!(failure.code, AiRequestFailureCode::ChannelClosed);
+        assert_eq!(failure.stage, AiRequestStage::FrontendHandoff);
+        assert!(failure.body_bytes.is_some_and(|bytes| bytes > 0));
     }
 
     #[tokio::test]

@@ -7,7 +7,12 @@ import type { ComponentProps } from 'react';
 import { api, type LogFieldCondition, type LogFieldLayout, type LogSearchRequest } from '../api';
 import { I18nProvider } from '../i18n/I18nProvider';
 import { persistLogFieldLayout, type StoredLogFieldLayout } from '../util/logFieldLayoutStorage';
-import { LogContent, mergeLogLineWindow, storedToRuntime } from './LogContent';
+import {
+  LogContent,
+  formatAiRequestFailure,
+  mergeLogLineWindow,
+  storedToRuntime,
+} from './LogContent';
 import { LogFieldFilterBar } from './LogFieldFilterBar';
 import { LogRow } from './LogRow';
 
@@ -26,12 +31,14 @@ const originalLocateLogFieldAnchor = api.locateLogFieldAnchor;
 const originalClearLogFieldFilter = api.clearLogFieldFilter;
 const originalListAiProviders = api.listAiProviders;
 const originalAnalyzeAiLog = api.analyzeAiLog;
+const originalSaveAiHistory = api.saveAiHistory;
 const originalSelectAiAttachmentPaths = api.selectAiAttachmentPaths;
 const originalInspectAiAttachments = api.inspectAiAttachments;
 const originalContinueAiConversation = api.continueAiConversation;
 const originalPrompt = dom.window.prompt;
 const originalConfirm = dom.window.confirm;
 const originalGetSelection = dom.window.getSelection;
+const originalRequestAnimationFrame = dom.window.requestAnimationFrame;
 
 before(async () => {
   class ResizeObserverStub {
@@ -81,12 +88,14 @@ afterEach(() => {
   api.clearLogFieldFilter = originalClearLogFieldFilter;
   api.listAiProviders = originalListAiProviders;
   api.analyzeAiLog = originalAnalyzeAiLog;
+  api.saveAiHistory = originalSaveAiHistory;
   api.selectAiAttachmentPaths = originalSelectAiAttachmentPaths;
   api.inspectAiAttachments = originalInspectAiAttachments;
   api.continueAiConversation = originalContinueAiConversation;
   dom.window.prompt = originalPrompt;
   dom.window.confirm = originalConfirm;
   dom.window.getSelection = originalGetSelection;
+  dom.window.requestAnimationFrame = originalRequestAnimationFrame;
   dom.window.localStorage.clear();
   harness.cleanup();
 });
@@ -147,6 +156,136 @@ function fieldLayout(name = 'Level'): LogFieldLayout {
   };
 }
 
+test('AI request failures retain only structured category, stage, timing, and bounded metadata', () => {
+  assert.equal(
+    formatAiRequestFailure({
+      code: 'stream_idle_timeout',
+      stage: 'response_stream',
+      elapsedMs: 30_001,
+      contentType: 'text/event-stream',
+      bodyBytes: 2048,
+      endpoint: 'https://secret.example',
+      content: 'private log text',
+    }),
+    '错误类别：stream_idle_timeout · 阶段：response_stream · 耗时：30001 ms · Content-Type：text/event-stream · 累计：2.0KB',
+  );
+});
+
+test('failed AI stream keeps partial text visible and out of history', async () => {
+  let historySaveCount = 0;
+  dom.window.getSelection = () => ({ toString: () => 'ERROR private selection' }) as Selection;
+  dom.window.confirm = () => true;
+  api.listAiProviders = async () => [
+    {
+      id: 'stream-provider',
+      name: 'Stream provider',
+      baseUrl: 'https://example.test/v1',
+      model: 'stream-model',
+      keyConfigured: true,
+      protocol: 'responses',
+      endpointMode: 'base',
+      allowInsecureHttp: false,
+    },
+  ];
+  api.analyzeAiLog = async (_providerId, _selectedText, onEvent) => {
+    onEvent?.({ type: 'delta', content: 'partial ' });
+    onEvent?.({ type: 'delta', content: 'answer' });
+    throw {
+      code: 'stream_idle_timeout',
+      stage: 'response_stream',
+      elapsedMs: 30_000,
+      bodyBytes: 128,
+    };
+  };
+  api.saveAiHistory = async () => {
+    historySaveCount += 1;
+  };
+
+  const { container } = renderLog({ onAiOpen: async () => undefined });
+  harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
+  harness.fireEvent.click(harness.screen.getByText('AI 分析'));
+
+  await harness.waitFor(() =>
+    assert.match(
+      harness.screen.getByText(/错误类别：stream_idle_timeout/).textContent ?? '',
+      /阶段/,
+    ),
+  );
+  assert.equal(harness.screen.getByText('partial answer').textContent, 'partial answer');
+  assert.ok(harness.screen.getByText(/未完成 · 本段不会保存到历史/));
+  assert.equal(historySaveCount, 0);
+  assert.equal(harness.screen.queryByRole('status', { name: 'AI 正在回复' }), null);
+});
+
+test('concurrent AI request channels cannot mix deltas or let an older result overwrite the latest', async () => {
+  let selectedText = 'ERROR first';
+  let pendingFrame: FrameRequestCallback | undefined;
+  const requests: Array<{
+    onEvent?: (event: { type: 'delta'; content: string }) => void;
+    resolve: (result: Awaited<ReturnType<typeof api.analyzeAiLog>>) => void;
+  }> = [];
+  dom.window.requestAnimationFrame = (callback) => {
+    pendingFrame = callback;
+    return 1;
+  };
+  dom.window.getSelection = () => ({ toString: () => selectedText }) as Selection;
+  dom.window.confirm = () => true;
+  api.listAiProviders = async () => [
+    {
+      id: 'stream-provider',
+      name: 'Stream provider',
+      baseUrl: 'https://example.test/v1',
+      model: 'stream-model',
+      keyConfigured: true,
+      protocol: 'responses',
+      endpointMode: 'base',
+      allowInsecureHttp: false,
+    },
+  ];
+  api.analyzeAiLog = (_providerId, _text, onEvent) =>
+    new Promise((resolve) => requests.push({ onEvent, resolve }));
+
+  const { container } = renderLog({ onAiOpen: async () => undefined });
+  const openAnalysis = () => {
+    harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
+    harness.fireEvent.click(harness.screen.getByText('AI 分析'));
+  };
+  openAnalysis();
+  await harness.waitFor(() => assert.equal(requests.length, 1));
+  selectedText = 'ERROR second';
+  openAnalysis();
+  await harness.waitFor(() => assert.equal(requests.length, 2));
+
+  await harness.act(async () => {
+    requests[0].onEvent?.({ type: 'delta', content: 'stale partial' });
+    requests[1].onEvent?.({ type: 'delta', content: 'fresh partial' });
+    pendingFrame?.(0);
+  });
+  assert.equal(harness.screen.queryByText('stale partial'), null);
+  assert.equal(harness.screen.getByText('fresh partial').textContent, 'fresh partial');
+
+  const timing = { responseHeadersMs: 1, firstContentMs: 2, streamReceiveMs: 3, totalMs: 4 };
+  await harness.act(async () => {
+    requests[1].resolve({
+      providerId: 'stream-provider',
+      model: 'stream-model',
+      content: 'fresh final',
+      timing,
+    });
+  });
+  assert.equal(harness.screen.getByText('fresh final').textContent, 'fresh final');
+  await harness.act(async () => {
+    requests[0].resolve({
+      providerId: 'stream-provider',
+      model: 'stream-model',
+      content: 'stale final',
+      timing,
+    });
+  });
+  assert.equal(harness.screen.queryByText('stale final'), null);
+  assert.equal(harness.screen.getByText('fresh final').textContent, 'fresh final');
+});
+
 test('Ctrl+F opens the active log find dialog with the required defaults and options', () => {
   renderLog();
   harness.fireEvent.keyDown(document, { key: 'f', ctrlKey: true });
@@ -175,6 +314,8 @@ test('Ctrl+F opens the active log find dialog with the required defaults and opt
 test('AI analysis result opens in a closable drawer body', async () => {
   let aiWorkspaceOpened = false;
   const followUps: Array<{ question: string; attachmentPaths: string[] }> = [];
+  const followUpHistories: string[][] = [];
+  let retryAttempts = 0;
   let resolveFirstFollowUp: () => void = () => {
     assert.fail('first follow-up was not started');
   };
@@ -195,35 +336,51 @@ test('AI analysis result opens in a closable drawer body', async () => {
       allowInsecureHttp: false,
     },
   ];
-  api.analyzeAiLog = async () => ({
-    providerId: 'test-provider',
-    model: 'test-model',
-    content: [
-      'A concise overview.',
-      '',
-      '## 1. Synthetic event',
-      '',
-      '**日志**',
-      '```text',
-      'ERROR synthetic failure',
-      '```',
-      '**说明**',
-      'Synthetic analysis result',
-      '',
-      '- Evidence-based conclusion',
-    ].join('\n'),
-  });
+  api.analyzeAiLog = async (_providerId, _selectedText, onEvent) => {
+    onEvent?.({ type: 'delta', content: 'outdated partial' });
+    return {
+      providerId: 'test-provider',
+      model: 'test-model',
+      content: [
+        'A concise overview.',
+        '',
+        '## 1. Synthetic event',
+        '',
+        '**日志**',
+        '```text',
+        'ERROR synthetic failure',
+        '```',
+        '**说明**',
+        'Synthetic analysis result',
+        '',
+        '- Evidence-based conclusion',
+      ].join('\n'),
+      timing: { responseHeadersMs: 10, firstContentMs: 20, streamReceiveMs: 30, totalMs: 40 },
+    };
+  };
   api.selectAiAttachmentPaths = async () => ['D:\\logs\\context.log'];
   api.inspectAiAttachments = async (_selectedText, attachmentPaths) =>
     attachmentPaths.map((path) => ({ path, name: 'context.log', charCount: 42 }));
   api.continueAiConversation = async (
     _providerId,
     _selectedText,
-    _history,
+    history,
     question,
     attachmentPaths,
+    _historyId,
+    _historyUpdatedAt,
+    onEvent,
   ) => {
     followUps.push({ question, attachmentPaths: attachmentPaths ?? [] });
+    followUpHistories.push(history.map((message) => message.content));
+    if (question === 'Retry failed request' && retryAttempts++ === 0) {
+      onEvent?.({ type: 'delta', content: 'partial from failed request' });
+      throw {
+        code: 'stream_idle_timeout',
+        stage: 'response_stream',
+        elapsedMs: 30_000,
+      };
+    }
     if (question === 'Compare both logs') {
       return new Promise((resolve) => {
         resolveFirstFollowUp = () =>
@@ -231,6 +388,12 @@ test('AI analysis result opens in a closable drawer body', async () => {
             providerId: 'test-provider',
             model: 'test-model',
             content: `Follow-up response: ${question}`,
+            timing: {
+              responseHeadersMs: 10,
+              firstContentMs: 20,
+              streamReceiveMs: 30,
+              totalMs: 40,
+            },
           });
       });
     }
@@ -238,6 +401,7 @@ test('AI analysis result opens in a closable drawer body', async () => {
       providerId: 'test-provider',
       model: 'test-model',
       content: `Follow-up response: ${question}`,
+      timing: { responseHeadersMs: 10, firstContentMs: 20, streamReceiveMs: 30, totalMs: 40 },
     };
   };
 
@@ -261,6 +425,8 @@ test('AI analysis result opens in a closable drawer body', async () => {
     harness.screen.getByText('Synthetic analysis result').textContent,
     'Synthetic analysis result',
   );
+  assert.equal(harness.screen.queryByText('outdated partial'), null);
+  assert.match(harness.screen.getByText(/响应头 10 ms/).textContent ?? '', /总计 40 ms/);
   assert.equal(harness.screen.getByRole('heading', { name: '1. Synthetic event' }).tagName, 'H2');
   assert.equal(
     drawer.querySelector('.ai-markdown-code code')?.textContent,
@@ -293,7 +459,10 @@ test('AI analysis result opens in a closable drawer body', async () => {
   await harness.waitFor(() =>
     assert.equal(harness.screen.getByText('Compare both logs').textContent, 'Compare both logs'),
   );
-  assert.equal((followUpInput as HTMLTextAreaElement).value, '');
+  assert.equal(
+    (harness.screen.getByRole('textbox', { name: '继续追问' }) as HTMLTextAreaElement).value,
+    '',
+  );
   assert.equal(harness.screen.queryByLabelText('待发送附件'), null);
   assert.ok(harness.screen.getByLabelText('已发送附件 context.log'));
   assert.ok(harness.screen.getByRole('status', { name: 'AI 正在回复' }));
@@ -309,7 +478,10 @@ test('AI analysis result opens in a closable drawer body', async () => {
   assert.equal(harness.screen.queryByRole('status', { name: 'AI 正在回复' }), null);
   assert.equal(harness.screen.getByText('42 字符').textContent, '42 字符');
 
-  harness.fireEvent.input(followUpInput, { target: { value: 'Summarize the root cause' } });
+  const secondFollowUpInput = harness.screen.getByRole('textbox', { name: '继续追问' });
+  harness.fireEvent.input(secondFollowUpInput, {
+    target: { value: 'Summarize the root cause' },
+  });
   harness.fireEvent.click(harness.screen.getByRole('button', { name: '发送追问' }));
   assert.equal(
     (await harness.screen.findByText('Follow-up response: Summarize the root cause')).textContent,
@@ -319,6 +491,22 @@ test('AI analysis result opens in a closable drawer body', async () => {
     question: 'Summarize the root cause',
     attachmentPaths: [],
   });
+
+  const retryInput = harness.screen.getByRole('textbox', { name: '继续追问' });
+  harness.fireEvent.input(retryInput, { target: { value: 'Retry failed request' } });
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '发送追问' }));
+  assert.ok(await harness.screen.findByText('partial from failed request'));
+  assert.ok(harness.screen.getByText(/未完成 · 本段不会保存到历史/));
+  await harness.waitFor(() =>
+    assert.equal(
+      (harness.screen.getByRole('textbox', { name: '继续追问' }) as HTMLTextAreaElement).value,
+      'Retry failed request',
+    ),
+  );
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '发送追问' }));
+  assert.ok(await harness.screen.findByText('Follow-up response: Retry failed request'));
+  assert.equal(followUpHistories.at(-1)?.includes('partial from failed request'), false);
+  assert.equal(followUpHistories.at(-1)?.includes('Retry failed request'), false);
 
   harness.fireEvent.click(harness.screen.getByRole('button', { name: '关闭 AI 日志分析' }));
   assert.equal(harness.screen.queryByRole('dialog', { name: 'AI 日志分析' }), null);

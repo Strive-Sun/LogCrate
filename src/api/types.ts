@@ -388,6 +388,36 @@ export interface AiAnalysisResult {
   providerId: string;
   model: string;
   content: string;
+  timing: AiResponseTiming;
+}
+
+export interface AiResponseTiming {
+  responseHeadersMs: number;
+  firstContentMs?: number;
+  streamReceiveMs: number;
+  totalMs: number;
+}
+
+export interface AiStreamEvent {
+  type: 'delta';
+  content: string;
+}
+
+export interface AiRequestFailure {
+  code:
+    | 'connect_timeout'
+    | 'stream_idle_timeout'
+    | 'total_timeout'
+    | 'transport'
+    | 'http'
+    | 'invalid_response'
+    | 'response_too_large'
+    | 'channel_closed';
+  stage: 'connect' | 'awaiting_response' | 'response_stream' | 'parse' | 'frontend_handoff';
+  elapsedMs: number;
+  httpStatus?: number;
+  contentType?: string;
+  bodyBytes?: number;
 }
 
 export interface AiAttachmentSummary {

@@ -6,6 +6,7 @@ import type {
   AppUpdateProgress,
   AiProviderConfig,
   AiAnalysisResult,
+  AiStreamEvent,
   AiHistoryRecord,
   AiHistorySummary,
   AiHistoryMessage,
@@ -296,14 +297,21 @@ export const mockApi = {
     const provider = mockAiProviders.find((item) => item.id === providerId);
     if (!provider?.keyConfigured) throw new Error('AI provider API key is not configured');
   },
-  async analyzeAiLog(providerId: string, selectedText: string): Promise<AiAnalysisResult> {
+  async analyzeAiLog(
+    providerId: string,
+    selectedText: string,
+    onEvent?: (event: AiStreamEvent) => void,
+  ): Promise<AiAnalysisResult> {
     const provider = mockAiProviders.find((item) => item.id === providerId);
     if (!provider) throw new Error('AI provider was not found');
     if (!selectedText.trim()) throw new Error('Select some log text before starting AI analysis');
+    const content = `主要信息：选中的日志共 ${selectedText.length} 个字符。\n\n警告：请结合上下文进一步确认。\n\n错误：未发现可由 mock 确认的错误。\n\n建议：检查 ERROR/WARN 行及其前后文。`;
+    onEvent?.({ type: 'delta', content });
     return {
       providerId,
       model: provider.model,
-      content: `主要信息：选中的日志共 ${selectedText.length} 个字符。\n\n警告：请结合上下文进一步确认。\n\n错误：未发现可由 mock 确认的错误。\n\n建议：检查 ERROR/WARN 行及其前后文。`,
+      content,
+      timing: { responseHeadersMs: 1, firstContentMs: 2, streamReceiveMs: 2, totalMs: 3 },
     };
   },
   async selectAiAttachmentPaths(): Promise<string[]> {
@@ -329,11 +337,13 @@ export const mockApi = {
     attachmentPaths: string[] = [],
     historyId?: string,
     historyUpdatedAt?: string,
+    onEvent?: (event: AiStreamEvent) => void,
   ): Promise<AiAnalysisResult> {
     if (!question.trim()) throw new Error('请输入追问内容');
     const provider = mockAiProviders.find((item) => item.id === providerId);
     if (!provider) throw new Error('AI provider was not found');
     const content = `模拟追问回复：${question}`;
+    onEvent?.({ type: 'delta', content });
     if (historyId) {
       const record = mockAiHistory.find((item) => item.id === historyId);
       if (!record) throw new Error('AI 历史记录不存在');
@@ -350,7 +360,12 @@ export const mockApi = {
         { role: 'assistant', content },
       );
     }
-    return { providerId, model: provider.model, content };
+    return {
+      providerId,
+      model: provider.model,
+      content,
+      timing: { responseHeadersMs: 1, firstContentMs: 2, streamReceiveMs: 2, totalMs: 3 },
+    };
   },
   async setAiWindowOpen(open: boolean): Promise<{ mainWorkspaceWidth: number } | null> {
     return open ? { mainWorkspaceWidth: window.innerWidth } : null;

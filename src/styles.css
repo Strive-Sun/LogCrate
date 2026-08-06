@@ -2831,6 +2831,12 @@ body.resizing {
   overflow: auto;
   padding: 14px 16px 20px;
 }
+.ai-response-timing {
+  margin-top: 6px;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.5;
+}
 .ai-chat-messages {
   display: flex;
   flex-direction: column;
@@ -2872,6 +2878,12 @@ body.resizing {
 }
 .ai-chat-bubble-content {
   white-space: pre-wrap;
+}
+.ai-incomplete-label {
+  margin-top: 8px;
+  color: #b45309;
+  font-size: 11px;
+  line-height: 1.45;
 }
 .ai-chat-attachments {
   display: flex;
