@@ -186,8 +186,8 @@ export const tauriApi = {
         historyId && historyUpdatedAt ? { id: historyId, updatedAt: historyUpdatedAt } : null,
     });
   },
-  async setAiWindowOpen(open: boolean): Promise<void> {
-    await invoke('set_ai_window_open', { open });
+  async setAiWindowOpen(open: boolean): Promise<{ mainWorkspaceWidth: number } | null> {
+    return invoke('set_ai_window_open', { open });
   },
   async listAiHistory(): Promise<AiHistorySummary[]> {
     return invoke('list_ai_history');

@@ -352,7 +352,9 @@ export const mockApi = {
     }
     return { providerId, model: provider.model, content };
   },
-  async setAiWindowOpen(_open: boolean): Promise<void> {},
+  async setAiWindowOpen(open: boolean): Promise<{ mainWorkspaceWidth: number } | null> {
+    return open ? { mainWorkspaceWidth: window.innerWidth } : null;
+  },
   async listAiHistory(): Promise<AiHistorySummary[]> {
     return mockAiHistory.map(({ id, title, createdAt, updatedAt, providerId, model }) => ({
       id,

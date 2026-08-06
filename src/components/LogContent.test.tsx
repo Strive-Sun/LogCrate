@@ -391,8 +391,14 @@ test('AI workspace fills a root-level right column with an independently scrolli
   assert.match(composerSendRule, /background:\s*#111827;/);
 
   const captureWidth = appSource.indexOf('const widthBeforeOpen = window.innerWidth;');
-  const expandWindow = appSource.indexOf('await api.setAiWindowOpen(true);', captureWidth);
-  const pinWorkspace = appSource.indexOf('setMainWorkspaceWidth(widthBeforeOpen);', expandWindow);
+  const expandWindow = appSource.indexOf(
+    'const layout = await api.setAiWindowOpen(true);',
+    captureWidth,
+  );
+  const pinWorkspace = appSource.indexOf(
+    'setMainWorkspaceWidth(layout?.mainWorkspaceWidth ?? widthBeforeOpen);',
+    expandWindow,
+  );
   assert.ok(captureWidth >= 0, 'the original workspace width must be captured');
   assert.ok(
     expandWindow > captureWidth,
@@ -400,7 +406,7 @@ test('AI workspace fills a root-level right column with an independently scrolli
   );
   assert.ok(
     pinWorkspace > expandWindow,
-    'the captured width must be applied after expansion succeeds',
+    'the restored main-page width must be applied after expansion succeeds',
   );
   assert.match(appSource, /'--main-workspace-width': `\$\{mainWorkspaceWidth\}px`/);
 });

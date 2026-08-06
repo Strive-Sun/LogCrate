@@ -67,77 +67,280 @@ pub fn record_process_start() {
 const SHOW_MAIN_MENU_ID: &str = "show-main-window";
 const EXIT_APP_MENU_ID: &str = "exit-logcrate";
 static AI_WINDOW_SNAPSHOT: OnceLock<Mutex<Option<AiWindowSnapshot>>> = OnceLock::new();
-#[derive(Clone, Copy)]
+const AI_PANEL_TARGET_WIDTH: u32 = 440;
+const AI_PANEL_MIN_WIDTH: u32 = 360;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AiWindowSnapshot {
     position: PhysicalPosition<i32>,
     inner_size: PhysicalSize<u32>,
     maximized: bool,
+    main_workspace_width: u32,
 }
-#[tauri::command]
-fn set_ai_window_open(app: tauri::AppHandle, open: bool) -> Result<(), String> {
-    if open {
-        let mut slot = AI_WINDOW_SNAPSHOT
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if slot.is_some() {
-            return Ok(());
-        }
-        let main = app
-            .get_window(MAIN_WINDOW_LABEL)
-            .ok_or_else(|| "主窗口不可用".to_string())?;
-        let maximized = main.is_maximized().map_err(|e| e.to_string())?;
-        let position = main.outer_position().map_err(|e| e.to_string())?;
-        let outer_size = main.outer_size().map_err(|e| e.to_string())?;
-        let inner_size = main.inner_size().map_err(|e| e.to_string())?;
-        *slot = Some(AiWindowSnapshot {
-            position,
-            inner_size,
-            maximized,
-        });
-        if maximized {
-            main.unmaximize().map_err(|e| e.to_string())?;
-        }
-        let monitor = main
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiWindowLayout {
+    main_workspace_width: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AiWorkArea {
+    position: PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AiWindowGeometry {
+    position: PhysicalPosition<i32>,
+    inner_size: PhysicalSize<u32>,
+    panel_width: u32,
+}
+
+fn calculate_ai_window_geometry(
+    position: PhysicalPosition<i32>,
+    outer_size: PhysicalSize<u32>,
+    inner_size: PhysicalSize<u32>,
+    work_area: AiWorkArea,
+    target_panel_width: u32,
+    min_panel_width: u32,
+) -> Result<AiWindowGeometry, String> {
+    let work_left = i64::from(work_area.position.x);
+    let work_width = i64::from(work_area.size.width);
+    let outer_width = i64::from(outer_size.width);
+    let panel_width = (work_width - outer_width).min(i64::from(target_panel_width));
+    if panel_width < i64::from(min_panel_width) {
+        return Err("当前显示器工作区不足，无法打开 AI 页面".into());
+    }
+
+    let expanded_outer_width = outer_width + panel_width;
+    let rightmost_x = work_left + work_width - expanded_outer_width;
+    let target_x = i64::from(position.x).min(rightmost_x).max(work_left);
+    let target_x = i32::try_from(target_x).map_err(|_| "显示器工作区坐标无效".to_string())?;
+    let panel_width = u32::try_from(panel_width).map_err(|_| "AI 页面宽度无效".to_string())?;
+    let target_inner_width = inner_size
+        .width
+        .checked_add(panel_width)
+        .ok_or_else(|| "主窗口宽度超出系统限制".to_string())?;
+
+    Ok(AiWindowGeometry {
+        position: PhysicalPosition::new(target_x, position.y),
+        inner_size: PhysicalSize::new(target_inner_width, inner_size.height),
+        panel_width,
+    })
+}
+
+trait AiWindowControl {
+    fn is_maximized(&self) -> Result<bool, String>;
+    fn outer_position(&self) -> Result<PhysicalPosition<i32>, String>;
+    fn outer_size(&self) -> Result<PhysicalSize<u32>, String>;
+    fn inner_size(&self) -> Result<PhysicalSize<u32>, String>;
+    fn scale_factor(&self) -> Result<f64, String>;
+    fn work_area(&self) -> Result<AiWorkArea, String>;
+    fn unmaximize(&self) -> Result<(), String>;
+    fn maximize(&self) -> Result<(), String>;
+    fn set_inner_size(&self, size: PhysicalSize<u32>) -> Result<(), String>;
+    fn set_outer_position(&self, position: PhysicalPosition<i32>) -> Result<(), String>;
+}
+
+impl<R: tauri::Runtime> AiWindowControl for tauri::Window<R> {
+    fn is_maximized(&self) -> Result<bool, String> {
+        self.is_maximized().map_err(|error| error.to_string())
+    }
+
+    fn outer_position(&self) -> Result<PhysicalPosition<i32>, String> {
+        self.outer_position().map_err(|error| error.to_string())
+    }
+
+    fn outer_size(&self) -> Result<PhysicalSize<u32>, String> {
+        self.outer_size().map_err(|error| error.to_string())
+    }
+
+    fn inner_size(&self) -> Result<PhysicalSize<u32>, String> {
+        self.inner_size().map_err(|error| error.to_string())
+    }
+
+    fn scale_factor(&self) -> Result<f64, String> {
+        self.scale_factor().map_err(|error| error.to_string())
+    }
+
+    fn work_area(&self) -> Result<AiWorkArea, String> {
+        let monitor = self
             .current_monitor()
-            .map_err(|e| e.to_string())?
+            .map_err(|error| error.to_string())?
             .ok_or_else(|| "无法确定当前显示器工作区".to_string())?;
         let area = monitor.work_area();
-        let current_right = position.x + outer_size.width as i32;
-        let available = area.position.x + area.size.width as i32 - current_right;
-        let width = available.min(440);
-        if width < 360 {
-            *slot = None;
-            if maximized {
-                let _ = main.maximize();
-            }
-            return Err("主窗口右侧空间不足，无法打开 AI 页面".into());
-        }
-        main.set_size(PhysicalSize::new(
-            inner_size.width + width as u32,
-            inner_size.height,
-        ))
-        .map_err(|e| e.to_string())?;
-    } else {
-        if let Some(snapshot) = AI_WINDOW_SNAPSHOT
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            let main = app
-                .get_window(MAIN_WINDOW_LABEL)
-                .ok_or_else(|| "主窗口不可用".to_string())?;
-            main.set_size(snapshot.inner_size)
-                .map_err(|e| e.to_string())?;
-            main.set_position(snapshot.position)
-                .map_err(|e| e.to_string())?;
-            if snapshot.maximized {
-                main.maximize().map_err(|e| e.to_string())?;
-            }
+        Ok(AiWorkArea {
+            position: area.position,
+            size: area.size,
+        })
+    }
+
+    fn unmaximize(&self) -> Result<(), String> {
+        self.unmaximize().map_err(|error| error.to_string())
+    }
+
+    fn maximize(&self) -> Result<(), String> {
+        self.maximize().map_err(|error| error.to_string())
+    }
+
+    fn set_inner_size(&self, size: PhysicalSize<u32>) -> Result<(), String> {
+        self.set_size(size).map_err(|error| error.to_string())
+    }
+
+    fn set_outer_position(&self, position: PhysicalPosition<i32>) -> Result<(), String> {
+        self.set_position(position)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn restore_ai_window<W: AiWindowControl>(
+    window: &W,
+    snapshot: AiWindowSnapshot,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    if let Err(error) = window.set_inner_size(snapshot.inner_size) {
+        errors.push(format!("恢复尺寸失败：{error}"));
+    }
+    if let Err(error) = window.set_outer_position(snapshot.position) {
+        errors.push(format!("恢复位置失败：{error}"));
+    }
+    if snapshot.maximized {
+        if let Err(error) = window.maximize() {
+            errors.push(format!("恢复最大化失败：{error}"));
         }
     }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("；"))
+    }
+}
+
+fn fail_open_and_restore<T, W: AiWindowControl>(
+    window: &W,
+    snapshot: AiWindowSnapshot,
+    error: String,
+) -> Result<T, String> {
+    match restore_ai_window(window, snapshot) {
+        Ok(()) => Err(error),
+        Err(restore_error) => Err(format!("{error}；{restore_error}")),
+    }
+}
+
+fn open_ai_window<W: AiWindowControl>(
+    window: &W,
+    slot: &mut Option<AiWindowSnapshot>,
+) -> Result<AiWindowLayout, String> {
+    if let Some(snapshot) = *slot {
+        return Ok(AiWindowLayout {
+            main_workspace_width: snapshot.main_workspace_width,
+        });
+    }
+
+    let mut snapshot = AiWindowSnapshot {
+        position: window.outer_position()?,
+        inner_size: window.inner_size()?,
+        maximized: window.is_maximized()?,
+        main_workspace_width: 0,
+    };
+    if snapshot.maximized {
+        if let Err(error) = window.unmaximize() {
+            return fail_open_and_restore(window, snapshot, error);
+        }
+    }
+
+    let position = match window.outer_position() {
+        Ok(value) => value,
+        Err(error) => return fail_open_and_restore(window, snapshot, error),
+    };
+    let outer_size = match window.outer_size() {
+        Ok(value) => value,
+        Err(error) => return fail_open_and_restore(window, snapshot, error),
+    };
+    let inner_size = match window.inner_size() {
+        Ok(value) => value,
+        Err(error) => return fail_open_and_restore(window, snapshot, error),
+    };
+    let scale_factor = match window.scale_factor() {
+        Ok(value) if value.is_finite() && value > 0.0 => value,
+        Ok(_) => return fail_open_and_restore(window, snapshot, "主窗口缩放比例无效".to_string()),
+        Err(error) => return fail_open_and_restore(window, snapshot, error),
+    };
+    let scale_width = |logical: u32| -> Result<u32, String> {
+        let physical = (f64::from(logical) * scale_factor).round();
+        if physical > 0.0 && physical <= f64::from(u32::MAX) {
+            Ok(physical as u32)
+        } else {
+            Err("主窗口缩放比例无效".to_string())
+        }
+    };
+    let target_panel_width = match scale_width(AI_PANEL_TARGET_WIDTH) {
+        Ok(value) => value,
+        Err(error) => return fail_open_and_restore(window, snapshot, error),
+    };
+    let min_panel_width = match scale_width(AI_PANEL_MIN_WIDTH) {
+        Ok(value) => value,
+        Err(error) => return fail_open_and_restore(window, snapshot, error),
+    };
+    let logical_main_width = (f64::from(inner_size.width) / scale_factor).round();
+    if logical_main_width <= 0.0 || logical_main_width > f64::from(u32::MAX) {
+        return fail_open_and_restore(window, snapshot, "主窗口客户区宽度无效".to_string());
+    }
+    snapshot.main_workspace_width = logical_main_width as u32;
+    let work_area = match window.work_area() {
+        Ok(value) => value,
+        Err(error) => return fail_open_and_restore(window, snapshot, error),
+    };
+    let geometry = match calculate_ai_window_geometry(
+        position,
+        outer_size,
+        inner_size,
+        work_area,
+        target_panel_width,
+        min_panel_width,
+    ) {
+        Ok(value) => value,
+        Err(error) => return fail_open_and_restore(window, snapshot, error),
+    };
+    if let Err(error) = window.set_outer_position(geometry.position) {
+        return fail_open_and_restore(window, snapshot, error);
+    }
+    if let Err(error) = window.set_inner_size(geometry.inner_size) {
+        return fail_open_and_restore(window, snapshot, error);
+    }
+    *slot = Some(snapshot);
+    Ok(AiWindowLayout {
+        main_workspace_width: snapshot.main_workspace_width,
+    })
+}
+
+fn close_ai_window<W: AiWindowControl>(
+    window: &W,
+    slot: &mut Option<AiWindowSnapshot>,
+) -> Result<(), String> {
+    let Some(snapshot) = *slot else {
+        return Ok(());
+    };
+    restore_ai_window(window, snapshot)?;
+    *slot = None;
     Ok(())
+}
+
+#[tauri::command]
+fn set_ai_window_open(app: tauri::AppHandle, open: bool) -> Result<Option<AiWindowLayout>, String> {
+    let mut slot = AI_WINDOW_SNAPSHOT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let main = app
+        .get_window(MAIN_WINDOW_LABEL)
+        .ok_or_else(|| "主窗口不可用".to_string())?;
+    if open {
+        open_ai_window(&main, &mut slot).map(Some)
+    } else {
+        close_ai_window(&main, &mut slot).map(|()| None)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1624,6 +1827,257 @@ pub fn run() {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    use std::cell::RefCell;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct FakeWindowState {
+        position: PhysicalPosition<i32>,
+        outer_size: PhysicalSize<u32>,
+        inner_size: PhysicalSize<u32>,
+        maximized: bool,
+    }
+
+    struct FakeAiWindow {
+        state: RefCell<FakeWindowState>,
+        work_area: AiWorkArea,
+        scale_factor: f64,
+        fail_once: RefCell<Option<&'static str>>,
+    }
+
+    impl FakeAiWindow {
+        fn new(maximized: bool) -> Self {
+            Self {
+                state: RefCell::new(FakeWindowState {
+                    position: PhysicalPosition::new(700, 80),
+                    outer_size: PhysicalSize::new(1200, 800),
+                    inner_size: PhysicalSize::new(1184, 761),
+                    maximized,
+                }),
+                work_area: AiWorkArea {
+                    position: PhysicalPosition::new(0, 0),
+                    size: PhysicalSize::new(1920, 1040),
+                },
+                scale_factor: 1.0,
+                fail_once: RefCell::new(None),
+            }
+        }
+
+        fn fail_next(&self, operation: &'static str) {
+            *self.fail_once.borrow_mut() = Some(operation);
+        }
+
+        fn maybe_fail(&self, operation: &'static str) -> Result<(), String> {
+            let mut failure = self.fail_once.borrow_mut();
+            if *failure == Some(operation) {
+                *failure = None;
+                Err(format!("{operation} failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn snapshot(&self) -> FakeWindowState {
+            *self.state.borrow()
+        }
+    }
+
+    impl AiWindowControl for FakeAiWindow {
+        fn is_maximized(&self) -> Result<bool, String> {
+            Ok(self.state.borrow().maximized)
+        }
+
+        fn outer_position(&self) -> Result<PhysicalPosition<i32>, String> {
+            Ok(self.state.borrow().position)
+        }
+
+        fn outer_size(&self) -> Result<PhysicalSize<u32>, String> {
+            Ok(self.state.borrow().outer_size)
+        }
+
+        fn inner_size(&self) -> Result<PhysicalSize<u32>, String> {
+            Ok(self.state.borrow().inner_size)
+        }
+
+        fn scale_factor(&self) -> Result<f64, String> {
+            Ok(self.scale_factor)
+        }
+
+        fn work_area(&self) -> Result<AiWorkArea, String> {
+            Ok(self.work_area)
+        }
+
+        fn unmaximize(&self) -> Result<(), String> {
+            self.maybe_fail("unmaximize")?;
+            self.state.borrow_mut().maximized = false;
+            Ok(())
+        }
+
+        fn maximize(&self) -> Result<(), String> {
+            self.maybe_fail("maximize")?;
+            self.state.borrow_mut().maximized = true;
+            Ok(())
+        }
+
+        fn set_inner_size(&self, size: PhysicalSize<u32>) -> Result<(), String> {
+            self.maybe_fail("set_size")?;
+            let mut state = self.state.borrow_mut();
+            let frame_width = state.outer_size.width - state.inner_size.width;
+            let frame_height = state.outer_size.height - state.inner_size.height;
+            state.inner_size = size;
+            state.outer_size =
+                PhysicalSize::new(size.width + frame_width, size.height + frame_height);
+            Ok(())
+        }
+
+        fn set_outer_position(&self, position: PhysicalPosition<i32>) -> Result<(), String> {
+            self.maybe_fail("set_position")?;
+            self.state.borrow_mut().position = position;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn ai_window_geometry_uses_target_width_and_moves_left_at_the_work_area_edge() {
+        let ordinary = calculate_ai_window_geometry(
+            PhysicalPosition::new(100, 80),
+            PhysicalSize::new(1200, 800),
+            PhysicalSize::new(1184, 761),
+            AiWorkArea {
+                position: PhysicalPosition::new(0, 0),
+                size: PhysicalSize::new(1920, 1040),
+            },
+            440,
+            360,
+        )
+        .unwrap();
+        assert_eq!(ordinary.position, PhysicalPosition::new(100, 80));
+
+        let geometry = calculate_ai_window_geometry(
+            PhysicalPosition::new(700, 80),
+            PhysicalSize::new(1200, 800),
+            PhysicalSize::new(1184, 761),
+            AiWorkArea {
+                position: PhysicalPosition::new(0, 0),
+                size: PhysicalSize::new(1920, 1040),
+            },
+            440,
+            360,
+        )
+        .unwrap();
+
+        assert_eq!(geometry.panel_width, 440);
+        assert_eq!(geometry.position, PhysicalPosition::new(280, 80));
+        assert_eq!(geometry.inner_size, PhysicalSize::new(1624, 761));
+    }
+
+    #[test]
+    fn ai_window_geometry_adapts_width_and_supports_negative_monitor_coordinates() {
+        let geometry = calculate_ai_window_geometry(
+            PhysicalPosition::new(-1_300, 40),
+            PhysicalSize::new(1200, 760),
+            PhysicalSize::new(1184, 721),
+            AiWorkArea {
+                position: PhysicalPosition::new(-1_600, 0),
+                size: PhysicalSize::new(1600, 900),
+            },
+            440,
+            360,
+        )
+        .unwrap();
+
+        assert_eq!(geometry.panel_width, 400);
+        assert_eq!(geometry.position, PhysicalPosition::new(-1_600, 40));
+        assert_eq!(geometry.inner_size.width, 1584);
+    }
+
+    #[test]
+    fn ai_window_geometry_uses_physical_widths_scaled_from_logical_pixels() {
+        let geometry = calculate_ai_window_geometry(
+            PhysicalPosition::new(150, 120),
+            PhysicalSize::new(1800, 1200),
+            PhysicalSize::new(1776, 1142),
+            AiWorkArea {
+                position: PhysicalPosition::new(0, 0),
+                size: PhysicalSize::new(2880, 1560),
+            },
+            660,
+            540,
+        )
+        .unwrap();
+
+        assert_eq!(geometry.panel_width, 660);
+        assert_eq!(geometry.inner_size.width, 2436);
+    }
+
+    #[test]
+    fn ai_window_geometry_rejects_a_work_area_below_the_minimum_panel_width() {
+        let error = calculate_ai_window_geometry(
+            PhysicalPosition::new(0, 0),
+            PhysicalSize::new(1200, 760),
+            PhysicalSize::new(1184, 721),
+            AiWorkArea {
+                position: PhysicalPosition::new(0, 0),
+                size: PhysicalSize::new(1559, 900),
+            },
+            440,
+            360,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("工作区不足"));
+    }
+
+    #[test]
+    fn ai_window_open_and_close_are_idempotent_and_restore_maximized_state() {
+        let window = FakeAiWindow::new(true);
+        let original = window.snapshot();
+        let mut slot = None;
+
+        let layout = open_ai_window(&window, &mut slot).unwrap();
+        let opened = window.snapshot();
+        assert_eq!(layout.main_workspace_width, original.inner_size.width);
+        assert!(!opened.maximized);
+        assert_eq!(opened.position, PhysicalPosition::new(280, 80));
+        assert_eq!(opened.inner_size.width, original.inner_size.width + 440);
+        assert_eq!(open_ai_window(&window, &mut slot).unwrap(), layout);
+        assert_eq!(window.snapshot(), opened);
+
+        close_ai_window(&window, &mut slot).unwrap();
+        assert_eq!(window.snapshot(), original);
+        close_ai_window(&window, &mut slot).unwrap();
+        assert_eq!(window.snapshot(), original);
+    }
+
+    #[test]
+    fn ai_window_open_rolls_back_position_size_and_maximized_state_after_failures() {
+        for failure in ["unmaximize", "set_position", "set_size"] {
+            let window = FakeAiWindow::new(true);
+            let original = window.snapshot();
+            let mut slot = None;
+            window.fail_next(failure);
+
+            let error = open_ai_window(&window, &mut slot).unwrap_err();
+
+            assert!(error.contains("failed"));
+            assert_eq!(window.snapshot(), original);
+            assert!(slot.is_none());
+        }
+    }
+
+    #[test]
+    fn ai_window_close_keeps_the_snapshot_when_restore_fails_and_can_retry() {
+        let window = FakeAiWindow::new(false);
+        let original = window.snapshot();
+        let mut slot = None;
+        open_ai_window(&window, &mut slot).unwrap();
+        window.fail_next("set_size");
+
+        assert!(close_ai_window(&window, &mut slot).is_err());
+        assert!(slot.is_some());
+        close_ai_window(&window, &mut slot).unwrap();
+        assert_eq!(window.snapshot(), original);
+        assert!(slot.is_none());
+    }
 
     #[cfg(desktop)]
     #[test]

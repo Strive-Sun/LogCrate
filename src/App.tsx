@@ -1228,8 +1228,8 @@ export function App() {
     aiWindowTransition.current = true;
     const widthBeforeOpen = window.innerWidth;
     try {
-      await api.setAiWindowOpen(true);
-      setMainWorkspaceWidth(widthBeforeOpen);
+      const layout = await api.setAiWindowOpen(true);
+      setMainWorkspaceWidth(layout?.mainWorkspaceWidth ?? widthBeforeOpen);
       setAiOpen(true);
     } finally {
       aiWindowTransition.current = false;
