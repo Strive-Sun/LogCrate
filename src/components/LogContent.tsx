@@ -200,6 +200,7 @@ export function LogContent({
   const encodingUnsub = useRef<() => void>(() => {});
   const preferredEncoding = useRef<string | null>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
+  const aiResultBodyRef = useRef<HTMLDivElement>(null);
   const findGeneration = useRef(0);
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
@@ -914,41 +915,45 @@ export function LogContent({
 
   async function sendAiFollowUp() {
     if (!aiResult || aiBusy || aiSendingRef.current || !aiQuestion.trim()) return;
-    const providers = await api.listAiProviders();
-    const provider = providers.find((item) => item.id === aiResult.providerId) ?? providers[0];
-    if (!provider) return;
+    const question = aiQuestion;
+    const attachments = aiAttachments;
+    const conversationBeforeSend = aiConversation;
+    const optimisticConversation = [
+      ...conversationBeforeSend,
+      {
+        role: 'user' as const,
+        content: question,
+        attachments: attachments.map((attachment) => ({
+          name: attachment.name,
+          charCount: attachment.charCount,
+        })),
+      },
+    ];
     aiSendingRef.current = true;
     setAiBusy(true);
     setAiError(null);
+    setAiConversation(optimisticConversation);
+    setAiQuestion('');
+    setAiAttachments([]);
     try {
-      const question = aiQuestion;
-      const attachments = aiAttachments;
+      const providers = await api.listAiProviders();
+      const provider = providers.find((item) => item.id === aiResult.providerId) ?? providers[0];
+      if (!provider) throw new Error('请先在设置中配置 AI 供应商');
       const historyUpdatedAt = new Date().toISOString();
       const next = await api.continueAiConversation(
         provider.id,
         aiConversationText,
-        aiConversation,
+        conversationBeforeSend,
         question,
         attachments.map((attachment) => attachment.path),
         aiHistoryId ?? undefined,
         historyUpdatedAt,
       );
-      const messages = [
-        ...aiConversation,
-        {
-          role: 'user' as const,
-          content: question,
-          attachments: attachments.map((attachment) => ({
-            name: attachment.name,
-            charCount: attachment.charCount,
-          })),
-        },
-        { role: 'assistant' as const, content: next.content },
-      ];
       setAiResult(next);
-      setAiConversation(messages);
-      setAiQuestion('');
-      setAiAttachments([]);
+      setAiConversation([
+        ...optimisticConversation,
+        { role: 'assistant' as const, content: next.content },
+      ]);
     } catch (error) {
       setAiError(errorMessage(error));
     } finally {
@@ -956,6 +961,15 @@ export function LogContent({
       setAiBusy(false);
     }
   }
+
+  useEffect(() => {
+    if (!aiResult) return;
+    const frame = window.requestAnimationFrame(() => {
+      const body = aiResultBodyRef.current;
+      if (body) body.scrollTop = body.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [aiBusy, aiConversation.length, aiResult]);
 
   if (!session && !activeKey) {
     return (
@@ -1286,8 +1300,8 @@ export function LogContent({
                 )}
               </div>
             )}
-            <div className="ai-result-body">
-              {aiBusy && <div className="settings-hint">分析中，请稍候…</div>}
+            <div className="ai-result-body" ref={aiResultBodyRef}>
+              {aiBusy && !aiResult && <div className="settings-hint">分析中，请稍候…</div>}
               {aiError && <div className="update-message error">{aiError}</div>}
               {!aiResult && !aiBusy && !aiError && (
                 <div className="ai-empty-state">
@@ -1329,6 +1343,16 @@ export function LogContent({
                         </div>
                       </div>
                     ))}
+                    {aiBusy && (
+                      <div className="ai-chat-message assistant ai-chat-typing">
+                        <div className="ai-chat-avatar">AI</div>
+                        <div className="ai-chat-bubble" role="status" aria-label="AI 正在回复">
+                          <span aria-hidden="true" />
+                          <span aria-hidden="true" />
+                          <span aria-hidden="true" />
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </>
               )}

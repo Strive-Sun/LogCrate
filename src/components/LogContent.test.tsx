@@ -175,6 +175,9 @@ test('Ctrl+F opens the active log find dialog with the required defaults and opt
 test('AI analysis result opens in a closable drawer body', async () => {
   let aiWorkspaceOpened = false;
   const followUps: Array<{ question: string; attachmentPaths: string[] }> = [];
+  let resolveFirstFollowUp: () => void = () => {
+    assert.fail('first follow-up was not started');
+  };
   dom.window.getSelection = () =>
     ({
       toString: () => 'ERROR synthetic failure',
@@ -208,6 +211,16 @@ test('AI analysis result opens in a closable drawer body', async () => {
     attachmentPaths,
   ) => {
     followUps.push({ question, attachmentPaths: attachmentPaths ?? [] });
+    if (question === 'Compare both logs') {
+      return new Promise((resolve) => {
+        resolveFirstFollowUp = () =>
+          resolve({
+            providerId: 'test-provider',
+            model: 'test-model',
+            content: `Follow-up response: ${question}`,
+          });
+      });
+    }
     return {
       providerId: 'test-provider',
       model: 'test-model',
@@ -257,6 +270,15 @@ test('AI analysis result opens in a closable drawer body', async () => {
   assert.deepEqual(followUps, []);
 
   harness.fireEvent.keyDown(followUpInput, { key: 'Enter' });
+  await harness.waitFor(() =>
+    assert.equal(harness.screen.getByText('Compare both logs').textContent, 'Compare both logs'),
+  );
+  assert.equal((followUpInput as HTMLTextAreaElement).value, '');
+  assert.equal(harness.screen.queryByLabelText('待发送附件'), null);
+  assert.ok(harness.screen.getByLabelText('已发送附件 context.log'));
+  assert.ok(harness.screen.getByRole('status', { name: 'AI 正在回复' }));
+  assert.equal(harness.screen.queryByText('Follow-up response: Compare both logs'), null);
+  resolveFirstFollowUp();
   assert.equal(
     (await harness.screen.findByText('Follow-up response: Compare both logs')).textContent,
     'Follow-up response: Compare both logs',
@@ -264,9 +286,7 @@ test('AI analysis result opens in a closable drawer body', async () => {
   assert.deepEqual(followUps, [
     { question: 'Compare both logs', attachmentPaths: ['D:\\logs\\context.log'] },
   ]);
-  assert.equal((followUpInput as HTMLTextAreaElement).value, '');
-  assert.equal(harness.screen.queryByLabelText('待发送附件'), null);
-  assert.ok(harness.screen.getByLabelText('已发送附件 context.log'));
+  assert.equal(harness.screen.queryByRole('status', { name: 'AI 正在回复' }), null);
   assert.equal(harness.screen.getByText('42 字符').textContent, '42 字符');
 
   harness.fireEvent.input(followUpInput, { target: { value: 'Summarize the root cause' } });

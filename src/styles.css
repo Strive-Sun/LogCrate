@@ -3015,6 +3015,46 @@ body.resizing {
 .ai-chat-message.assistant .ai-chat-bubble {
   border-bottom-left-radius: 5px;
 }
+.ai-chat-typing .ai-chat-bubble {
+  display: inline-flex;
+  min-width: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding-block: 14px;
+}
+.ai-chat-typing .ai-chat-bubble > span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #64748b;
+  animation: ai-typing-dot 1.2s ease-in-out infinite;
+}
+.ai-chat-typing .ai-chat-bubble > span:nth-child(2) {
+  animation-delay: 0.16s;
+}
+.ai-chat-typing .ai-chat-bubble > span:nth-child(3) {
+  animation-delay: 0.32s;
+}
+@keyframes ai-typing-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.28;
+    transform: translateY(1px);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ai-chat-typing .ai-chat-bubble > span {
+    animation: none;
+    opacity: 0.65;
+    transform: none;
+  }
+}
 .ai-empty-state {
   margin: auto;
   max-width: 280px;
