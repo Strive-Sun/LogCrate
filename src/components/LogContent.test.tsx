@@ -265,7 +265,9 @@ test('AI analysis result opens in a closable drawer body', async () => {
     { question: 'Compare both logs', attachmentPaths: ['D:\\logs\\context.log'] },
   ]);
   assert.equal((followUpInput as HTMLTextAreaElement).value, '');
-  assert.equal(harness.screen.queryByText('42 字符'), null);
+  assert.equal(harness.screen.queryByLabelText('待发送附件'), null);
+  assert.ok(harness.screen.getByLabelText('已发送附件 context.log'));
+  assert.equal(harness.screen.getByText('42 字符').textContent, '42 字符');
 
   harness.fireEvent.input(followUpInput, { target: { value: 'Summarize the root cause' } });
   harness.fireEvent.click(harness.screen.getByRole('button', { name: '发送追问' }));

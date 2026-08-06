@@ -173,6 +173,8 @@ export const tauriApi = {
     history: import('./types').AiHistoryMessage[],
     question: string,
     attachmentPaths: string[] = [],
+    historyId?: string,
+    historyUpdatedAt?: string,
   ): Promise<AiAnalysisResult> {
     return invoke('continue_ai_conversation', {
       providerId,
@@ -180,6 +182,8 @@ export const tauriApi = {
       history,
       question,
       attachmentPaths,
+      historyUpdate:
+        historyId && historyUpdatedAt ? { id: historyId, updatedAt: historyUpdatedAt } : null,
     });
   },
   async setAiWindowOpen(open: boolean): Promise<void> {

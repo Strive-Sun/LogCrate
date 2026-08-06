@@ -399,6 +399,11 @@ export interface AiAttachmentSummary {
 export interface AiHistoryMessage {
   role: 'user' | 'assistant';
   content: string;
+  attachments?: AiHistoryAttachment[];
+}
+export interface AiHistoryAttachment {
+  name: string;
+  charCount: number;
 }
 export interface AiHistoryRecord {
   id: string;

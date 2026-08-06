@@ -62,3 +62,44 @@ test('AI attachment contract bounds selection and returns safe display metadata'
     /最多添加 5 个附件/,
   );
 });
+
+test('AI mock history restores sent attachment metadata with the conversation', async () => {
+  await mockApi.clearAiHistory();
+  await mockApi.saveAiProvider({
+    id: 'history-provider',
+    name: 'History',
+    baseUrl: 'https://example.test/v1',
+    model: 'model',
+    keyConfigured: true,
+    protocol: 'chatCompletions',
+    endpointMode: 'base',
+    allowInsecureHttp: false,
+  });
+  await mockApi.saveAiHistory({
+    id: 'history-with-attachment',
+    title: 'History',
+    createdAt: '2026-08-06T00:00:00Z',
+    updatedAt: '2026-08-06T00:00:00Z',
+    providerId: 'history-provider',
+    protocol: 'chatCompletions',
+    model: 'model',
+    endpointFingerprint: 'https://example.test/v1',
+    selectedText: 'ERROR original',
+    messages: [],
+  });
+
+  await mockApi.continueAiConversation(
+    'history-provider',
+    'ERROR original',
+    [],
+    'compare',
+    ['D:\\logs\\context.log'],
+    'history-with-attachment',
+    '2026-08-06T00:00:01Z',
+  );
+  const restored = await mockApi.loadAiHistory('history-with-attachment');
+  assert.equal(restored.updatedAt, '2026-08-06T00:00:01Z');
+  assert.deepEqual(restored.messages[0].attachments, [{ name: 'context.log', charCount: 0 }]);
+  await mockApi.deleteAiProvider('history-provider');
+  await mockApi.clearAiHistory();
+});

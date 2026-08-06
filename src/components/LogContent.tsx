@@ -923,36 +923,30 @@ export function LogContent({
     try {
       const question = aiQuestion;
       const attachments = aiAttachments;
+      const historyUpdatedAt = new Date().toISOString();
       const next = await api.continueAiConversation(
         provider.id,
         aiConversationText,
         aiConversation,
         question,
         attachments.map((attachment) => attachment.path),
+        aiHistoryId ?? undefined,
+        historyUpdatedAt,
       );
-      const visibleQuestion = attachments.length
-        ? `${question}\n\n附件：${attachments.map((attachment) => attachment.name).join('、')}`
-        : question;
       const messages = [
         ...aiConversation,
-        { role: 'user' as const, content: visibleQuestion },
+        {
+          role: 'user' as const,
+          content: question,
+          attachments: attachments.map((attachment) => ({
+            name: attachment.name,
+            charCount: attachment.charCount,
+          })),
+        },
         { role: 'assistant' as const, content: next.content },
       ];
       setAiResult(next);
       setAiConversation(messages);
-      if (aiHistoryId)
-        await api.saveAiHistory({
-          id: aiHistoryId,
-          title: aiConversationText.split(/\r?\n/)[0].slice(0, 80) || 'AI 日志分析',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          providerId: next.providerId,
-          protocol: provider.protocol,
-          model: next.model,
-          endpointFingerprint: provider.baseUrl,
-          selectedText: aiConversationText,
-          messages,
-        });
       setAiQuestion('');
       setAiAttachments([]);
     } catch (error) {
@@ -1317,7 +1311,22 @@ export function LogContent({
                         <div className="ai-chat-avatar">
                           {message.role === 'user' ? '你' : 'AI'}
                         </div>
-                        <div className="ai-chat-bubble">{message.content}</div>
+                        <div className="ai-chat-bubble">
+                          <div className="ai-chat-bubble-content">{message.content}</div>
+                          {message.attachments && message.attachments.length > 0 && (
+                            <div className="ai-chat-attachments">
+                              {message.attachments.map((attachment) => (
+                                <span
+                                  key={`${attachment.name}-${attachment.charCount}`}
+                                  aria-label={`已发送附件 ${attachment.name}`}
+                                >
+                                  {attachment.name}
+                                  <small>{fmtNum(attachment.charCount)} 字符</small>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>

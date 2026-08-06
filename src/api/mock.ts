@@ -326,12 +326,31 @@ export const mockApi = {
     _selectedText: string,
     _history: AiHistoryMessage[],
     question: string,
-    _attachmentPaths: string[] = [],
+    attachmentPaths: string[] = [],
+    historyId?: string,
+    historyUpdatedAt?: string,
   ): Promise<AiAnalysisResult> {
     if (!question.trim()) throw new Error('请输入追问内容');
     const provider = mockAiProviders.find((item) => item.id === providerId);
     if (!provider) throw new Error('AI provider was not found');
-    return { providerId, model: provider.model, content: `模拟追问回复：${question}` };
+    const content = `模拟追问回复：${question}`;
+    if (historyId) {
+      const record = mockAiHistory.find((item) => item.id === historyId);
+      if (!record) throw new Error('AI 历史记录不存在');
+      record.updatedAt = historyUpdatedAt ?? record.updatedAt;
+      record.messages.push(
+        {
+          role: 'user',
+          content: question,
+          attachments: attachmentPaths.map((path) => ({
+            name: path.split(/[\\/]/).pop() || '未命名文件',
+            charCount: 0,
+          })),
+        },
+        { role: 'assistant', content },
+      );
+    }
+    return { providerId, model: provider.model, content };
   },
   async setAiWindowOpen(_open: boolean): Promise<void> {},
   async toggleAiWindow(): Promise<void> {},

@@ -71,6 +71,13 @@ pub struct AiAttachmentSummary {
     pub char_count: usize,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiHistoryUpdate {
+    pub id: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LoadedAiAttachment {
     summary: AiAttachmentSummary,
@@ -333,6 +340,95 @@ fn attachment_context(attachments: &[LoadedAiAttachment]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn history_attachments(
+    attachments: &[LoadedAiAttachment],
+) -> Vec<crate::ai_history::AiHistoryAttachment> {
+    attachments
+        .iter()
+        .map(|attachment| crate::ai_history::AiHistoryAttachment {
+            name: attachment.summary.name.clone(),
+            content: attachment.content.clone(),
+            char_count: attachment.summary.char_count,
+        })
+        .collect()
+}
+
+fn conversation_context(messages: &[crate::ai_history::AiHistoryMessage]) -> String {
+    let mut recent = messages.iter().rev().take(12).collect::<Vec<_>>();
+    recent.reverse();
+    recent
+        .into_iter()
+        .map(|message| {
+            let attachments = message
+                .attachments
+                .iter()
+                .map(|attachment| {
+                    format!(
+                        "--- 历史补充日志文件: {} ---\n{}",
+                        attachment.name, attachment.content
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if attachments.is_empty() {
+                format!("{}: {}", message.role, message.content)
+            } else {
+                format!("{}: {}\n\n{}", message.role, message.content, attachments)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn provider_protocol_label(protocol: AiProtocol) -> &'static str {
+    match protocol {
+        AiProtocol::ChatCompletions => "chatCompletions",
+        AiProtocol::Responses => "responses",
+    }
+}
+
+fn validate_history_target(
+    record: &crate::ai_history::AiHistoryRecord,
+    provider: &StoredAiProvider,
+) -> Result<(), String> {
+    if record.provider_id != provider.id
+        || record.protocol != provider_protocol_label(provider.protocol)
+        || record.model != provider.model
+        || record.endpoint_fingerprint != provider.base_url
+    {
+        return Err("AI 供应商目标已变化，请重新选择日志并确认后再分析".to_string());
+    }
+    Ok(())
+}
+
+fn validate_accumulated_attachment_chars(
+    selected_text: &str,
+    messages: &[crate::ai_history::AiHistoryMessage],
+    attachments: &[LoadedAiAttachment],
+) -> Result<(), String> {
+    let historical_chars = messages
+        .iter()
+        .flat_map(|message| message.attachments.iter())
+        .map(|attachment| attachment.content.chars().count())
+        .sum::<usize>();
+    let current_chars = attachments
+        .iter()
+        .map(|attachment| attachment.content.chars().count())
+        .sum::<usize>();
+    if selected_text
+        .chars()
+        .count()
+        .saturating_add(historical_chars)
+        .saturating_add(current_chars)
+        > MAX_ANALYSIS_CHARS
+    {
+        return Err(format!(
+            "原始日志与会话附件合计超过 {MAX_ANALYSIS_CHARS} 个字符限制"
+        ));
+    }
+    Ok(())
 }
 
 async fn load_ai_attachments_async(
@@ -784,6 +880,7 @@ pub async fn continue_ai_conversation(
     history: Vec<crate::ai_history::AiHistoryMessage>,
     question: String,
     attachment_paths: Vec<String>,
+    history_update: Option<AiHistoryUpdate>,
 ) -> Result<AiAnalysisResult, String> {
     validate_analysis_text(&selected_text)?;
     if question.trim().is_empty() {
@@ -798,14 +895,22 @@ pub async fn continue_ai_conversation(
         .ok_or_else(|| "AI provider was not found".to_string())?;
     let api_key = read_api_key(&provider.id)
         .map_err(|_| "Unable to access the API key in the system credential store".to_string())?;
+    let mut stored_history = history_update
+        .as_ref()
+        .map(|update| update.id.as_str())
+        .map(|id| crate::ai_history::load_ai_history_record(&app, id))
+        .transpose()?;
+    if let Some(record) = stored_history.as_ref() {
+        validate_history_target(record, &provider)?;
+    }
     let attachments = load_ai_attachments_async(selected_text.clone(), attachment_paths).await?;
-    let context = history
-        .into_iter()
-        .rev()
-        .take(12)
-        .map(|m| format!("{}: {}", m.role, m.content))
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    if let Some(record) = stored_history.as_ref() {
+        validate_accumulated_attachment_chars(&selected_text, &record.messages, &attachments)?;
+    }
+    let context = stored_history
+        .as_ref()
+        .map(|record| conversation_context(&record.messages))
+        .unwrap_or_else(|| conversation_context(&history));
     let supplemental = attachment_context(&attachments);
     let input = if supplemental.is_empty() {
         format!("原始日志：\n{selected_text}\n\n已有对话：\n{context}\n\n用户追问：\n{question}")
@@ -822,6 +927,22 @@ pub async fn continue_ai_conversation(
     .await?;
     let content = analysis_content(provider.protocol, &body)
         .ok_or_else(|| "AI provider returned no analysis content".to_string())?;
+    if let Some(record) = stored_history.as_mut() {
+        if let Some(update) = history_update {
+            record.updated_at = update.updated_at;
+        }
+        record.messages.push(crate::ai_history::AiHistoryMessage {
+            role: "user".to_string(),
+            content: question,
+            attachments: history_attachments(&attachments),
+        });
+        record.messages.push(crate::ai_history::AiHistoryMessage {
+            role: "assistant".to_string(),
+            content: content.clone(),
+            attachments: Vec::new(),
+        });
+        crate::ai_history::save_ai_history_record(&app, record.clone())?;
+    }
     Ok(AiAnalysisResult {
         provider_id,
         model: provider.model,
@@ -980,6 +1101,67 @@ mod tests {
             .expect_err("missing attachments should fail");
         assert!(error.contains("missing.log"));
         assert!(!error.contains("private-customer-name"));
+    }
+
+    #[test]
+    fn restored_attachment_content_is_included_in_chronological_context() {
+        let messages = vec![
+            crate::ai_history::AiHistoryMessage {
+                role: "user".into(),
+                content: "compare".into(),
+                attachments: vec![crate::ai_history::AiHistoryAttachment {
+                    name: "context.log".into(),
+                    content: "ERROR restored attachment".into(),
+                    char_count: 25,
+                }],
+            },
+            crate::ai_history::AiHistoryMessage {
+                role: "assistant".into(),
+                content: "first answer".into(),
+                attachments: Vec::new(),
+            },
+        ];
+        let context = conversation_context(&messages);
+        assert!(context.starts_with("user: compare"));
+        assert!(context.contains("--- 历史补充日志文件: context.log ---"));
+        assert!(context.contains("ERROR restored attachment"));
+        assert!(context.ends_with("assistant: first answer"));
+    }
+
+    #[test]
+    fn restored_history_requires_the_same_provider_target() {
+        let provider = stored(AiProtocol::ChatCompletions, AiEndpointMode::Base);
+        let mut record = crate::ai_history::AiHistoryRecord {
+            id: "history".into(),
+            title: "title".into(),
+            created_at: "created".into(),
+            updated_at: "updated".into(),
+            provider_id: provider.id.clone(),
+            protocol: "chatCompletions".into(),
+            model: provider.model.clone(),
+            endpoint_fingerprint: provider.base_url.clone(),
+            selected_text: "log".into(),
+            messages: Vec::new(),
+        };
+        assert!(validate_history_target(&record, &provider).is_ok());
+        record.endpoint_fingerprint = "https://changed.example/v1".into();
+        assert!(validate_history_target(&record, &provider).is_err());
+    }
+
+    #[test]
+    fn restored_and_current_attachments_share_the_session_character_limit() {
+        let current = TempAttachment::new("current.log", b"xx");
+        let loaded = load_ai_attachments("base", &[current.path_string()]).expect("current");
+        let messages = vec![crate::ai_history::AiHistoryMessage {
+            role: "user".into(),
+            content: "previous".into(),
+            attachments: vec![crate::ai_history::AiHistoryAttachment {
+                name: "previous.log".into(),
+                content: "x".repeat(MAX_ANALYSIS_CHARS - 5),
+                char_count: MAX_ANALYSIS_CHARS - 5,
+            }],
+        }];
+        assert!(validate_accumulated_attachment_chars("base", &messages, &loaded).is_err());
     }
 
     #[test]
