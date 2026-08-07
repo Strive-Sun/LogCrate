@@ -180,6 +180,7 @@ export const tauriApi = {
     history: import('./types').AiHistoryMessage[],
     question: string,
     attachmentPaths: string[] = [],
+    logSnippets: string[] = [],
     historyId?: string,
     historyUpdatedAt?: string,
     onEvent?: (event: AiStreamEvent) => void,
@@ -193,6 +194,7 @@ export const tauriApi = {
       question,
       options: {
         attachmentPaths,
+        logSnippets,
         historyUpdate:
           historyId && historyUpdatedAt ? { id: historyId, updatedAt: historyUpdatedAt } : null,
       },

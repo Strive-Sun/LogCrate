@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 export interface MenuItem {
   label: string;
   danger?: boolean;
+  disabled?: boolean;
   onClick: () => void;
 }
 
@@ -45,16 +46,20 @@ export function ContextMenu(props: Props) {
       />
       <div ref={ref} className="ctx-menu" style={{ left: pos.x, top: pos.y }}>
         {props.items.map((it, i) => (
-          <div
+          <button
+            type="button"
             key={i}
-            className={'ctx-item' + (it.danger ? ' danger' : '')}
+            className={'ctx-item' + (it.danger ? ' danger' : '') + (it.disabled ? ' disabled' : '')}
+            disabled={it.disabled}
+            aria-disabled={it.disabled || undefined}
             onClick={() => {
+              if (it.disabled) return;
               it.onClick();
               props.onClose();
             }}
           >
             {it.label}
-          </div>
+          </button>
         ))}
       </div>
     </>

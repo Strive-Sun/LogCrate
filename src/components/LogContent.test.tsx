@@ -311,9 +311,26 @@ test('Ctrl+F opens the active log find dialog with the required defaults and opt
   );
 });
 
+test('add-to-AI context action stays visible but disabled without an open current conversation', () => {
+  const { container } = renderLog({ aiOpen: true });
+  harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
+
+  const addToConversation = harness.screen.getByText('添加到 AI 对话框');
+  assert.equal(addToConversation.getAttribute('aria-disabled'), 'true');
+  assert.ok(addToConversation.classList.contains('disabled'));
+  harness.fireEvent.click(addToConversation);
+  assert.equal(harness.screen.queryByLabelText('待发送日志选区'), null);
+  assert.ok(harness.screen.getByText('添加到 AI 对话框'));
+});
+
 test('AI analysis result opens in a closable drawer body', async () => {
+  let currentSelection = 'ERROR synthetic failure';
   let aiWorkspaceOpened = false;
-  const followUps: Array<{ question: string; attachmentPaths: string[] }> = [];
+  const followUps: Array<{
+    question: string;
+    attachmentPaths: string[];
+    logSnippets: string[];
+  }> = [];
   const followUpHistories: string[][] = [];
   let retryAttempts = 0;
   let resolveFirstFollowUp: () => void = () => {
@@ -321,7 +338,7 @@ test('AI analysis result opens in a closable drawer body', async () => {
   };
   dom.window.getSelection = () =>
     ({
-      toString: () => 'ERROR synthetic failure',
+      toString: () => currentSelection,
     }) as Selection;
   dom.window.confirm = () => true;
   api.listAiProviders = async () => [
@@ -367,11 +384,16 @@ test('AI analysis result opens in a closable drawer body', async () => {
     history,
     question,
     attachmentPaths,
+    logSnippets,
     _historyId,
     _historyUpdatedAt,
     onEvent,
   ) => {
-    followUps.push({ question, attachmentPaths: attachmentPaths ?? [] });
+    followUps.push({
+      question,
+      attachmentPaths: attachmentPaths ?? [],
+      logSnippets: logSnippets ?? [],
+    });
     followUpHistories.push(history.map((message) => message.content));
     if (question === 'Retry failed request' && retryAttempts++ === 0) {
       onEvent?.({ type: 'delta', content: 'partial from failed request' });
@@ -400,7 +422,7 @@ test('AI analysis result opens in a closable drawer body', async () => {
     return {
       providerId: 'test-provider',
       model: 'test-model',
-      content: `Follow-up response: ${question}`,
+      content: `Follow-up response: ${question || '补充日志选区'}`,
       timing: { responseHeadersMs: 10, firstContentMs: 20, streamReceiveMs: 30, totalMs: 40 },
     };
   };
@@ -441,6 +463,17 @@ test('AI analysis result opens in a closable drawer body', async () => {
     harness.screen.getByRole('textbox', { name: '继续追问' }).getAttribute('placeholder') ?? '',
     /日志错误、时间线、调用链或根因/,
   );
+
+  currentSelection = 'WARN queued without sending';
+  harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
+  const addToConversation = harness.screen.getByText('添加到 AI 对话框');
+  assert.equal(addToConversation.getAttribute('aria-disabled'), null);
+  harness.fireEvent.click(addToConversation);
+  assert.ok(harness.screen.getByLabelText('待发送日志选区'));
+  assert.ok(harness.screen.getByText('WARN queued without sending'));
+  assert.deepEqual(followUps, []);
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '移除日志选区' }));
+  assert.equal(harness.screen.queryByLabelText('待发送日志选区'), null);
 
   harness.fireEvent.click(harness.screen.getByRole('button', { name: '添加补充日志文件' }));
   assert.equal((await harness.screen.findByText('context.log')).textContent, 'context.log');
@@ -485,7 +518,11 @@ test('AI analysis result opens in a closable drawer body', async () => {
     'Follow-up response: Compare both logs',
   );
   assert.deepEqual(followUps, [
-    { question: 'Compare both logs', attachmentPaths: ['D:\\logs\\context.log'] },
+    {
+      question: 'Compare both logs',
+      attachmentPaths: ['D:\\logs\\context.log'],
+      logSnippets: [],
+    },
   ]);
   assert.equal(harness.screen.queryByRole('status', { name: 'AI 正在回复' }), null);
   assert.equal(harness.screen.getByText('42 字符').textContent, '42 字符');
@@ -502,6 +539,7 @@ test('AI analysis result opens in a closable drawer body', async () => {
   assert.deepEqual(followUps[1], {
     question: 'Summarize the root cause',
     attachmentPaths: [],
+    logSnippets: [],
   });
 
   const retryInput = harness.screen.getByRole('textbox', { name: '继续追问' });
@@ -519,6 +557,31 @@ test('AI analysis result opens in a closable drawer body', async () => {
   assert.ok(await harness.screen.findByText('Follow-up response: Retry failed request'));
   assert.equal(followUpHistories.at(-1)?.includes('partial from failed request'), false);
   assert.equal(followUpHistories.at(-1)?.includes('Retry failed request'), false);
+
+  currentSelection = 'WARN manually queued context';
+  harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
+  harness.fireEvent.click(harness.screen.getByText('添加到 AI 对话框'));
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '发送追问' }));
+  assert.ok(await harness.screen.findByText('Follow-up response: 补充日志选区'));
+  assert.deepEqual(followUps.at(-1), {
+    question: '',
+    attachmentPaths: [],
+    logSnippets: ['WARN manually queued context'],
+  });
+  assert.equal(harness.screen.queryByLabelText('待发送日志选区'), null);
+  assert.ok(harness.screen.getByLabelText('已发送附件 日志选区 1'));
+
+  currentSelection = 'ERROR analyze in current conversation';
+  harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
+  harness.fireEvent.click(harness.screen.getByText('AI 分析'));
+  await harness.waitFor(() =>
+    assert.deepEqual(followUps.at(-1), {
+      question: '',
+      attachmentPaths: [],
+      logSnippets: ['ERROR analyze in current conversation'],
+    }),
+  );
+  assert.equal(aiWorkspaceOpened, true);
 
   harness.fireEvent.click(harness.screen.getByRole('button', { name: '关闭 AI 日志分析' }));
   assert.equal(harness.screen.queryByRole('dialog', { name: 'AI 日志分析' }), null);

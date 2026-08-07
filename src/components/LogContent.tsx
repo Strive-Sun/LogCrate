@@ -51,6 +51,12 @@ const PAGE = 200;
 const MAX_CACHED_LINES = 5_000;
 const ENCODINGS = ['UTF-8', 'GBK', 'GB18030', 'UTF-16LE', 'UTF-16BE'];
 type AiDisplayResult = Omit<AiAnalysisResult, 'timing'> & Partial<Pick<AiAnalysisResult, 'timing'>>;
+interface AiPendingLogSnippet {
+  id: number;
+  content: string;
+  charCount: number;
+  preview: string;
+}
 
 const AI_FAILURE_CODES = new Set<AiRequestFailure['code']>([
   'connect_timeout',
@@ -291,6 +297,7 @@ export function LogContent({
   const [aiConversationText, setAiConversationText] = useState('');
   const [aiQuestion, setAiQuestion] = useState('');
   const [aiAttachments, setAiAttachments] = useState<AiAttachmentSummary[]>([]);
+  const [aiLogSnippets, setAiLogSnippets] = useState<AiPendingLogSnippet[]>([]);
   const [aiHistoryId, setAiHistoryId] = useState<string | null>(null);
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
 
@@ -311,6 +318,7 @@ export function LogContent({
   const aiDeltaBuffer = useRef('');
   const aiStreamingMessageIndex = useRef(-1);
   const aiSuccessfulConversation = useRef<import('../api/types').AiHistoryMessage[]>([]);
+  const aiLogSnippetId = useRef(0);
   const fieldAnchor = useRef(1);
   const fieldRestoreAnchor = useRef<number | null>(null);
   const fieldUserInteracted = useRef(false);
@@ -408,6 +416,7 @@ export function LogContent({
       try {
         if (onAiOpen) await onAiOpen();
         else await api.setAiWindowOpen(true);
+        setAiPanelOpen(true);
       } catch (error) {
         setAiError(errorMessage(error));
         return;
@@ -416,6 +425,7 @@ export function LogContent({
       setAiResult(null);
       setAiConversationText(selectedText);
       setAiAttachments([]);
+      setAiLogSnippets([]);
       setAiHistoryId(null);
       aiSendingRef.current = false;
       aiSuccessfulConversation.current = [];
@@ -451,7 +461,6 @@ export function LogContent({
       setAiIncomplete(false);
       const now = new Date().toISOString();
       const historyId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      setAiHistoryId(historyId);
       try {
         await api.saveAiHistory({
           id: historyId,
@@ -465,6 +474,7 @@ export function LogContent({
           selectedText,
           messages: successfulMessages,
         });
+        setAiHistoryId(historyId);
       } catch (error) {
         setAiError(errorMessage(error));
       }
@@ -1048,20 +1058,53 @@ export function LogContent({
     }
   }
 
-  async function sendAiFollowUp() {
-    if (!aiResult || aiBusy || aiSendingRef.current || !aiQuestion.trim()) return;
+  function createAiLogSnippet(selectedText: string): AiPendingLogSnippet | null {
+    if (!selectedText.trim()) return null;
+    const content = selectedText;
+    aiLogSnippetId.current += 1;
+    return {
+      id: aiLogSnippetId.current,
+      content,
+      charCount: [...content].length,
+      preview: content.replace(/\s+/g, ' ').slice(0, 120),
+    };
+  }
+
+  function addSelectedTextToAiConversation(selectedText: string) {
+    const snippet = createAiLogSnippet(selectedText);
+    if (!snippet || (!aiOpen && !aiPanelOpen) || !aiResult || !aiRequestTarget) return;
+    setAiLogSnippets((items) => [...items, snippet]);
+    setAiError(null);
+  }
+
+  async function sendAiFollowUp(immediateSnippets: AiPendingLogSnippet[] = []) {
+    const snippets = [...aiLogSnippets, ...immediateSnippets];
+    if (!aiResult || aiBusy || aiSendingRef.current) {
+      if (immediateSnippets.length) setAiLogSnippets(snippets);
+      return;
+    }
+    if (!aiQuestion.trim() && snippets.length === 0) return;
     const question = aiQuestion;
     const attachments = aiAttachments;
+    const displayQuestion = question.trim() || '补充日志选区';
     const conversationBeforeSend = aiSuccessfulConversation.current;
     const optimisticConversation = [
       ...conversationBeforeSend,
       {
         role: 'user' as const,
-        content: question,
-        attachments: attachments.map((attachment) => ({
-          name: attachment.name,
-          charCount: attachment.charCount,
-        })),
+        content: displayQuestion,
+        attachments: [
+          ...attachments.map((attachment) => ({
+            name: attachment.name,
+            charCount: attachment.charCount,
+            kind: 'file' as const,
+          })),
+          ...snippets.map((snippet, index) => ({
+            name: `日志选区 ${index + 1}`,
+            charCount: snippet.charCount,
+            kind: 'selection' as const,
+          })),
+        ],
       },
       { role: 'assistant' as const, content: '' },
     ];
@@ -1076,6 +1119,7 @@ export function LogContent({
     setAiError(null);
     setAiQuestion('');
     setAiAttachments([]);
+    setAiLogSnippets([]);
     let next: AiAnalysisResult;
     try {
       const providers = await api.listAiProviders();
@@ -1089,6 +1133,7 @@ export function LogContent({
         conversationBeforeSend.slice(-12),
         question,
         attachments.map((attachment) => attachment.path),
+        snippets.map((snippet) => snippet.content),
         aiHistoryId ?? undefined,
         historyUpdatedAt,
         (event) => queueAiDelta(generation, event),
@@ -1100,6 +1145,7 @@ export function LogContent({
         setAiError(formatAiRequestFailure(error));
         setAiQuestion(question);
         setAiAttachments(attachments);
+        setAiLogSnippets(snippets);
       }
       return;
     } finally {
@@ -1351,8 +1397,27 @@ export function LogContent({
               },
             },
             {
+              label: '添加到 AI 对话框',
+              disabled: (!aiOpen && !aiPanelOpen) || !aiResult || !aiRequestTarget || !aiHistoryId,
+              onClick: () => addSelectedTextToAiConversation(logContextMenu.selectedText),
+            },
+            {
               label: 'AI 分析',
-              onClick: () => void analyzeSelectedText(logContextMenu.selectedText),
+              disabled: Boolean(aiPanelOpen && aiHistoryId && aiBusy),
+              onClick: () => {
+                const snippet = createAiLogSnippet(logContextMenu.selectedText);
+                if (
+                  (aiOpen || aiPanelOpen) &&
+                  aiResult &&
+                  aiRequestTarget &&
+                  aiHistoryId &&
+                  snippet
+                ) {
+                  void sendAiFollowUp([snippet]);
+                  return;
+                }
+                void analyzeSelectedText(logContextMenu.selectedText);
+              },
             },
           ]}
         />
@@ -1392,6 +1457,8 @@ export function LogContent({
                   setAiBusy(false);
                   setAiQuestion('');
                   setAiAttachments([]);
+                  setAiLogSnippets([]);
+                  setAiHistoryId(null);
                   setAiPanelOpen(false);
                   void (onAiClose ? onAiClose() : api.setAiWindowOpen(false));
                 }}
@@ -1447,6 +1514,7 @@ export function LogContent({
                           setAiConversationText(record.selectedText);
                           setAiQuestion('');
                           setAiAttachments([]);
+                          setAiLogSnippets([]);
                           setAiHistoryId(record.id);
                           setAiIncomplete(false);
                           setAiError(null);
@@ -1542,7 +1610,7 @@ export function LogContent({
                                   key={`${attachment.name}-${attachment.charCount}`}
                                   aria-label={`已发送附件 ${attachment.name}`}
                                 >
-                                  {attachment.name}
+                                  {attachment.kind === 'selection' ? '日志选区' : attachment.name}
                                   <small>{fmtNum(attachment.charCount)} 字符</small>
                                 </span>
                               ))}
@@ -1576,6 +1644,30 @@ export function LogContent({
                             ×
                           </button>
                         </span>
+                      ))}
+                    </div>
+                  )}
+                  {aiLogSnippets.length > 0 && (
+                    <div className="ai-composer-snippets" aria-label="待发送日志选区">
+                      {aiLogSnippets.map((snippet) => (
+                        <div key={snippet.id} className="ai-log-snippet-card">
+                          <div>
+                            <strong>日志选区</strong>
+                            <small>{fmtNum(snippet.charCount)} 字符</small>
+                          </div>
+                          <p title={snippet.content}>{snippet.preview}</p>
+                          <button
+                            type="button"
+                            aria-label="移除日志选区"
+                            onClick={() =>
+                              setAiLogSnippets((items) =>
+                                items.filter((item) => item.id !== snippet.id),
+                              )
+                            }
+                          >
+                            ×
+                          </button>
+                        </div>
                       ))}
                     </div>
                   )}
@@ -1614,7 +1706,7 @@ export function LogContent({
                       className="ai-composer-send"
                       aria-label="发送追问"
                       title="发送追问"
-                      disabled={aiBusy || !aiQuestion.trim()}
+                      disabled={aiBusy || (!aiQuestion.trim() && aiLogSnippets.length === 0)}
                       onClick={() => void sendAiFollowUp()}
                     >
                       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1624,7 +1716,7 @@ export function LogContent({
                   </div>
                 </div>
                 <div className="ai-composer-note">
-                  附件与追问仅在发送时传给当前供应商；Shift+Enter 换行
+                  附件、日志选区与追问仅在发送时传给当前供应商；Shift+Enter 换行
                 </div>
               </div>
             )}

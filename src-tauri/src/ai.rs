@@ -56,6 +56,7 @@ const MAX_HISTORY_MESSAGES: usize = 12;
 const MAX_HISTORY_CHARS: usize = 48_000;
 const MAX_QUESTION_CHARS: usize = 4_000;
 const MAX_AI_ATTACHMENTS: usize = 5;
+const MAX_AI_LOG_SNIPPETS: usize = 5;
 const MAX_AI_ATTACHMENT_BYTES: usize = 256 * 1024;
 const MAX_AI_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const SESSION_ID_HEADER: &str = "session-id";
@@ -235,6 +236,8 @@ pub struct AiHistoryUpdate {
 #[serde(rename_all = "camelCase")]
 pub struct AiFollowUpOptions {
     pub attachment_paths: Vec<String>,
+    #[serde(default)]
+    pub log_snippets: Vec<String>,
     pub history_update: Option<AiHistoryUpdate>,
 }
 
@@ -242,6 +245,7 @@ pub struct AiFollowUpOptions {
 struct LoadedAiAttachment {
     summary: AiAttachmentSummary,
     content: String,
+    kind: crate::ai_history::AiHistoryAttachmentKind,
 }
 
 #[derive(Debug, Serialize)]
@@ -484,6 +488,7 @@ fn load_ai_attachments(
                 char_count,
             },
             content,
+            kind: crate::ai_history::AiHistoryAttachmentKind::File,
         });
     }
     Ok(loaded)
@@ -493,8 +498,12 @@ fn attachment_context(attachments: &[LoadedAiAttachment]) -> String {
     attachments
         .iter()
         .map(|attachment| {
+            let label = match attachment.kind {
+                crate::ai_history::AiHistoryAttachmentKind::File => "补充日志文件",
+                crate::ai_history::AiHistoryAttachmentKind::Selection => "补充日志选区",
+            };
             format!(
-                "--- 补充日志文件: {} ---\n{}",
+                "--- {label}: {} ---\n{}",
                 attachment.summary.name, attachment.content
             )
         })
@@ -511,6 +520,7 @@ fn history_attachments(
             name: attachment.summary.name.clone(),
             content: attachment.content.clone(),
             char_count: attachment.summary.char_count,
+            kind: attachment.kind,
         })
         .collect()
 }
@@ -523,8 +533,12 @@ fn conversation_context(messages: &[crate::ai_history::AiHistoryMessage]) -> Str
                 .attachments
                 .iter()
                 .map(|attachment| {
+                    let label = match attachment.kind {
+                        crate::ai_history::AiHistoryAttachmentKind::File => "历史补充日志文件",
+                        crate::ai_history::AiHistoryAttachmentKind::Selection => "历史补充日志选区",
+                    };
                     format!(
-                        "--- 历史补充日志文件: {} ---\n{}",
+                        "--- {label}: {} ---\n{}",
                         attachment.name, attachment.content
                     )
                 })
@@ -567,14 +581,39 @@ fn recent_stored_history(
     &messages[messages.len().saturating_sub(MAX_HISTORY_MESSAGES)..]
 }
 
-fn validate_follow_up_question(question: &str) -> Result<(), String> {
-    if question.trim().is_empty() {
-        return Err("请输入追问内容".into());
+fn validate_follow_up_input(question: &str, log_snippets: &[String]) -> Result<(), String> {
+    if question.trim().is_empty() && log_snippets.iter().all(|snippet| snippet.trim().is_empty()) {
+        return Err("请输入追问内容或添加日志选区".into());
     }
     if question.chars().count() > MAX_QUESTION_CHARS {
         return Err(format!("追问内容超过 {MAX_QUESTION_CHARS} 个字符限制"));
     }
     Ok(())
+}
+
+fn load_ai_log_snippets(log_snippets: Vec<String>) -> Result<Vec<LoadedAiAttachment>, String> {
+    if log_snippets.len() > MAX_AI_LOG_SNIPPETS {
+        return Err(format!("每次最多添加 {MAX_AI_LOG_SNIPPETS} 个日志选区"));
+    }
+    log_snippets
+        .into_iter()
+        .enumerate()
+        .map(|(index, content)| {
+            if content.trim().is_empty() {
+                return Err("日志选区不能为空".to_string());
+            }
+            let char_count = content.chars().count();
+            Ok(LoadedAiAttachment {
+                summary: AiAttachmentSummary {
+                    path: String::new(),
+                    name: format!("日志选区 {}", index + 1),
+                    char_count,
+                },
+                content,
+                kind: crate::ai_history::AiHistoryAttachmentKind::Selection,
+            })
+        })
+        .collect()
 }
 
 fn provider_protocol_label(protocol: AiProtocol) -> &'static str {
@@ -1472,14 +1511,23 @@ pub async fn continue_ai_conversation(
     on_event: Channel<AiStreamEvent>,
 ) -> Result<AiAnalysisResult, AiCommandError> {
     validate_analysis_text(&selected_text)?;
-    validate_follow_up_question(&question)?;
+    let AiFollowUpOptions {
+        attachment_paths,
+        log_snippets,
+        history_update,
+    } = options;
+    validate_follow_up_input(&question, &log_snippets)?;
+    if !log_snippets.is_empty() && history_update.is_none() {
+        return Err("当前 AI 会话没有可验证的加密历史，请重新建立会话"
+            .to_string()
+            .into());
+    }
     validate_conversation_history(&history)?;
     let provider = read_stored_providers(&app)?
         .into_iter()
         .find(|p| p.id == provider_id)
         .ok_or_else(|| "AI provider was not found".to_string())?;
-    let mut stored_history = options
-        .history_update
+    let mut stored_history = history_update
         .as_ref()
         .map(|update| update.id.as_str())
         .map(|id| crate::ai_history::load_ai_history_record(&app, id))
@@ -1488,8 +1536,9 @@ pub async fn continue_ai_conversation(
         validate_history_target(record, &provider)?;
         validate_conversation_history(recent_stored_history(&record.messages))?;
     }
-    let attachments =
-        load_ai_attachments_async(selected_text.clone(), options.attachment_paths).await?;
+    let mut attachments =
+        load_ai_attachments_async(selected_text.clone(), attachment_paths).await?;
+    attachments.extend(load_ai_log_snippets(log_snippets)?);
     let attachment_history = stored_history
         .as_ref()
         .map(|record| record.messages.as_slice())
@@ -1531,12 +1580,16 @@ pub async fn continue_ai_conversation(
         body_bytes: None,
     })?;
     if let Some(record) = stored_history.as_mut() {
-        if let Some(update) = options.history_update {
+        if let Some(update) = history_update {
             record.updated_at = update.updated_at;
         }
         record.messages.push(crate::ai_history::AiHistoryMessage {
             role: "user".to_string(),
-            content: question,
+            content: if question.trim().is_empty() {
+                "补充日志选区".to_string()
+            } else {
+                question
+            },
             attachments: history_attachments(&attachments),
         });
         record.messages.push(crate::ai_history::AiHistoryMessage {
@@ -1774,6 +1827,7 @@ mod tests {
                     name: "context.log".into(),
                     content: "ERROR restored attachment".into(),
                     char_count: 25,
+                    kind: crate::ai_history::AiHistoryAttachmentKind::File,
                 }],
             },
             crate::ai_history::AiHistoryMessage {
@@ -1834,11 +1888,12 @@ mod tests {
     }
 
     #[test]
-    fn follow_up_question_and_stored_history_boundaries_reject_without_silent_truncation() {
-        assert!(validate_follow_up_question("问题").is_ok());
-        assert!(validate_follow_up_question(&"问".repeat(MAX_QUESTION_CHARS)).is_ok());
-        assert!(validate_follow_up_question("  ").is_err());
-        assert!(validate_follow_up_question(&"问".repeat(MAX_QUESTION_CHARS + 1)).is_err());
+    fn follow_up_input_and_stored_history_boundaries_reject_without_silent_truncation() {
+        assert!(validate_follow_up_input("问题", &[]).is_ok());
+        assert!(validate_follow_up_input(&"问".repeat(MAX_QUESTION_CHARS), &[]).is_ok());
+        assert!(validate_follow_up_input("  ", &["ERROR selected".into()]).is_ok());
+        assert!(validate_follow_up_input("  ", &[]).is_err());
+        assert!(validate_follow_up_input(&"问".repeat(MAX_QUESTION_CHARS + 1), &[]).is_err());
 
         let messages = (0..14)
             .map(|index| crate::ai_history::AiHistoryMessage {
@@ -1930,9 +1985,31 @@ mod tests {
                 name: "previous.log".into(),
                 content: "x".repeat(MAX_ANALYSIS_CHARS - 5),
                 char_count: MAX_ANALYSIS_CHARS - 5,
+                kind: crate::ai_history::AiHistoryAttachmentKind::File,
             }],
         }];
         assert!(validate_accumulated_attachment_chars("base", &messages, &loaded).is_err());
+    }
+
+    #[test]
+    fn inline_log_snippets_are_bounded_and_tagged_for_encrypted_history() {
+        let snippets = load_ai_log_snippets(vec!["ERROR first".into(), "WARN second".into()])
+            .expect("valid snippets");
+        assert_eq!(snippets.len(), 2);
+        assert_eq!(snippets[0].summary.name, "日志选区 1");
+        assert_eq!(snippets[0].summary.char_count, 11);
+        assert_eq!(
+            snippets[0].kind,
+            crate::ai_history::AiHistoryAttachmentKind::Selection
+        );
+        let stored = history_attachments(&snippets);
+        assert_eq!(stored[1].content, "WARN second");
+        assert_eq!(
+            stored[1].kind,
+            crate::ai_history::AiHistoryAttachmentKind::Selection
+        );
+        assert!(load_ai_log_snippets(vec!["  ".into()]).is_err());
+        assert!(load_ai_log_snippets(vec!["x".into(); MAX_AI_LOG_SNIPPETS + 1]).is_err());
     }
 
     #[test]

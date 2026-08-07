@@ -34,6 +34,16 @@ pub struct AiHistoryAttachment {
     #[serde(default)]
     pub content: String,
     pub char_count: usize,
+    #[serde(default)]
+    pub kind: AiHistoryAttachmentKind,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AiHistoryAttachmentKind {
+    #[default]
+    File,
+    Selection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +94,7 @@ pub struct AiHistoryMessageView {
 pub struct AiHistoryAttachmentView {
     pub name: String,
     pub char_count: usize,
+    pub kind: AiHistoryAttachmentKind,
 }
 
 impl From<AiHistoryRecord> for AiHistoryRecordView {
@@ -110,6 +121,7 @@ impl From<AiHistoryRecord> for AiHistoryRecordView {
                         .map(|attachment| AiHistoryAttachmentView {
                             name: attachment.name,
                             char_count: attachment.char_count,
+                            kind: attachment.kind,
                         })
                         .collect(),
                 })
@@ -348,6 +360,7 @@ mod tests {
                     name: "context.log".into(),
                     content: "attachment secret payload".into(),
                     char_count: 25,
+                    kind: AiHistoryAttachmentKind::File,
                 }],
             }],
         }
@@ -380,6 +393,14 @@ mod tests {
         let message: AiHistoryMessage =
             serde_json::from_value(legacy).expect("legacy message should deserialize");
         assert!(message.attachments.is_empty());
+
+        let legacy_attachment: AiHistoryAttachment = serde_json::from_value(serde_json::json!({
+            "name": "legacy.log",
+            "content": "legacy attachment",
+            "charCount": 17
+        }))
+        .expect("legacy attachment should deserialize");
+        assert_eq!(legacy_attachment.kind, AiHistoryAttachmentKind::File);
     }
 
     #[test]
@@ -388,6 +409,7 @@ mod tests {
         let serialized = serde_json::to_string(&view).expect("serialize history view");
         assert!(serialized.contains("context.log"));
         assert!(serialized.contains("charCount"));
+        assert!(serialized.contains("\"kind\":\"file\""));
         assert!(!serialized.contains("attachment secret payload"));
     }
 

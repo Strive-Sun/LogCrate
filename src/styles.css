@@ -3143,6 +3143,64 @@ body.resizing {
   background: #e2e8f0;
   color: #0f172a;
 }
+.ai-composer-snippets {
+  display: grid;
+  gap: 6px;
+  padding: 9px 10px 0;
+}
+.ai-log-snippet-card {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding: 7px 30px 7px 9px;
+  border: 1px solid #dbe4ea;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #334155;
+}
+.ai-log-snippet-card > div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.ai-log-snippet-card strong {
+  font-size: 11px;
+}
+.ai-log-snippet-card small {
+  color: #64748b;
+  font-size: 9px;
+}
+.ai-log-snippet-card p {
+  overflow: hidden;
+  margin: 0;
+  color: #64748b;
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-log-snippet-card > button {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  display: grid;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+.ai-log-snippet-card > button:hover {
+  background: #e2e8f0;
+  color: #0f172a;
+}
 .ai-composer-row {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr) 34px;
@@ -3831,14 +3889,28 @@ body.resizing {
   overflow: hidden;
 }
 .ctx-item {
+  display: block;
+  width: 100%;
   padding: 7px 12px;
+  border: 0;
   font-size: 12px;
+  font-family: inherit;
+  text-align: left;
+  color: inherit;
+  background: transparent;
   border-radius: 5px;
   cursor: pointer;
   white-space: nowrap;
 }
 .ctx-item:hover {
   background: var(--hover);
+}
+.ctx-item.disabled,
+.ctx-item.disabled:hover {
+  color: var(--muted);
+  background: transparent;
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 .ctx-item.danger {
   color: var(--error);

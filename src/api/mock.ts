@@ -335,14 +335,25 @@ export const mockApi = {
     _history: AiHistoryMessage[],
     question: string,
     attachmentPaths: string[] = [],
+    logSnippets: string[] = [],
     historyId?: string,
     historyUpdatedAt?: string,
     onEvent?: (event: AiStreamEvent) => void,
   ): Promise<AiAnalysisResult> {
-    if (!question.trim()) throw new Error('请输入追问内容');
+    if (!question.trim() && logSnippets.every((snippet) => !snippet.trim()))
+      throw new Error('请输入追问内容或添加日志选区');
+    if (logSnippets.length > 5) throw new Error('每次最多添加 5 个日志选区');
+    if (logSnippets.some((snippet) => !snippet.trim())) throw new Error('日志选区不能为空');
+    if (
+      [..._selectedText].length +
+        logSnippets.reduce((total, snippet) => total + [...snippet].length, 0) >
+      120_000
+    )
+      throw new Error('原始日志、附件与日志选区合计超过 120000 个字符限制');
     const provider = mockAiProviders.find((item) => item.id === providerId);
     if (!provider) throw new Error('AI provider was not found');
-    const content = `模拟追问回复：${question}`;
+    const displayQuestion = question.trim() || '补充日志选区';
+    const content = `模拟追问回复：${displayQuestion}`;
     onEvent?.({ type: 'delta', content });
     if (historyId) {
       const record = mockAiHistory.find((item) => item.id === historyId);
@@ -351,11 +362,19 @@ export const mockApi = {
       record.messages.push(
         {
           role: 'user',
-          content: question,
-          attachments: attachmentPaths.map((path) => ({
-            name: path.split(/[\\/]/).pop() || '未命名文件',
-            charCount: 0,
-          })),
+          content: displayQuestion,
+          attachments: [
+            ...attachmentPaths.map((path) => ({
+              name: path.split(/[\\/]/).pop() || '未命名文件',
+              charCount: 0,
+              kind: 'file' as const,
+            })),
+            ...logSnippets.map((snippet, index) => ({
+              name: `日志选区 ${index + 1}`,
+              charCount: [...snippet].length,
+              kind: 'selection' as const,
+            })),
+          ],
         },
         { role: 'assistant', content },
       );

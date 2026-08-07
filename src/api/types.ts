@@ -434,6 +434,7 @@ export interface AiHistoryMessage {
 export interface AiHistoryAttachment {
   name: string;
   charCount: number;
+  kind?: 'file' | 'selection';
 }
 export interface AiHistoryRecord {
   id: string;

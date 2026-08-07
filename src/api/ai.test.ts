@@ -56,6 +56,7 @@ test('Tauri AI adapter creates one request-local Channel for each invoke', () =>
     /invoke\('analyze_ai_log', \{ providerId, selectedText, onEvent: channel \}\)/,
   );
   assert.match(source, /options: \{[\s\S]*historyUpdate:[\s\S]*onEvent: channel,/);
+  assert.match(source, /options: \{[\s\S]*attachmentPaths,[\s\S]*logSnippets,/);
   assert.doesNotMatch(source, /const ai(Stream)?Channel\s*=\s*new Channel/);
 });
 
@@ -112,12 +113,36 @@ test('AI mock history restores sent attachment metadata with the conversation', 
     [],
     'compare',
     ['D:\\logs\\context.log'],
+    [],
     'history-with-attachment',
     '2026-08-06T00:00:01Z',
   );
   const restored = await mockApi.loadAiHistory('history-with-attachment');
   assert.equal(restored.updatedAt, '2026-08-06T00:00:01Z');
-  assert.deepEqual(restored.messages[0].attachments, [{ name: 'context.log', charCount: 0 }]);
+  assert.deepEqual(restored.messages[0].attachments, [
+    { name: 'context.log', charCount: 0, kind: 'file' },
+  ]);
+
+  await mockApi.continueAiConversation(
+    'history-provider',
+    'ERROR original',
+    restored.messages,
+    '',
+    [],
+    ['WARN selected context'],
+    'history-with-attachment',
+    '2026-08-06T00:00:02Z',
+  );
+  const restoredWithSelection = await mockApi.loadAiHistory('history-with-attachment');
+  assert.equal(restoredWithSelection.messages[2].content, '补充日志选区');
+  assert.deepEqual(restoredWithSelection.messages[2].attachments, [
+    { name: '日志选区 1', charCount: 21, kind: 'selection' },
+  ]);
+  await assert.rejects(
+    () =>
+      mockApi.continueAiConversation('history-provider', 'x'.repeat(119_999), [], '', [], ['xx']),
+    /合计超过 120000/,
+  );
   await mockApi.deleteAiProvider('history-provider');
   await mockApi.clearAiHistory();
 });
