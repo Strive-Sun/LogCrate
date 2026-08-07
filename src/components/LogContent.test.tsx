@@ -447,6 +447,9 @@ test('AI analysis result opens in a closable drawer body', async () => {
   assert.equal(harness.screen.getByText('42 字符').textContent, '42 字符');
 
   const followUpInput = harness.screen.getByRole('textbox', { name: '继续追问' });
+  const assistantMessagesBeforeFollowUp = drawer.querySelectorAll(
+    '.ai-chat-message.assistant',
+  ).length;
   harness.fireEvent.input(followUpInput, { target: { value: 'Compare both logs' } });
   await harness.waitFor(() =>
     assert.equal((followUpInput as HTMLTextAreaElement).value, 'Compare both logs'),
@@ -465,7 +468,16 @@ test('AI analysis result opens in a closable drawer body', async () => {
   );
   assert.equal(harness.screen.queryByLabelText('待发送附件'), null);
   assert.ok(harness.screen.getByLabelText('已发送附件 context.log'));
-  assert.ok(harness.screen.getByRole('status', { name: 'AI 正在回复' }));
+  const typingStatus = harness.screen.getByRole('status', { name: 'AI 正在回复' });
+  const typingMessage = typingStatus.closest('.ai-chat-message');
+  assert.ok(typingMessage?.classList.contains('assistant'));
+  assert.equal(typingMessage?.querySelectorAll('.ai-chat-avatar').length, 1);
+  assert.equal(typingMessage?.querySelectorAll('.ai-chat-bubble').length, 1);
+  assert.equal(
+    drawer.querySelectorAll('.ai-chat-message.assistant').length,
+    assistantMessagesBeforeFollowUp + 1,
+  );
+  assert.equal(drawer.querySelectorAll('.ai-chat-typing').length, 0);
   assert.equal(harness.screen.queryByText('Follow-up response: Compare both logs'), null);
   resolveFirstFollowUp();
   assert.equal(

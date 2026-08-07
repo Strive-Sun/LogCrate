@@ -1515,6 +1515,19 @@ export function LogContent({
                               message.content
                             )}
                           </div>
+                          {aiBusy &&
+                            message.role === 'assistant' &&
+                            index === aiConversation.length - 1 && (
+                              <div
+                                className="ai-chat-typing-indicator"
+                                role="status"
+                                aria-label="AI 正在回复"
+                              >
+                                <span aria-hidden="true" />
+                                <span aria-hidden="true" />
+                                <span aria-hidden="true" />
+                              </div>
+                            )}
                           {aiIncomplete &&
                             message.role === 'assistant' &&
                             index === aiConversation.length - 1 && (
@@ -1538,16 +1551,6 @@ export function LogContent({
                         </div>
                       </div>
                     ))}
-                    {aiBusy && (
-                      <div className="ai-chat-message assistant ai-chat-typing">
-                        <div className="ai-chat-avatar">AI</div>
-                        <div className="ai-chat-bubble" role="status" aria-label="AI 正在回复">
-                          <span aria-hidden="true" />
-                          <span aria-hidden="true" />
-                          <span aria-hidden="true" />
-                        </div>
-                      </div>
-                    )}
                   </div>
                 </>
               )}
