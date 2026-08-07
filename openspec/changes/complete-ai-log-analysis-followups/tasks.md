@@ -11,8 +11,9 @@
 - [x] 2.1 实现 4 MiB 有界的增量 SSE 解码与 Responses 流读取，区分连接 10 秒、流空闲 30 秒、总计 120 秒以及传输/HTTP/解析/越界失败，补充任意分块、CRLF、多行 data、心跳、断流和超时测试
 - [x] 2.2 使用请求级 Tauri Channel 将增量顺序推送到当前 AI 工作区，前端批量合并并展示首字、部分结果、未完成状态和脱敏阶段耗时；成功终值才允许保存历史或追加上下文，补充 IPC、并发隔离和前端状态测试
 - [x] 2.3 运行最终差异对应的前后端 L3 完整自动化门禁，复核响应上限、错误与耗时脱敏、Channel 关闭清理、Chat Completions 兼容、OpenSpec strict、生产构建和 Tauri Release 构建
+- [ ] 2.4 在日志右键菜单增加“添加到 AI 对话框”及 AI 对话框未打开/无当前会话时的不可操作置灰状态，实现待发送日志片段的可见/移除/失败恢复，以及已有会话“AI 分析”复用当前目标并立即发送；同步菜单无障碍语义、Rust IPC、合计上限、加密历史和前端回归，完成最终差异对应的前后端 L3 门禁
 
 ## 3. 双平台真机验收
 
-- [ ] 3.1 在 Windows Tauri/WebView 使用脱敏日志和真实兼容端点验证 Credential Manager、Responses 首字/增量/完成与断流超时、Chat Completions、初始分析/连续追问、附件选择与拒绝、IME/箭头发送、加密历史重启恢复，以及普通/边缘/最大化窗口的展开与恢复
-- [ ] 3.2 在 macOS Tauri/WebView 使用脱敏日志和真实兼容端点验证 Keychain、Responses 首字/增量/完成与断流超时、Chat Completions、初始分析/连续追问、附件选择与拒绝、IME/箭头发送、加密历史重启恢复，以及普通/边缘/最大化窗口的展开与恢复
+- [ ] 3.1 在 Windows Tauri/WebView 使用脱敏日志和真实兼容端点验证 Credential Manager、Responses 首字/增量/完成与断流超时、Chat Completions、初始分析/连续追问、日志选区暂存/移除/立即分析、附件选择与拒绝、IME/箭头发送、加密历史重启恢复，以及普通/边缘/最大化窗口的展开与恢复
+- [ ] 3.2 在 macOS Tauri/WebView 使用脱敏日志和真实兼容端点验证 Keychain、Responses 首字/增量/完成与断流超时、Chat Completions、初始分析/连续追问、日志选区暂存/移除/立即分析、附件选择与拒绝、IME/箭头发送、加密历史重启恢复，以及普通/边缘/最大化窗口的展开与恢复
