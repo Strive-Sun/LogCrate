@@ -304,6 +304,8 @@ export function LogContent({
     setAiHistoryId,
     aiPanelOpen,
     setAiPanelOpen,
+    aiSessionState,
+    setAiSessionState,
     aiSendingRef,
     aiRequestGeneration,
     aiDeltaFrame,
@@ -320,7 +322,7 @@ export function LogContent({
       .listAiHistory()
       .then(setAiHistory)
       .catch(() => undefined);
-  }, [active, aiOpenToken, setAiHistory, setAiPanelOpen]);
+  }, [active, aiOpenToken, setAiHistory, setAiPanelOpen, setAiSessionState]);
   const [fieldEncodingVersion, setFieldEncodingVersion] = useState(0);
   const fieldUnsub = useRef<() => void>(() => {});
   const fieldRequestGeneration = useRef(0);
@@ -463,6 +465,17 @@ export function LogContent({
           flushAiDeltas(generation);
           setAiIncomplete(true);
           setAiError(formatAiRequestFailure(error));
+          setAiSessionState('draft');
+          aiLogSnippetId.current += 1;
+          setAiLogSnippets([
+            {
+              id: aiLogSnippetId.current,
+              sourceName,
+              content: selectedText,
+              charCount: [...selectedText].length,
+              preview: selectedText.replace(/\s+/g, ' ').slice(0, 120),
+            },
+          ]);
         }
         return;
       } finally {
@@ -493,12 +506,25 @@ export function LogContent({
           messages: successfulMessages,
         });
         setAiHistoryId(historyId);
+        setAiSessionState('established');
       } catch (error) {
         setAiError(errorMessage(error));
+        setAiSessionState('draft');
+        aiLogSnippetId.current += 1;
+        setAiLogSnippets([
+          {
+            id: aiLogSnippetId.current,
+            sourceName,
+            content: selectedText,
+            charCount: [...selectedText].length,
+            preview: selectedText.replace(/\s+/g, ' ').slice(0, 120),
+          },
+        ]);
       }
     },
     [
       aiRequestGeneration,
+      aiLogSnippetId,
       aiSendingRef,
       aiSuccessfulConversation,
       beginAiStream,
@@ -516,6 +542,8 @@ export function LogContent({
       setAiPanelOpen,
       setAiRequestTarget,
       setAiResult,
+      setAiSessionState,
+      sourceName,
     ],
   );
 
@@ -1106,9 +1134,181 @@ export function LogContent({
 
   function addSelectedTextToAiConversation(selectedText: string) {
     const snippet = createAiLogSnippet(selectedText);
-    if (!snippet || (!aiOpen && !aiPanelOpen) || !aiResult || !aiRequestTarget) return;
+    const hasTarget =
+      aiSessionState === 'draft' ||
+      (aiSessionState === 'established' && aiResult && aiRequestTarget && aiHistoryId);
+    if (!snippet || (!aiOpen && !aiPanelOpen) || !hasTarget) return;
     setAiLogSnippets((items) => [...items, snippet]);
     setAiError(null);
+  }
+
+  function resetAiRequestState() {
+    aiRequestGeneration.current += 1;
+    if (aiDeltaFrame.current !== null) window.cancelAnimationFrame(aiDeltaFrame.current);
+    aiDeltaFrame.current = null;
+    aiDeltaBuffer.current = '';
+    aiSendingRef.current = false;
+    aiSuccessfulConversation.current = [];
+    setAiResult(null);
+    setAiRequestTarget(null);
+    setAiError(null);
+    setAiIncomplete(false);
+    setAiBusy(false);
+    setAiConversation([]);
+    setAiConversationText('');
+    setAiQuestion('');
+    setAiAttachments([]);
+    setAiLogSnippets([]);
+    setAiHistoryId(null);
+  }
+
+  function startNewAiConversation() {
+    if (aiBusy || aiSendingRef.current) return;
+    const hasUnsent =
+      Boolean(aiQuestion.trim()) || aiAttachments.length > 0 || aiLogSnippets.length > 0;
+    if (hasUnsent && !window.confirm('当前有未发送内容，是否丢弃并新建对话？')) return;
+    resetAiRequestState();
+    setAiHistoryOpen(false);
+    setAiPanelOpen(true);
+    setAiSessionState('draft');
+  }
+
+  async function sendAiDraft(immediateSnippets: AiPendingLogSnippet[] = []) {
+    const snippets = [...aiLogSnippets, ...immediateSnippets];
+    const restoreImmediateSnippets = () => {
+      if (!immediateSnippets.length) return;
+      setAiLogSnippets((items) => {
+        const existingIds = new Set(items.map((item) => item.id));
+        return [...items, ...immediateSnippets.filter((item) => !existingIds.has(item.id))];
+      });
+    };
+    if (aiSessionState !== 'draft' || aiBusy || aiSendingRef.current) {
+      if (immediateSnippets.length) setAiLogSnippets((items) => [...items, ...immediateSnippets]);
+      return;
+    }
+    if (!aiQuestion.trim() && snippets.length === 0) return;
+    const question = aiQuestion;
+    const attachments = aiAttachments;
+    setAiError(null);
+    aiSendingRef.current = true;
+    let providers: Awaited<ReturnType<typeof api.listAiProviders>>;
+    try {
+      providers = await api.listAiProviders();
+    } catch (error) {
+      aiSendingRef.current = false;
+      setAiError(errorMessage(error));
+      restoreImmediateSnippets();
+      return;
+    }
+    if (!providers.length) {
+      aiSendingRef.current = false;
+      setAiError('请先在设置中配置 AI 供应商');
+      restoreImmediateSnippets();
+      return;
+    }
+    const provider = providers[0];
+    if (!provider.keyConfigured) {
+      aiSendingRef.current = false;
+      setAiError('当前供应商尚未配置 API Key，请先在设置中完成配置');
+      restoreImmediateSnippets();
+      return;
+    }
+    const totalChars =
+      snippets.reduce((total, snippet) => total + snippet.charCount, 0) +
+      attachments.reduce((total, attachment) => total + attachment.charCount, 0);
+    const insecureWarning = provider.baseUrl.trim().toLowerCase().startsWith('http://')
+      ? '\n\n警告：该端点使用不安全 HTTP，API Key 和日志内容在传输中不受 TLS 保护。'
+      : '';
+    if (
+      !window.confirm(
+        `将把新对话中的 ${totalChars} 个日志字符发送到 ${provider.baseUrl}，使用 ${provider.protocol === 'responses' ? 'OpenAI Responses' : 'OpenAI Chat Completions'} 协议和模型 ${provider.model}。${insecureWarning}\n\n是否继续？`,
+      )
+    ) {
+      aiSendingRef.current = false;
+      restoreImmediateSnippets();
+      return;
+    }
+    try {
+      if (onAiOpen) await onAiOpen();
+      else await api.setAiWindowOpen(true);
+      setAiPanelOpen(true);
+    } catch (error) {
+      aiSendingRef.current = false;
+      setAiError(errorMessage(error));
+      restoreImmediateSnippets();
+      return;
+    }
+
+    const displayQuestion = question.trim() || '分析日志选区';
+    const optimisticConversation = [
+      {
+        role: 'user' as const,
+        content: displayQuestion,
+        attachments: [
+          ...attachments.map((attachment) => ({
+            name: attachment.name,
+            charCount: attachment.charCount,
+            kind: 'file' as const,
+          })),
+          ...snippets.map((snippet) => ({
+            name: snippet.sourceName,
+            charCount: snippet.charCount,
+            kind: 'selection' as const,
+          })),
+        ],
+      },
+      { role: 'assistant' as const, content: '' },
+    ];
+    setAiRequestTarget({ providerId: provider.id, model: provider.model });
+    const generation = beginAiStream(optimisticConversation);
+    setAiBusy(true);
+    setAiQuestion('');
+    setAiAttachments([]);
+    const sentSnippetIds = new Set(snippets.map((snippet) => snippet.id));
+    setAiLogSnippets((items) => items.filter((item) => !sentSnippetIds.has(item.id)));
+    const historyId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const historyUpdatedAt = new Date().toISOString();
+    let next: AiAnalysisResult;
+    try {
+      next = await api.continueAiConversation(
+        provider.id,
+        '',
+        [],
+        question,
+        attachments.map((attachment) => attachment.path),
+        snippets.map(({ sourceName: snippetSourceName, content }) => ({
+          sourceName: snippetSourceName,
+          content,
+        })),
+        historyId,
+        historyUpdatedAt,
+        true,
+        (event) => queueAiDelta(generation, event),
+      );
+    } catch (error) {
+      if (generation === aiRequestGeneration.current) {
+        flushAiDeltas(generation);
+        setAiIncomplete(true);
+        setAiError(formatAiRequestFailure(error));
+        setAiQuestion(question);
+        setAiAttachments(attachments);
+        setAiLogSnippets((items) => [...snippets, ...items]);
+      }
+      return;
+    } finally {
+      aiSendingRef.current = false;
+      if (generation === aiRequestGeneration.current) setAiBusy(false);
+    }
+    if (generation !== aiRequestGeneration.current) return;
+    finishAiStream(generation, next.content);
+    const successfulConversation = optimisticConversation.map((message, index) =>
+      index === optimisticConversation.length - 1 ? { ...message, content: next.content } : message,
+    );
+    aiSuccessfulConversation.current = successfulConversation;
+    setAiResult(next);
+    setAiHistoryId(historyId);
+    setAiIncomplete(false);
+    setAiSessionState('established');
   }
 
   async function sendAiFollowUp(immediateSnippets: AiPendingLogSnippet[] = []) {
@@ -1173,6 +1373,7 @@ export function LogContent({
         })),
         aiHistoryId ?? undefined,
         historyUpdatedAt,
+        false,
         (event) => queueAiDelta(generation, event),
       );
     } catch (error) {
@@ -1209,6 +1410,10 @@ export function LogContent({
   }, [aiBusy, aiConversation.length, aiRequestTarget, aiResult]);
 
   const aiDisplayTarget = aiResult ?? aiRequestTarget;
+  const hasEstablishedAiSession =
+    aiSessionState === 'established' && Boolean(aiResult && aiRequestTarget && aiHistoryId);
+  const canAddToAiConversation =
+    (aiOpen || aiPanelOpen) && (aiSessionState === 'draft' || hasEstablishedAiSession);
   const shouldRenderAiWorkspace =
     (aiOpen || active !== false) &&
     (aiOpen || aiPanelOpen || aiBusy || Boolean(aiError) || Boolean(aiDisplayTarget));
@@ -1438,22 +1643,20 @@ export function LogContent({
             },
             {
               label: '添加到 AI 对话框',
-              disabled: (!aiOpen && !aiPanelOpen) || !aiResult || !aiRequestTarget || !aiHistoryId,
+              disabled: !canAddToAiConversation,
               onClick: () => addSelectedTextToAiConversation(logContextMenu.selectedText),
             },
             {
               label: 'AI 分析',
-              disabled: Boolean(aiPanelOpen && aiHistoryId && aiBusy),
+              disabled: Boolean(aiSessionState === 'established' && aiPanelOpen && aiBusy),
               onClick: () => {
                 const snippet = createAiLogSnippet(logContextMenu.selectedText);
-                if (
-                  (aiOpen || aiPanelOpen) &&
-                  aiResult &&
-                  aiRequestTarget &&
-                  aiHistoryId &&
-                  snippet
-                ) {
+                if (hasEstablishedAiSession && snippet) {
                   void sendAiFollowUp([snippet]);
+                  return;
+                }
+                if (aiSessionState === 'draft' && snippet) {
+                  void sendAiDraft([snippet]);
                   return;
                 }
                 void analyzeSelectedText(logContextMenu.selectedText);
@@ -1467,38 +1670,28 @@ export function LogContent({
         shouldRenderAiWorkspace && (
           <div className="ai-result-pop" role="dialog" aria-label="AI 日志分析">
             <div className="pop-head">
-              <button
-                type="button"
-                className="settings-close"
-                onClick={async () => {
-                  setAiHistory(await api.listAiHistory());
-                  setAiHistoryOpen((open) => !open);
-                }}
-              >
-                历史记录
-              </button>
+              <div className="ai-head-actions">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setAiHistory(await api.listAiHistory());
+                    setAiHistoryOpen((open) => !open);
+                  }}
+                >
+                  历史记录
+                </button>
+                <button type="button" disabled={aiBusy} onClick={startNewAiConversation}>
+                  新对话
+                </button>
+              </div>
               <span>AI 日志分析</span>
               <button
                 type="button"
                 className="settings-close"
                 aria-label="关闭 AI 日志分析"
                 onClick={() => {
-                  aiRequestGeneration.current += 1;
-                  if (aiDeltaFrame.current !== null)
-                    window.cancelAnimationFrame(aiDeltaFrame.current);
-                  aiDeltaFrame.current = null;
-                  aiDeltaBuffer.current = '';
-                  aiSendingRef.current = false;
-                  aiSuccessfulConversation.current = [];
-                  setAiResult(null);
-                  setAiRequestTarget(null);
-                  setAiError(null);
-                  setAiIncomplete(false);
-                  setAiBusy(false);
-                  setAiQuestion('');
-                  setAiAttachments([]);
-                  setAiLogSnippets([]);
-                  setAiHistoryId(null);
+                  resetAiRequestState();
+                  setAiSessionState('none');
                   setAiPanelOpen(false);
                   void (onAiClose ? onAiClose() : api.setAiWindowOpen(false));
                 }}
@@ -1556,6 +1749,7 @@ export function LogContent({
                           setAiAttachments([]);
                           setAiLogSnippets([]);
                           setAiHistoryId(record.id);
+                          setAiSessionState('established');
                           setAiIncomplete(false);
                           setAiError(null);
                           setAiHistoryOpen(false);
@@ -1663,7 +1857,7 @@ export function LogContent({
                 </>
               )}
             </div>
-            {aiResult && (
+            {(aiResult || aiSessionState === 'draft') && (
               <div className="ai-composer-shell">
                 <div className="ai-composer">
                   {aiAttachments.length > 0 && (
@@ -1737,7 +1931,7 @@ export function LogContent({
                         )
                           return;
                         event.preventDefault();
-                        void sendAiFollowUp();
+                        void (aiSessionState === 'draft' ? sendAiDraft() : sendAiFollowUp());
                       }}
                       placeholder="询问日志错误、时间线、调用链或根因…"
                     />
@@ -1747,7 +1941,9 @@ export function LogContent({
                       aria-label="发送追问"
                       title="发送追问"
                       disabled={aiBusy || (!aiQuestion.trim() && aiLogSnippets.length === 0)}
-                      onClick={() => void sendAiFollowUp()}
+                      onClick={() =>
+                        void (aiSessionState === 'draft' ? sendAiDraft() : sendAiFollowUp())
+                      }
                     >
                       <svg viewBox="0 0 24 24" aria-hidden="true">
                         <path d="M12 19V5M6.5 10.5 12 5l5.5 5.5" />
@@ -1760,7 +1956,7 @@ export function LogContent({
                 </div>
               </div>
             )}
-            {!aiDisplayTarget && (
+            {!aiDisplayTarget && aiSessionState !== 'draft' && (
               <div className="ai-empty-composer" role="status">
                 请先选中日志内容并右键“AI 分析”，或打开历史记录；建立对话后按 Enter 发送
               </div>

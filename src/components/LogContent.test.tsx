@@ -42,6 +42,8 @@ const originalSaveAiHistory = api.saveAiHistory;
 const originalSelectAiAttachmentPaths = api.selectAiAttachmentPaths;
 const originalInspectAiAttachments = api.inspectAiAttachments;
 const originalContinueAiConversation = api.continueAiConversation;
+const originalListAiHistory = api.listAiHistory;
+const originalLoadAiHistory = api.loadAiHistory;
 const originalPrompt = dom.window.prompt;
 const originalConfirm = dom.window.confirm;
 const originalGetSelection = dom.window.getSelection;
@@ -99,6 +101,8 @@ afterEach(() => {
   api.selectAiAttachmentPaths = originalSelectAiAttachmentPaths;
   api.inspectAiAttachments = originalInspectAiAttachments;
   api.continueAiConversation = originalContinueAiConversation;
+  api.listAiHistory = originalListAiHistory;
+  api.loadAiHistory = originalLoadAiHistory;
   dom.window.prompt = originalPrompt;
   dom.window.confirm = originalConfirm;
   dom.window.getSelection = originalGetSelection;
@@ -225,6 +229,45 @@ test('failed AI stream keeps partial text visible and out of history', async () 
   assert.ok(harness.screen.getByText(/未完成 · 本段不会保存到历史/));
   assert.equal(historySaveCount, 0);
   assert.equal(harness.screen.queryByRole('status', { name: 'AI 正在回复' }), null);
+  assert.ok(harness.screen.getByRole('textbox', { name: '继续追问' }));
+  assert.equal(harness.screen.getAllByText('ERROR private selection').length, 2);
+});
+
+test('initial analysis keeps a retryable draft when encrypted history persistence fails', async () => {
+  dom.window.getSelection = () => ({ toString: () => 'ERROR persistence failure' }) as Selection;
+  dom.window.confirm = () => true;
+  api.listAiProviders = async () => [
+    {
+      id: 'persistence-provider',
+      name: 'Persistence provider',
+      baseUrl: 'https://example.test/v1',
+      model: 'persistence-model',
+      keyConfigured: true,
+      protocol: 'responses',
+      endpointMode: 'base',
+      allowInsecureHttp: false,
+    },
+  ];
+  api.analyzeAiLog = async () => ({
+    providerId: 'persistence-provider',
+    model: 'persistence-model',
+    content: 'Remote analysis completed',
+    timing: { responseHeadersMs: 1, firstContentMs: 2, streamReceiveMs: 3, totalMs: 4 },
+  });
+  api.saveAiHistory = async () => {
+    throw new Error('无法保存 AI 历史记录');
+  };
+
+  const { container } = renderLog({ onAiOpen: async () => undefined });
+  harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
+  harness.fireEvent.click(harness.screen.getByText('AI 分析'));
+
+  assert.ok(await harness.screen.findByText('Remote analysis completed'));
+  assert.ok(harness.screen.getByText('无法保存 AI 历史记录'));
+  assert.ok(harness.screen.getByRole('textbox', { name: '继续追问' }));
+  assert.equal(harness.screen.getAllByText('ERROR persistence failure').length, 2);
+  harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
+  assert.equal(harness.screen.getByText('添加到 AI 对话框').getAttribute('aria-disabled'), null);
 });
 
 test('concurrent AI request channels cannot mix deltas or let an older result overwrite the latest', async () => {
@@ -537,6 +580,7 @@ test('AI analysis result opens in a closable drawer body', async () => {
     logSnippets,
     _historyId,
     _historyUpdatedAt,
+    _createHistory,
     onEvent,
   ) => {
     followUps.push({
@@ -737,6 +781,184 @@ test('AI analysis result opens in a closable drawer body', async () => {
   assert.equal(harness.screen.queryByRole('dialog', { name: 'AI 日志分析' }), null);
 });
 
+test('new conversation keeps an application draft until its first request succeeds', async () => {
+  let currentSelection = 'ERROR initial session';
+  const confirmations = [true, false, true, false, true, true];
+  const draftRequests: Array<{
+    question: string;
+    snippets: AiLogSnippetInput[];
+    historyId?: string;
+    createHistory: boolean;
+  }> = [];
+  let rejectDraft: () => void = () => assert.fail('draft request was not started');
+  dom.window.getSelection = () => ({ toString: () => currentSelection }) as Selection;
+  dom.window.confirm = () => confirmations.shift() ?? true;
+  api.listAiProviders = async () => [
+    {
+      id: 'draft-provider',
+      name: 'Draft provider',
+      baseUrl: 'https://example.test/v1',
+      model: 'draft-model',
+      keyConfigured: true,
+      protocol: 'responses',
+      endpointMode: 'base',
+      allowInsecureHttp: false,
+    },
+  ];
+  api.analyzeAiLog = async () => ({
+    providerId: 'draft-provider',
+    model: 'draft-model',
+    content: 'Old established answer',
+    timing: { responseHeadersMs: 1, firstContentMs: 2, streamReceiveMs: 3, totalMs: 4 },
+  });
+  api.saveAiHistory = async () => undefined;
+  api.listAiHistory = async () => [
+    {
+      id: 'restored-history',
+      title: 'Restored conversation',
+      createdAt: '2026-08-06T00:00:00Z',
+      updatedAt: '2026-08-06T00:00:01Z',
+      providerId: 'draft-provider',
+      model: 'draft-model',
+    },
+  ];
+  api.loadAiHistory = async () => ({
+    id: 'restored-history',
+    title: 'Restored conversation',
+    createdAt: '2026-08-06T00:00:00Z',
+    updatedAt: '2026-08-06T00:00:01Z',
+    providerId: 'draft-provider',
+    protocol: 'responses',
+    model: 'draft-model',
+    endpointFingerprint: 'https://example.test/v1',
+    selectedText: 'restored selection',
+    messages: [
+      { role: 'user', content: 'restored question', attachments: [] },
+      { role: 'assistant', content: 'Restored answer', attachments: [] },
+    ],
+  });
+  api.continueAiConversation = async (
+    providerId,
+    _selectedText,
+    _history,
+    question,
+    _attachmentPaths,
+    snippets = [],
+    historyId,
+    _historyUpdatedAt,
+    createHistory = false,
+    onEvent,
+  ) => {
+    draftRequests.push({ question, snippets, historyId, createHistory });
+    if (draftRequests.length === 1) {
+      onEvent?.({ type: 'delta', content: 'partial draft answer' });
+      return new Promise((_, reject) => {
+        rejectDraft = () => reject({ code: 'transport', stage: 'response_stream', elapsedMs: 12 });
+      });
+    }
+    return {
+      providerId,
+      model: 'draft-model',
+      content: 'New draft answer',
+      timing: { responseHeadersMs: 1, firstContentMs: 2, streamReceiveMs: 3, totalMs: 4 },
+    };
+  };
+
+  const { container } = renderLog({ aiOpen: true, onAiOpen: async () => undefined });
+  harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
+  harness.fireEvent.click(harness.screen.getByText('AI 分析'));
+  assert.ok(await harness.screen.findByText('Old established answer'));
+  assert.ok(harness.screen.getByRole('button', { name: '历史记录' }));
+  assert.ok(harness.screen.getByRole('button', { name: '新对话' }));
+
+  currentSelection = 'WARN unsent from old session';
+  harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
+  harness.fireEvent.click(harness.screen.getByText('添加到 AI 对话框'));
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '新对话' }));
+  assert.ok(harness.screen.getByText('Old established answer'));
+  assert.ok(harness.screen.getByText('WARN unsent from old session'));
+
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '新对话' }));
+  assert.equal(harness.screen.queryByText('Old established answer'), null);
+  assert.equal(harness.screen.queryByText('WARN unsent from old session'), null);
+  assert.ok(harness.screen.getByRole('textbox', { name: '继续追问' }));
+
+  currentSelection = 'INFO queued in draft';
+  harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
+  const addToDraft = harness.screen.getByText('添加到 AI 对话框');
+  assert.equal(addToDraft.getAttribute('aria-disabled'), null);
+  harness.fireEvent.click(addToDraft);
+  assert.ok(harness.screen.getByText('INFO queued in draft'));
+  assert.equal(draftRequests.length, 0);
+
+  const draftInput = harness.screen.getByRole('textbox', { name: '继续追问' });
+  harness.fireEvent.input(draftInput, { target: { value: 'Compare the selected logs' } });
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '发送追问' }));
+  await harness.waitFor(() => assert.equal(draftRequests.length, 0));
+  assert.equal((draftInput as HTMLTextAreaElement).value, 'Compare the selected logs');
+  assert.ok(harness.screen.getByText('INFO queued in draft'));
+
+  currentSelection = 'ERROR immediate draft selection';
+  harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
+  harness.fireEvent.click(harness.screen.getByText('AI 分析'));
+  await harness.waitFor(() => assert.equal(draftRequests.length, 1));
+  assert.equal(
+    harness.screen.getByRole('button', { name: '新对话' }).hasAttribute('disabled'),
+    true,
+  );
+  assert.equal(draftRequests[0].question, 'Compare the selected logs');
+  assert.deepEqual(draftRequests[0].snippets, [
+    { sourceName: 'server.log', content: 'INFO queued in draft' },
+    { sourceName: 'server.log', content: 'ERROR immediate draft selection' },
+  ]);
+  assert.equal(draftRequests[0].createHistory, true);
+  assert.ok(draftRequests[0].historyId);
+
+  currentSelection = 'WARN queued while draft is sending';
+  harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
+  harness.fireEvent.click(harness.screen.getByText('添加到 AI 对话框'));
+
+  rejectDraft();
+  assert.ok(await harness.screen.findByText('partial draft answer'));
+  await harness.waitFor(() =>
+    assert.equal(
+      (harness.screen.getByRole('textbox', { name: '继续追问' }) as HTMLTextAreaElement).value,
+      'Compare the selected logs',
+    ),
+  );
+  assert.ok(harness.screen.getByText('INFO queued in draft'));
+  assert.ok(harness.screen.getByText('ERROR immediate draft selection'));
+  assert.ok(harness.screen.getByText('WARN queued while draft is sending'));
+
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '发送追问' }));
+  assert.ok(await harness.screen.findByText('New draft answer'));
+  assert.equal(draftRequests[1].createHistory, true);
+  assert.ok(draftRequests[1].historyId);
+  assert.deepEqual(draftRequests[1].snippets, [
+    { sourceName: 'server.log', content: 'INFO queued in draft' },
+    { sourceName: 'server.log', content: 'ERROR immediate draft selection' },
+    { sourceName: 'server.log', content: 'WARN queued while draft is sending' },
+  ]);
+  assert.equal(harness.screen.queryByLabelText('待发送日志选区'), null);
+
+  currentSelection = 'WARN after draft establishment';
+  harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
+  harness.fireEvent.click(harness.screen.getByText('AI 分析'));
+  await harness.waitFor(() => assert.equal(draftRequests.length, 3));
+  assert.equal(draftRequests[2].createHistory, false);
+  assert.equal(draftRequests[2].historyId, draftRequests[1].historyId);
+
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '历史记录' }));
+  harness.fireEvent.click(await harness.screen.findByText('Restored conversation'));
+  assert.ok(await harness.screen.findByText('Restored answer'));
+  currentSelection = 'ERROR after history restore';
+  harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
+  harness.fireEvent.click(harness.screen.getByText('AI 分析'));
+  await harness.waitFor(() => assert.equal(draftRequests.length, 4));
+  assert.equal(draftRequests[3].createHistory, false);
+  assert.equal(draftRequests[3].historyId, 'restored-history');
+});
+
 test('AI workspace fills a root-level right column with an independently scrolling body', () => {
   const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
   const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
@@ -749,8 +971,7 @@ test('AI workspace fills a root-level right column with an independently scrolli
   const hostRule = css.match(/\.ai-workspace-host\s*\{([^}]*)\}/)?.[1] ?? '';
   const drawerRule = css.match(/\.ai-result-pop\s*\{([^}]*)\}/)?.[1] ?? '';
   const headerRule = css.match(/\.ai-result-pop \.pop-head\s*\{([^}]*)\}/)?.[1] ?? '';
-  const historyRule =
-    css.match(/\.ai-result-pop \.pop-head > button:first-child\s*\{([^}]*)\}/)?.[1] ?? '';
+  const historyRule = css.match(/\.ai-head-actions > button\s*\{([^}]*)\}/)?.[1] ?? '';
   const bodyRule = css.match(/\.ai-result-body\s*\{([^}]*)\}/)?.[1] ?? '';
   const historyListRule = css.match(/\.ai-history-list\s*\{([^}]*)\}/)?.[1] ?? '';
   const historyToolbarRule = css.match(/\.ai-history-toolbar\s*\{([^}]*)\}/)?.[1] ?? '';

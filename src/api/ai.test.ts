@@ -57,7 +57,88 @@ test('Tauri AI adapter creates one request-local Channel for each invoke', () =>
   );
   assert.match(source, /options: \{[\s\S]*historyUpdate:[\s\S]*onEvent: channel,/);
   assert.match(source, /options: \{[\s\S]*attachmentPaths,[\s\S]*logSnippets,/);
+  assert.match(source, /options: \{[\s\S]*createHistory,[\s\S]*onEvent: channel,/);
   assert.doesNotMatch(source, /const ai(Stream)?Channel\s*=\s*new Channel/);
+});
+
+test('AI mock draft creates history only for a successful create-history request', async () => {
+  await mockApi.clearAiHistory();
+  await mockApi.saveAiProvider({
+    id: 'draft-history-provider',
+    name: 'Draft history',
+    baseUrl: 'https://example.test/v1',
+    model: 'draft-model',
+    keyConfigured: true,
+    protocol: 'responses',
+    endpointMode: 'base',
+    allowInsecureHttp: false,
+  });
+
+  await mockApi.continueAiConversation(
+    'draft-history-provider',
+    '',
+    [],
+    'compare draft evidence',
+    [],
+    [{ sourceName: 'worker.log', content: 'ERROR draft evidence' }],
+    'draft-history-id',
+    '2026-08-07T00:00:00Z',
+    true,
+  );
+  const restored = await mockApi.loadAiHistory('draft-history-id');
+  assert.equal(restored.providerId, 'draft-history-provider');
+  assert.equal(restored.messages[0].content, 'compare draft evidence');
+  assert.deepEqual(restored.messages[0].attachments, [
+    { name: 'worker.log', charCount: 20, kind: 'selection' },
+  ]);
+  await assert.rejects(
+    () =>
+      mockApi.continueAiConversation(
+        'draft-history-provider',
+        '',
+        [],
+        'missing identity',
+        [],
+        [],
+        undefined,
+        undefined,
+        true,
+      ),
+    /参数无效/,
+  );
+  await assert.rejects(
+    () =>
+      mockApi.continueAiConversation(
+        'draft-history-provider',
+        '',
+        [{ role: 'user', content: 'old context' }],
+        'must start empty',
+        [],
+        [],
+        'another-draft-history',
+        '2026-08-07T00:00:01Z',
+        true,
+      ),
+    /参数无效/,
+  );
+  await assert.rejects(
+    () =>
+      mockApi.continueAiConversation(
+        'draft-history-provider',
+        '',
+        [],
+        'must not overwrite',
+        [],
+        [{ sourceName: 'worker.log', content: 'replacement' }],
+        'draft-history-id',
+        '2026-08-07T00:00:01Z',
+        true,
+      ),
+    /已存在/,
+  );
+  assert.equal((await mockApi.loadAiHistory('draft-history-id')).messages.length, 2);
+  await mockApi.deleteAiProvider('draft-history-provider');
+  await mockApi.clearAiHistory();
 });
 
 test('AI attachment contract bounds selection and returns safe display metadata', async () => {

@@ -252,6 +252,20 @@ fn upsert_record(
     Ok(())
 }
 
+fn insert_new_record(
+    records: &mut Vec<AiHistoryRecord>,
+    record: AiHistoryRecord,
+) -> Result<(), String> {
+    if records.iter().any(|item| item.id == record.id) {
+        return Err("AI 历史记录已存在".into());
+    }
+    if records.len() >= MAX_RECORDS {
+        return Err("AI 历史记录已达到 100 条上限，请先删除旧记录".into());
+    }
+    records.insert(0, record);
+    Ok(())
+}
+
 fn delete_record(records: &mut Vec<AiHistoryRecord>, id: &str) {
     records.retain(|record| record.id != id);
 }
@@ -296,6 +310,19 @@ pub(crate) fn save_ai_history_record(
 ) -> Result<(), String> {
     let mut records = read(app)?;
     upsert_record(&mut records, record)?;
+    write(app, &records)
+}
+
+pub(crate) fn ai_history_record_exists(app: &AppHandle, id: &str) -> Result<bool, String> {
+    Ok(read(app)?.iter().any(|record| record.id == id))
+}
+
+pub(crate) fn save_new_ai_history_record(
+    app: &AppHandle,
+    record: AiHistoryRecord,
+) -> Result<(), String> {
+    let mut records = read(app)?;
+    insert_new_record(&mut records, record)?;
     write(app, &records)
 }
 
@@ -364,6 +391,18 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    #[test]
+    fn inserting_a_new_draft_history_never_overwrites_an_existing_id() {
+        let existing = record_with_attachment();
+        let mut records = vec![existing.clone()];
+        let mut replacement = existing;
+        replacement.title = "must not replace".into();
+
+        assert!(insert_new_record(&mut records, replacement).is_err());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].title, "Attachment analysis");
     }
 
     #[test]

@@ -240,6 +240,8 @@ pub struct AiFollowUpOptions {
     #[serde(default)]
     pub log_snippets: Vec<AiLogSnippetInput>,
     pub history_update: Option<AiHistoryUpdate>,
+    #[serde(default)]
+    pub create_history: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -666,6 +668,75 @@ fn provider_protocol_label(protocol: AiProtocol) -> &'static str {
     match protocol {
         AiProtocol::ChatCompletions => "chatCompletions",
         AiProtocol::Responses => "responses",
+    }
+}
+
+fn validate_follow_up_history_mode(
+    create_history: bool,
+    history: &[crate::ai_history::AiHistoryMessage],
+    history_update: Option<&AiHistoryUpdate>,
+) -> Result<(), String> {
+    if create_history && (history_update.is_none() || !history.is_empty()) {
+        return Err("新对话历史参数无效".into());
+    }
+    if !create_history && history_update.is_none() {
+        return Err("当前 AI 会话没有可验证的加密历史，请重新建立会话".into());
+    }
+    Ok(())
+}
+
+fn new_history_record(
+    update: AiHistoryUpdate,
+    provider: &StoredAiProvider,
+    selected_text: String,
+    question: &str,
+    attachments: &[LoadedAiAttachment],
+    content: String,
+) -> crate::ai_history::AiHistoryRecord {
+    let display_question = if question.trim().is_empty() {
+        "分析日志选区".to_string()
+    } else {
+        question.to_string()
+    };
+    let title = if question.trim().is_empty() {
+        format!(
+            "{} AI 分析",
+            attachments
+                .first()
+                .map(|attachment| attachment.summary.name.as_str())
+                .unwrap_or("日志")
+        )
+    } else {
+        question
+            .lines()
+            .next()
+            .unwrap_or("AI 日志分析")
+            .chars()
+            .take(80)
+            .collect()
+    };
+    crate::ai_history::AiHistoryRecord {
+        id: update.id,
+        title,
+        created_at: update.updated_at.clone(),
+        updated_at: update.updated_at,
+        provider_id: provider.id.clone(),
+        protocol: provider_protocol_label(provider.protocol).to_string(),
+        model: provider.model.clone(),
+        endpoint_fingerprint: provider.base_url.clone(),
+        selected_text,
+        messages: vec![
+            crate::ai_history::AiHistoryMessage {
+                role: "user".to_string(),
+                content: display_question,
+                attachments: history_attachments(attachments),
+            },
+            crate::ai_history::AiHistoryMessage {
+                role: "assistant".to_string(),
+                content,
+                attachments: Vec::new(),
+            },
+        ],
     }
 }
 
@@ -1556,28 +1627,42 @@ pub async fn continue_ai_conversation(
     options: AiFollowUpOptions,
     on_event: Channel<AiStreamEvent>,
 ) -> Result<AiAnalysisResult, AiCommandError> {
-    validate_analysis_text(&selected_text)?;
     let AiFollowUpOptions {
         attachment_paths,
         log_snippets,
         history_update,
+        create_history,
     } = options;
-    validate_follow_up_input(&question, &log_snippets)?;
-    if !log_snippets.is_empty() && history_update.is_none() {
-        return Err("当前 AI 会话没有可验证的加密历史，请重新建立会话"
-            .to_string()
-            .into());
+    validate_follow_up_history_mode(create_history, &history, history_update.as_ref())?;
+    if create_history {
+        if crate::ai_history::ai_history_record_exists(
+            &app,
+            history_update
+                .as_ref()
+                .expect("create-history update was validated")
+                .id
+                .as_str(),
+        )? {
+            return Err("AI 历史记录已存在".to_string().into());
+        }
+    } else {
+        validate_analysis_text(&selected_text)?;
     }
+    validate_follow_up_input(&question, &log_snippets)?;
     validate_conversation_history(&history)?;
     let provider = read_stored_providers(&app)?
         .into_iter()
         .find(|p| p.id == provider_id)
         .ok_or_else(|| "AI provider was not found".to_string())?;
-    let mut stored_history = history_update
-        .as_ref()
-        .map(|update| update.id.as_str())
-        .map(|id| crate::ai_history::load_ai_history_record(&app, id))
-        .transpose()?;
+    let mut stored_history = if create_history {
+        None
+    } else {
+        history_update
+            .as_ref()
+            .map(|update| update.id.as_str())
+            .map(|id| crate::ai_history::load_ai_history_record(&app, id))
+            .transpose()?
+    };
     if let Some(record) = stored_history.as_ref() {
         validate_history_target(record, &provider)?;
         validate_conversation_history(recent_stored_history(&record.messages))?;
@@ -1601,7 +1686,11 @@ pub async fn continue_ai_conversation(
     let outcome = send_ai_request(
         &provider,
         &api_key,
-        FOLLOW_UP_INSTRUCTIONS,
+        if create_history {
+            INITIAL_ANALYSIS_INSTRUCTIONS
+        } else {
+            FOLLOW_UP_INSTRUCTIONS
+        },
         &input,
         AiRequestPolicy::analysis(),
         |content| {
@@ -1621,7 +1710,20 @@ pub async fn continue_ai_conversation(
         content_type: None,
         body_bytes: None,
     })?;
-    if let Some(record) = stored_history.as_mut() {
+    if create_history {
+        let update = history_update.ok_or_else(|| "新对话历史参数无效".to_string())?;
+        crate::ai_history::save_new_ai_history_record(
+            &app,
+            new_history_record(
+                update,
+                &provider,
+                selected_text.clone(),
+                &question,
+                &attachments,
+                content.clone(),
+            ),
+        )?;
+    } else if let Some(record) = stored_history.as_mut() {
         if let Some(update) = history_update {
             record.updated_at = update.updated_at;
         }
@@ -2092,6 +2194,70 @@ mod tests {
             content: "ERROR".into(),
         }])
         .is_err());
+    }
+
+    #[test]
+    fn create_history_requires_an_empty_conversation_and_update_identity() {
+        let update = AiHistoryUpdate {
+            id: "draft-history".into(),
+            updated_at: "2026-08-07T00:00:00Z".into(),
+        };
+        assert!(validate_follow_up_history_mode(true, &[], None).is_err());
+        assert!(validate_follow_up_history_mode(true, &[], Some(&update)).is_ok());
+        assert!(validate_follow_up_history_mode(false, &[], None).is_err());
+        assert!(validate_follow_up_history_mode(false, &[], Some(&update)).is_ok());
+        assert!(validate_follow_up_history_mode(
+            true,
+            &[crate::ai_history::AiHistoryMessage {
+                role: "user".into(),
+                content: "old context".into(),
+                attachments: Vec::new(),
+            }],
+            Some(&update),
+        )
+        .is_err());
+
+        let legacy: AiFollowUpOptions = serde_json::from_value(serde_json::json!({
+            "attachmentPaths": [],
+            "logSnippets": [],
+            "historyUpdate": null
+        }))
+        .expect("legacy options");
+        assert!(!legacy.create_history);
+    }
+
+    #[test]
+    fn draft_success_record_keeps_sourced_snippet_content_in_encrypted_history_shape() {
+        let provider = stored(AiProtocol::Responses, AiEndpointMode::Base);
+        let snippets = load_ai_log_snippets(vec![AiLogSnippetInput {
+            source_name: "worker.log".into(),
+            content: "ERROR draft evidence".into(),
+        }])
+        .expect("valid snippet");
+        let record = new_history_record(
+            AiHistoryUpdate {
+                id: "draft-history".into(),
+                updated_at: "2026-08-07T00:00:00Z".into(),
+            },
+            &provider,
+            String::new(),
+            "",
+            &snippets,
+            "analysis result".into(),
+        );
+        assert_eq!(record.id, "draft-history");
+        assert_eq!(record.title, "worker.log AI 分析");
+        assert_eq!(record.messages[0].content, "分析日志选区");
+        assert_eq!(record.messages[0].attachments[0].name, "worker.log");
+        assert_eq!(
+            record.messages[0].attachments[0].content,
+            "ERROR draft evidence"
+        );
+        assert_eq!(
+            record.messages[0].attachments[0].kind,
+            crate::ai_history::AiHistoryAttachmentKind::Selection
+        );
+        assert_eq!(record.messages[1].content, "analysis result");
     }
 
     #[test]

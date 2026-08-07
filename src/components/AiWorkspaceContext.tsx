@@ -27,6 +27,8 @@ export interface AiPendingLogSnippet {
   preview: string;
 }
 
+export type AiSessionState = 'none' | 'draft' | 'established';
+
 interface AiRequestTarget {
   providerId: string;
   model: string;
@@ -61,6 +63,8 @@ export interface AiWorkspaceValue {
   setAiHistoryId: Dispatch<SetStateAction<string | null>>;
   aiPanelOpen: boolean;
   setAiPanelOpen: Dispatch<SetStateAction<boolean>>;
+  aiSessionState: AiSessionState;
+  setAiSessionState: Dispatch<SetStateAction<AiSessionState>>;
   aiSendingRef: MutableRefObject<boolean>;
   aiRequestGeneration: MutableRefObject<number>;
   aiDeltaFrame: MutableRefObject<number | null>;
@@ -87,6 +91,7 @@ export function AiWorkspaceProvider({ children }: { children: ReactNode }) {
   const [aiLogSnippets, setAiLogSnippets] = useState<AiPendingLogSnippet[]>([]);
   const [aiHistoryId, setAiHistoryId] = useState<string | null>(null);
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
+  const [aiSessionState, setAiSessionState] = useState<AiSessionState>('none');
   const aiSendingRef = useRef(false);
   const aiRequestGeneration = useRef(0);
   const aiDeltaFrame = useRef<number | null>(null);
@@ -136,6 +141,8 @@ export function AiWorkspaceProvider({ children }: { children: ReactNode }) {
         setAiHistoryId,
         aiPanelOpen,
         setAiPanelOpen,
+        aiSessionState,
+        setAiSessionState,
         aiSendingRef,
         aiRequestGeneration,
         aiDeltaFrame,

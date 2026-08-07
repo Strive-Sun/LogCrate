@@ -338,6 +338,7 @@ export const mockApi = {
     logSnippets: import('./types').AiLogSnippetInput[] = [],
     historyId?: string,
     historyUpdatedAt?: string,
+    createHistory = false,
     onEvent?: (event: AiStreamEvent) => void,
   ): Promise<AiAnalysisResult> {
     if (!question.trim() && logSnippets.every((snippet) => !snippet.content.trim()))
@@ -359,13 +360,33 @@ export const mockApi = {
       120_000
     )
       throw new Error('原始日志、附件与日志选区合计超过 120000 个字符限制');
+    if (createHistory && (!historyId || !historyUpdatedAt || _history.length > 0))
+      throw new Error('新对话历史参数无效');
+    if (!createHistory && !historyId)
+      throw new Error('当前 AI 会话没有可验证的加密历史，请重新建立会话');
     const provider = mockAiProviders.find((item) => item.id === providerId);
     if (!provider) throw new Error('AI provider was not found');
-    const displayQuestion = question.trim() || '补充日志选区';
+    const displayQuestion = question.trim() || (createHistory ? '分析日志选区' : '补充日志选区');
     const content = `模拟追问回复：${displayQuestion}`;
     onEvent?.({ type: 'delta', content });
     if (historyId) {
-      const record = mockAiHistory.find((item) => item.id === historyId);
+      let record = mockAiHistory.find((item) => item.id === historyId);
+      if (createHistory) {
+        if (record) throw new Error('AI 历史记录已存在');
+        record = {
+          id: historyId,
+          title: question.trim().slice(0, 80) || `${logSnippets[0]?.sourceName ?? '日志'} AI 分析`,
+          createdAt: historyUpdatedAt ?? new Date().toISOString(),
+          updatedAt: historyUpdatedAt ?? new Date().toISOString(),
+          providerId,
+          protocol: provider.protocol,
+          model: provider.model,
+          endpointFingerprint: provider.baseUrl,
+          selectedText: _selectedText,
+          messages: [],
+        };
+        mockAiHistory.unshift(record);
+      }
       if (!record) throw new Error('AI 历史记录不存在');
       record.updatedAt = historyUpdatedAt ?? record.updatedAt;
       record.messages.push(

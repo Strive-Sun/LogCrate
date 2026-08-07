@@ -2808,14 +2808,23 @@ body.resizing {
   border-bottom: 1px solid #e5e7eb;
   background: #fff;
 }
-.ai-result-pop .pop-head > button:first-child {
-  width: auto;
+.ai-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   justify-self: start;
+}
+.ai-head-actions > button {
+  width: auto;
   white-space: nowrap;
   padding: 5px 6px;
   color: #374151;
   font-size: 12px;
   font-weight: 400;
+}
+.ai-head-actions > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 .ai-result-pop .pop-head > span {
   min-width: 0;

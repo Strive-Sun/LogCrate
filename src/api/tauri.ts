@@ -183,6 +183,7 @@ export const tauriApi = {
     logSnippets: import('./types').AiLogSnippetInput[] = [],
     historyId?: string,
     historyUpdatedAt?: string,
+    createHistory = false,
     onEvent?: (event: AiStreamEvent) => void,
   ): Promise<AiAnalysisResult> {
     const channel = new Channel<AiStreamEvent>();
@@ -197,6 +198,7 @@ export const tauriApi = {
         logSnippets,
         historyUpdate:
           historyId && historyUpdatedAt ? { id: historyId, updatedAt: historyUpdatedAt } : null,
+        createHistory,
       },
       onEvent: channel,
     });
