@@ -129,18 +129,25 @@ test('AI mock history restores sent attachment metadata with the conversation', 
     restored.messages,
     '',
     [],
-    ['WARN selected context'],
+    [{ sourceName: 'worker.log', content: 'WARN selected context' }],
     'history-with-attachment',
     '2026-08-06T00:00:02Z',
   );
   const restoredWithSelection = await mockApi.loadAiHistory('history-with-attachment');
   assert.equal(restoredWithSelection.messages[2].content, '补充日志选区');
   assert.deepEqual(restoredWithSelection.messages[2].attachments, [
-    { name: '日志选区 1', charCount: 21, kind: 'selection' },
+    { name: 'worker.log', charCount: 21, kind: 'selection' },
   ]);
   await assert.rejects(
     () =>
-      mockApi.continueAiConversation('history-provider', 'x'.repeat(119_999), [], '', [], ['xx']),
+      mockApi.continueAiConversation(
+        'history-provider',
+        'x'.repeat(119_999),
+        [],
+        '',
+        [],
+        [{ sourceName: 'worker.log', content: 'xx' }],
+      ),
     /合计超过 120000/,
   );
   await mockApi.deleteAiProvider('history-provider');

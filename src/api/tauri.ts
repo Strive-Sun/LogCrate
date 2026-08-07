@@ -180,7 +180,7 @@ export const tauriApi = {
     history: import('./types').AiHistoryMessage[],
     question: string,
     attachmentPaths: string[] = [],
-    logSnippets: string[] = [],
+    logSnippets: import('./types').AiLogSnippetInput[] = [],
     historyId?: string,
     historyUpdatedAt?: string,
     onEvent?: (event: AiStreamEvent) => void,

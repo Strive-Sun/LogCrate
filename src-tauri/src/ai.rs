@@ -57,6 +57,7 @@ const MAX_HISTORY_CHARS: usize = 48_000;
 const MAX_QUESTION_CHARS: usize = 4_000;
 const MAX_AI_ATTACHMENTS: usize = 5;
 const MAX_AI_LOG_SNIPPETS: usize = 5;
+const MAX_AI_LOG_SOURCE_NAME_CHARS: usize = 255;
 const MAX_AI_ATTACHMENT_BYTES: usize = 256 * 1024;
 const MAX_AI_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const SESSION_ID_HEADER: &str = "session-id";
@@ -237,8 +238,15 @@ pub struct AiHistoryUpdate {
 pub struct AiFollowUpOptions {
     pub attachment_paths: Vec<String>,
     #[serde(default)]
-    pub log_snippets: Vec<String>,
+    pub log_snippets: Vec<AiLogSnippetInput>,
     pub history_update: Option<AiHistoryUpdate>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiLogSnippetInput {
+    pub source_name: String,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -601,8 +609,15 @@ fn recent_stored_history(
     &messages[messages.len().saturating_sub(MAX_HISTORY_MESSAGES)..]
 }
 
-fn validate_follow_up_input(question: &str, log_snippets: &[String]) -> Result<(), String> {
-    if question.trim().is_empty() && log_snippets.iter().all(|snippet| snippet.trim().is_empty()) {
+fn validate_follow_up_input(
+    question: &str,
+    log_snippets: &[AiLogSnippetInput],
+) -> Result<(), String> {
+    if question.trim().is_empty()
+        && log_snippets
+            .iter()
+            .all(|snippet| snippet.content.trim().is_empty())
+    {
         return Err("请输入追问内容或添加日志选区".into());
     }
     if question.chars().count() > MAX_QUESTION_CHARS {
@@ -611,14 +626,25 @@ fn validate_follow_up_input(question: &str, log_snippets: &[String]) -> Result<(
     Ok(())
 }
 
-fn load_ai_log_snippets(log_snippets: Vec<String>) -> Result<Vec<LoadedAiAttachment>, String> {
+fn load_ai_log_snippets(
+    log_snippets: Vec<AiLogSnippetInput>,
+) -> Result<Vec<LoadedAiAttachment>, String> {
     if log_snippets.len() > MAX_AI_LOG_SNIPPETS {
         return Err(format!("每次最多添加 {MAX_AI_LOG_SNIPPETS} 个日志选区"));
     }
     log_snippets
         .into_iter()
-        .enumerate()
-        .map(|(index, content)| {
+        .map(|snippet| {
+            let source_name = snippet.source_name.trim();
+            if source_name.is_empty()
+                || source_name.chars().count() > MAX_AI_LOG_SOURCE_NAME_CHARS
+                || source_name.contains('/')
+                || source_name.contains('\\')
+                || source_name.chars().any(char::is_control)
+            {
+                return Err("日志选区来源名称无效".to_string());
+            }
+            let content = snippet.content;
             if content.trim().is_empty() {
                 return Err("日志选区不能为空".to_string());
             }
@@ -626,7 +652,7 @@ fn load_ai_log_snippets(log_snippets: Vec<String>) -> Result<Vec<LoadedAiAttachm
             Ok(LoadedAiAttachment {
                 summary: AiAttachmentSummary {
                     path: String::new(),
-                    name: format!("日志选区 {}", index + 1),
+                    name: source_name.to_string(),
                     char_count,
                 },
                 content,
@@ -1907,7 +1933,14 @@ mod tests {
     fn follow_up_input_and_stored_history_boundaries_reject_without_silent_truncation() {
         assert!(validate_follow_up_input("问题", &[]).is_ok());
         assert!(validate_follow_up_input(&"问".repeat(MAX_QUESTION_CHARS), &[]).is_ok());
-        assert!(validate_follow_up_input("  ", &["ERROR selected".into()]).is_ok());
+        assert!(validate_follow_up_input(
+            "  ",
+            &[AiLogSnippetInput {
+                source_name: "server.log".into(),
+                content: "ERROR selected".into(),
+            }],
+        )
+        .is_ok());
         assert!(validate_follow_up_input("  ", &[]).is_err());
         assert!(validate_follow_up_input(&"问".repeat(MAX_QUESTION_CHARS + 1), &[]).is_err());
 
@@ -2009,10 +2042,19 @@ mod tests {
 
     #[test]
     fn inline_log_snippets_are_bounded_and_tagged_for_encrypted_history() {
-        let snippets = load_ai_log_snippets(vec!["ERROR first".into(), "WARN second".into()])
-            .expect("valid snippets");
+        let snippets = load_ai_log_snippets(vec![
+            AiLogSnippetInput {
+                source_name: "server.log".into(),
+                content: "ERROR first".into(),
+            },
+            AiLogSnippetInput {
+                source_name: "worker.log".into(),
+                content: "WARN second".into(),
+            },
+        ])
+        .expect("valid snippets");
         assert_eq!(snippets.len(), 2);
-        assert_eq!(snippets[0].summary.name, "日志选区 1");
+        assert_eq!(snippets[0].summary.name, "server.log");
         assert_eq!(snippets[0].summary.char_count, 11);
         assert_eq!(
             snippets[0].kind,
@@ -2024,14 +2066,41 @@ mod tests {
             stored[1].kind,
             crate::ai_history::AiHistoryAttachmentKind::Selection
         );
-        assert!(load_ai_log_snippets(vec!["  ".into()]).is_err());
-        assert!(load_ai_log_snippets(vec!["x".into(); MAX_AI_LOG_SNIPPETS + 1]).is_err());
+        assert!(load_ai_log_snippets(vec![AiLogSnippetInput {
+            source_name: "server.log".into(),
+            content: "  ".into(),
+        }])
+        .is_err());
+        assert!(load_ai_log_snippets(
+            (0..=MAX_AI_LOG_SNIPPETS)
+                .map(|_| AiLogSnippetInput {
+                    source_name: "server.log".into(),
+                    content: "x".into(),
+                })
+                .collect(),
+        )
+        .is_err());
+        for invalid_name in ["", "../server.log", r"D:\\logs\\server.log"] {
+            assert!(load_ai_log_snippets(vec![AiLogSnippetInput {
+                source_name: invalid_name.into(),
+                content: "ERROR".into(),
+            }])
+            .is_err());
+        }
+        assert!(load_ai_log_snippets(vec![AiLogSnippetInput {
+            source_name: "x".repeat(MAX_AI_LOG_SOURCE_NAME_CHARS + 1),
+            content: "ERROR".into(),
+        }])
+        .is_err());
     }
 
     #[test]
     fn blank_question_with_log_snippet_builds_an_explicit_analysis_request() {
-        let snippets =
-            load_ai_log_snippets(vec!["ERROR capture failed".into()]).expect("valid log snippet");
+        let snippets = load_ai_log_snippets(vec![AiLogSnippetInput {
+            source_name: "capture.log".into(),
+            content: "ERROR capture failed".into(),
+        }])
+        .expect("valid log snippet");
         let input = follow_up_input(
             "INFO original session",
             "user: prior question\nassistant: prior answer",
@@ -2040,6 +2109,7 @@ mod tests {
         );
 
         assert!(input.contains("本轮补充日志："));
+        assert!(input.contains("capture.log"));
         assert!(input.contains("ERROR capture failed"));
         assert!(input.contains("用户请求：\n请分析本轮新增的补充日志选区"));
         assert!(!input.ends_with("用户请求：\n"));

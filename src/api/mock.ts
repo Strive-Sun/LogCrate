@@ -335,18 +335,27 @@ export const mockApi = {
     _history: AiHistoryMessage[],
     question: string,
     attachmentPaths: string[] = [],
-    logSnippets: string[] = [],
+    logSnippets: import('./types').AiLogSnippetInput[] = [],
     historyId?: string,
     historyUpdatedAt?: string,
     onEvent?: (event: AiStreamEvent) => void,
   ): Promise<AiAnalysisResult> {
-    if (!question.trim() && logSnippets.every((snippet) => !snippet.trim()))
+    if (!question.trim() && logSnippets.every((snippet) => !snippet.content.trim()))
       throw new Error('请输入追问内容或添加日志选区');
     if (logSnippets.length > 5) throw new Error('每次最多添加 5 个日志选区');
-    if (logSnippets.some((snippet) => !snippet.trim())) throw new Error('日志选区不能为空');
+    if (logSnippets.some((snippet) => !snippet.content.trim())) throw new Error('日志选区不能为空');
+    if (
+      logSnippets.some(
+        (snippet) =>
+          !snippet.sourceName.trim() ||
+          [...snippet.sourceName].length > 255 ||
+          /[/\\]/.test(snippet.sourceName),
+      )
+    )
+      throw new Error('日志选区来源名称无效');
     if (
       [..._selectedText].length +
-        logSnippets.reduce((total, snippet) => total + [...snippet].length, 0) >
+        logSnippets.reduce((total, snippet) => total + [...snippet.content].length, 0) >
       120_000
     )
       throw new Error('原始日志、附件与日志选区合计超过 120000 个字符限制');
@@ -369,9 +378,9 @@ export const mockApi = {
               charCount: 0,
               kind: 'file' as const,
             })),
-            ...logSnippets.map((snippet, index) => ({
-              name: `日志选区 ${index + 1}`,
-              charCount: [...snippet].length,
+            ...logSnippets.map((snippet) => ({
+              name: snippet.sourceName.trim(),
+              charCount: [...snippet.content].length,
               kind: 'selection' as const,
             })),
           ],

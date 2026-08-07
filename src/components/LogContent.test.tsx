@@ -4,7 +4,13 @@ import test, { afterEach, before, beforeEach } from 'node:test';
 import { JSDOM } from 'jsdom';
 import { useState } from 'react';
 import type { ComponentProps } from 'react';
-import { api, type LogFieldCondition, type LogFieldLayout, type LogSearchRequest } from '../api';
+import {
+  api,
+  type AiLogSnippetInput,
+  type LogFieldCondition,
+  type LogFieldLayout,
+  type LogSearchRequest,
+} from '../api';
 import { I18nProvider } from '../i18n/I18nProvider';
 import { persistLogFieldLayout, type StoredLogFieldLayout } from '../util/logFieldLayoutStorage';
 import {
@@ -15,6 +21,7 @@ import {
 } from './LogContent';
 import { LogFieldFilterBar } from './LogFieldFilterBar';
 import { LogRow } from './LogRow';
+import { AiWorkspaceProvider } from './AiWorkspaceContext';
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', {
   url: 'http://localhost/',
@@ -107,20 +114,23 @@ beforeEach(() => {
 function renderLog(overrides: Partial<ComponentProps<typeof LogContent>> = {}) {
   return harness.render(
     <I18nProvider>
-      <LogContent
-        active
-        activeKey="server.log"
-        session={{
-          sessionId: 'session-1',
-          sourcePath: 'D:\\logs\\server.log',
-          entryPath: 'server.log',
-          size: 1024,
-          indexing: false,
-          encoding: 'UTF-8',
-          evictedSessionIds: [],
-        }}
-        {...overrides}
-      />
+      <AiWorkspaceProvider>
+        <LogContent
+          active
+          activeKey="server.log"
+          sourceName="server.log"
+          session={{
+            sessionId: 'session-1',
+            sourcePath: 'D:\\logs\\server.log',
+            entryPath: 'server.log',
+            size: 1024,
+            indexing: false,
+            encoding: 'UTF-8',
+            evictedSessionIds: [],
+          }}
+          {...overrides}
+        />
+      </AiWorkspaceProvider>
     </I18nProvider>,
   );
 }
@@ -323,13 +333,153 @@ test('add-to-AI context action stays visible but disabled without an open curren
   assert.ok(harness.screen.getByText('添加到 AI 对话框'));
 });
 
+test('AI workspace accepts sourced selections across tabs and survives closing the source tab', async () => {
+  let currentSelection = 'ERROR from tab A';
+  const followUps: AiLogSnippetInput[][] = [];
+  let rejectFirstFollowUp: () => void = () => assert.fail('follow-up was not started');
+  dom.window.getSelection = () => ({ toString: () => currentSelection }) as Selection;
+  dom.window.confirm = () => true;
+  api.listAiProviders = async () => [
+    {
+      id: 'cross-tab-provider',
+      name: 'Cross-tab provider',
+      baseUrl: 'https://example.test/v1',
+      model: 'cross-tab-model',
+      keyConfigured: true,
+      protocol: 'chatCompletions',
+      endpointMode: 'base',
+      allowInsecureHttp: false,
+    },
+  ];
+  api.analyzeAiLog = async () => ({
+    providerId: 'cross-tab-provider',
+    model: 'cross-tab-model',
+    content: 'Initial answer from tab A',
+    timing: { responseHeadersMs: 1, firstContentMs: 2, streamReceiveMs: 3, totalMs: 4 },
+  });
+  api.saveAiHistory = async () => undefined;
+  api.continueAiConversation = async (
+    providerId,
+    _selectedText,
+    _history,
+    _question,
+    _attachmentPaths,
+    logSnippets = [],
+  ) => {
+    followUps.push(logSnippets);
+    if (followUps.length === 1) {
+      return new Promise((_, reject) => {
+        rejectFirstFollowUp = () =>
+          reject({ code: 'transport', stage: 'response_stream', elapsedMs: 10 });
+      });
+    }
+    return {
+      providerId,
+      model: 'cross-tab-model',
+      content: 'Cross-tab follow-up answer',
+      timing: { responseHeadersMs: 1, firstContentMs: 2, streamReceiveMs: 3, totalMs: 4 },
+    };
+  };
+
+  const session = (name: string) => ({
+    sessionId: name,
+    sourcePath: `D:\\logs\\${name}`,
+    entryPath: name,
+    size: 100,
+    indexing: false,
+    encoding: 'UTF-8',
+    evictedSessionIds: [],
+  });
+  function CrossTabHarness() {
+    const [activeTab, setActiveTab] = useState<'a' | 'b'>('a');
+    const [showA, setShowA] = useState(true);
+    return (
+      <AiWorkspaceProvider>
+        <button type="button" onClick={() => setActiveTab('a')}>
+          切到 A
+        </button>
+        <button type="button" onClick={() => setActiveTab('b')}>
+          切到 B
+        </button>
+        <button type="button" onClick={() => setShowA(false)}>
+          关闭 A
+        </button>
+        {showA && (
+          <LogContent
+            active={activeTab === 'a'}
+            activeKey="tab-a"
+            sourceName="alpha.log"
+            session={session('alpha.log')}
+            aiOpen={activeTab === 'a'}
+          />
+        )}
+        <LogContent
+          active={activeTab === 'b'}
+          activeKey="tab-b"
+          sourceName="beta.log"
+          session={session('beta.log')}
+          aiOpen={activeTab === 'b'}
+        />
+      </AiWorkspaceProvider>
+    );
+  }
+
+  const view = harness.render(
+    <I18nProvider>
+      <CrossTabHarness />
+    </I18nProvider>,
+  );
+  harness.fireEvent.contextMenu(view.container.querySelectorAll('.log-view')[0]);
+  harness.fireEvent.click(harness.screen.getByText('AI 分析'));
+  assert.ok(await harness.screen.findByText('Initial answer from tab A'));
+
+  currentSelection = 'WARN from tab B';
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '切到 B' }));
+  await harness.waitFor(() =>
+    assert.equal(harness.screen.getAllByRole('dialog', { name: 'AI 日志分析' }).length, 1),
+  );
+  harness.fireEvent.contextMenu(view.container.querySelectorAll('.log-view')[1]);
+  const addFromB = harness.screen.getByText('添加到 AI 对话框');
+  assert.notEqual(addFromB.getAttribute('aria-disabled'), 'true');
+  harness.fireEvent.click(addFromB);
+  assert.ok(harness.screen.getByText('beta.log'));
+  assert.ok(harness.screen.getByText('WARN from tab B'));
+
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '切到 A' }));
+  assert.ok(await harness.screen.findByText('beta.log'));
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '切到 B' }));
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '关闭 A' }));
+  assert.ok(await harness.screen.findByText('Initial answer from tab A'));
+  assert.ok(harness.screen.getByText('beta.log'));
+
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '发送追问' }));
+  await harness.waitFor(() => assert.equal(followUps.length, 1));
+  currentSelection = 'INFO queued while sending';
+  harness.fireEvent.contextMenu(view.container.querySelector('.log-view') as HTMLElement);
+  harness.fireEvent.click(harness.screen.getByText('添加到 AI 对话框'));
+  rejectFirstFollowUp();
+  assert.ok(await harness.screen.findByText(/错误类别：transport/));
+  assert.ok(harness.screen.getByText('WARN from tab B'));
+  assert.ok(harness.screen.getByText('INFO queued while sending'));
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: '发送追问' }));
+  assert.ok(await harness.screen.findByText('Cross-tab follow-up answer'));
+  assert.deepEqual(followUps, [
+    [{ sourceName: 'beta.log', content: 'WARN from tab B' }],
+    [
+      { sourceName: 'beta.log', content: 'WARN from tab B' },
+      { sourceName: 'beta.log', content: 'INFO queued while sending' },
+    ],
+  ]);
+  assert.equal(harness.screen.getAllByLabelText('已发送附件 beta.log').length, 2);
+});
+
 test('AI analysis result opens in a closable drawer body', async () => {
   let currentSelection = 'ERROR synthetic failure';
   let aiWorkspaceOpened = false;
   const followUps: Array<{
     question: string;
     attachmentPaths: string[];
-    logSnippets: string[];
+    logSnippets: AiLogSnippetInput[];
   }> = [];
   const followUpHistories: string[][] = [];
   let retryAttempts = 0;
@@ -566,10 +716,10 @@ test('AI analysis result opens in a closable drawer body', async () => {
   assert.deepEqual(followUps.at(-1), {
     question: '',
     attachmentPaths: [],
-    logSnippets: ['WARN manually queued context'],
+    logSnippets: [{ sourceName: 'server.log', content: 'WARN manually queued context' }],
   });
   assert.equal(harness.screen.queryByLabelText('待发送日志选区'), null);
-  assert.ok(harness.screen.getByLabelText('已发送附件 日志选区 1'));
+  assert.ok(harness.screen.getByLabelText('已发送附件 server.log'));
 
   currentSelection = 'ERROR analyze in current conversation';
   harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
@@ -578,7 +728,7 @@ test('AI analysis result opens in a closable drawer body', async () => {
     assert.deepEqual(followUps.at(-1), {
       question: '',
       attachmentPaths: [],
-      logSnippets: ['ERROR analyze in current conversation'],
+      logSnippets: [{ sourceName: 'server.log', content: 'ERROR analyze in current conversation' }],
     }),
   );
   assert.equal(aiWorkspaceOpened, true);
@@ -1321,8 +1471,10 @@ test('separate log tab component instances keep field conditions isolated', asyn
   });
   harness.render(
     <I18nProvider>
-      <LogContent active activeKey="tab-a.log" session={session('tab-a.log')} />
-      <LogContent active={false} activeKey="tab-b.log" session={session('tab-b.log')} />
+      <AiWorkspaceProvider>
+        <LogContent active activeKey="tab-a.log" session={session('tab-a.log')} />
+        <LogContent active={false} activeKey="tab-b.log" session={session('tab-b.log')} />
+      </AiWorkspaceProvider>
     </I18nProvider>,
   );
 

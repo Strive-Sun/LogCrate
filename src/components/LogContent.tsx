@@ -13,7 +13,6 @@ import type {
   LogLine,
   LogSearchMatch,
   AiAnalysisResult,
-  AiAttachmentSummary,
   AiRequestFailure,
   AiStreamEvent,
   OpenSessionResult,
@@ -32,6 +31,7 @@ import { LogFieldFilterBar } from './LogFieldFilterBar';
 import { LogRow } from './LogRow';
 import { ContextMenu } from './ContextMenu';
 import { AiMessageContent } from './AiMessageContent';
+import { useAiWorkspace, type AiPendingLogSnippet } from './AiWorkspaceContext';
 import { useI18n } from '../i18n/I18nProvider';
 
 interface Props {
@@ -45,19 +45,12 @@ interface Props {
   aiWorkspaceHost?: HTMLElement | null;
   onAiOpen?: () => Promise<void>;
   onAiClose?: () => Promise<void>;
+  sourceName?: string;
 }
 
 const PAGE = 200;
 const MAX_CACHED_LINES = 5_000;
 const ENCODINGS = ['UTF-8', 'GBK', 'GB18030', 'UTF-16LE', 'UTF-16BE'];
-type AiDisplayResult = Omit<AiAnalysisResult, 'timing'> & Partial<Pick<AiAnalysisResult, 'timing'>>;
-interface AiPendingLogSnippet {
-  id: number;
-  content: string;
-  charCount: number;
-  preview: string;
-}
-
 const AI_FAILURE_CODES = new Set<AiRequestFailure['code']>([
   'connect_timeout',
   'stream_idle_timeout',
@@ -233,6 +226,7 @@ export function LogContent({
   aiWorkspaceHost,
   onAiOpen,
   onAiClose,
+  sourceName = '日志选区',
 }: Props) {
   const { t } = useI18n();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -281,25 +275,43 @@ export function LogContent({
     selectedText: string;
   } | null>(null);
   const [logScrollLeft, setLogScrollLeft] = useState(0);
-  const [aiResult, setAiResult] = useState<AiDisplayResult | null>(null);
-  const [aiRequestTarget, setAiRequestTarget] = useState<{
-    providerId: string;
-    model: string;
-  } | null>(null);
-  const [aiBusy, setAiBusy] = useState(false);
-  const [aiError, setAiError] = useState<string | null>(null);
-  const [aiIncomplete, setAiIncomplete] = useState(false);
-  const [aiHistory, setAiHistory] = useState<import('../api/types').AiHistorySummary[]>([]);
-  const [aiHistoryOpen, setAiHistoryOpen] = useState(false);
-  const [aiConversation, setAiConversation] = useState<import('../api/types').AiHistoryMessage[]>(
-    [],
-  );
-  const [aiConversationText, setAiConversationText] = useState('');
-  const [aiQuestion, setAiQuestion] = useState('');
-  const [aiAttachments, setAiAttachments] = useState<AiAttachmentSummary[]>([]);
-  const [aiLogSnippets, setAiLogSnippets] = useState<AiPendingLogSnippet[]>([]);
-  const [aiHistoryId, setAiHistoryId] = useState<string | null>(null);
-  const [aiPanelOpen, setAiPanelOpen] = useState(false);
+  const {
+    aiResult,
+    setAiResult,
+    aiRequestTarget,
+    setAiRequestTarget,
+    aiBusy,
+    setAiBusy,
+    aiError,
+    setAiError,
+    aiIncomplete,
+    setAiIncomplete,
+    aiHistory,
+    setAiHistory,
+    aiHistoryOpen,
+    setAiHistoryOpen,
+    aiConversation,
+    setAiConversation,
+    aiConversationText,
+    setAiConversationText,
+    aiQuestion,
+    setAiQuestion,
+    aiAttachments,
+    setAiAttachments,
+    aiLogSnippets,
+    setAiLogSnippets,
+    aiHistoryId,
+    setAiHistoryId,
+    aiPanelOpen,
+    setAiPanelOpen,
+    aiSendingRef,
+    aiRequestGeneration,
+    aiDeltaFrame,
+    aiDeltaBuffer,
+    aiStreamingMessageIndex,
+    aiSuccessfulConversation,
+    aiLogSnippetId,
+  } = useAiWorkspace();
 
   useEffect(() => {
     if (!aiOpenToken || active === false) return;
@@ -308,17 +320,10 @@ export function LogContent({
       .listAiHistory()
       .then(setAiHistory)
       .catch(() => undefined);
-  }, [aiOpenToken, active]);
+  }, [active, aiOpenToken, setAiHistory, setAiPanelOpen]);
   const [fieldEncodingVersion, setFieldEncodingVersion] = useState(0);
   const fieldUnsub = useRef<() => void>(() => {});
   const fieldRequestGeneration = useRef(0);
-  const aiSendingRef = useRef(false);
-  const aiRequestGeneration = useRef(0);
-  const aiDeltaFrame = useRef<number | null>(null);
-  const aiDeltaBuffer = useRef('');
-  const aiStreamingMessageIndex = useRef(-1);
-  const aiSuccessfulConversation = useRef<import('../api/types').AiHistoryMessage[]>([]);
-  const aiLogSnippetId = useRef(0);
   const fieldAnchor = useRef(1);
   const fieldRestoreAnchor = useRef<number | null>(null);
   const fieldUserInteracted = useRef(false);
@@ -333,24 +338,27 @@ export function LogContent({
   includeUnparsedRef.current = includeUnparsed;
   indexedLinesRef.current = indexedLines;
 
-  const flushAiDeltas = useCallback((generation: number) => {
-    if (generation !== aiRequestGeneration.current) return;
-    if (aiDeltaFrame.current !== null) {
-      window.cancelAnimationFrame(aiDeltaFrame.current);
-      aiDeltaFrame.current = null;
-    }
-    const delta = aiDeltaBuffer.current;
-    aiDeltaBuffer.current = '';
-    if (!delta) return;
-    const messageIndex = aiStreamingMessageIndex.current;
-    setAiConversation((messages) =>
-      messages.map((message, index) =>
-        index === messageIndex && message.role === 'assistant'
-          ? { ...message, content: message.content + delta }
-          : message,
-      ),
-    );
-  }, []);
+  const flushAiDeltas = useCallback(
+    (generation: number) => {
+      if (generation !== aiRequestGeneration.current) return;
+      if (aiDeltaFrame.current !== null) {
+        window.cancelAnimationFrame(aiDeltaFrame.current);
+        aiDeltaFrame.current = null;
+      }
+      const delta = aiDeltaBuffer.current;
+      aiDeltaBuffer.current = '';
+      if (!delta) return;
+      const messageIndex = aiStreamingMessageIndex.current;
+      setAiConversation((messages) =>
+        messages.map((message, index) =>
+          index === messageIndex && message.role === 'assistant'
+            ? { ...message, content: message.content + delta }
+            : message,
+        ),
+      );
+    },
+    [aiDeltaBuffer, aiDeltaFrame, aiRequestGeneration, aiStreamingMessageIndex, setAiConversation],
+  );
 
   const queueAiDelta = useCallback(
     (generation: number, event: AiStreamEvent) => {
@@ -362,19 +370,29 @@ export function LogContent({
         flushAiDeltas(generation);
       });
     },
-    [flushAiDeltas],
+    [aiDeltaBuffer, aiDeltaFrame, aiRequestGeneration, flushAiDeltas],
   );
 
-  const beginAiStream = useCallback((messages: import('../api/types').AiHistoryMessage[]) => {
-    aiRequestGeneration.current += 1;
-    if (aiDeltaFrame.current !== null) window.cancelAnimationFrame(aiDeltaFrame.current);
-    aiDeltaFrame.current = null;
-    aiDeltaBuffer.current = '';
-    aiStreamingMessageIndex.current = messages.length - 1;
-    setAiConversation(messages);
-    setAiIncomplete(false);
-    return aiRequestGeneration.current;
-  }, []);
+  const beginAiStream = useCallback(
+    (messages: import('../api/types').AiHistoryMessage[]) => {
+      aiRequestGeneration.current += 1;
+      if (aiDeltaFrame.current !== null) window.cancelAnimationFrame(aiDeltaFrame.current);
+      aiDeltaFrame.current = null;
+      aiDeltaBuffer.current = '';
+      aiStreamingMessageIndex.current = messages.length - 1;
+      setAiConversation(messages);
+      setAiIncomplete(false);
+      return aiRequestGeneration.current;
+    },
+    [
+      aiDeltaBuffer,
+      aiDeltaFrame,
+      aiRequestGeneration,
+      aiStreamingMessageIndex,
+      setAiConversation,
+      setAiIncomplete,
+    ],
+  );
 
   const finishAiStream = useCallback(
     (generation: number, content: string) => {
@@ -389,7 +407,7 @@ export function LogContent({
         ),
       );
     },
-    [flushAiDeltas],
+    [aiRequestGeneration, aiStreamingMessageIndex, flushAiDeltas, setAiConversation],
   );
 
   const analyzeSelectedText = useCallback(
@@ -479,7 +497,26 @@ export function LogContent({
         setAiError(errorMessage(error));
       }
     },
-    [beginAiStream, finishAiStream, flushAiDeltas, onAiOpen, queueAiDelta],
+    [
+      aiRequestGeneration,
+      aiSendingRef,
+      aiSuccessfulConversation,
+      beginAiStream,
+      finishAiStream,
+      flushAiDeltas,
+      onAiOpen,
+      queueAiDelta,
+      setAiAttachments,
+      setAiBusy,
+      setAiConversationText,
+      setAiError,
+      setAiHistoryId,
+      setAiIncomplete,
+      setAiLogSnippets,
+      setAiPanelOpen,
+      setAiRequestTarget,
+      setAiResult,
+    ],
   );
 
   const clearLineCache = useCallback(() => {
@@ -532,10 +569,6 @@ export function LogContent({
     () => () => {
       encodingUnsub.current();
       fieldUnsub.current();
-      aiRequestGeneration.current += 1;
-      if (aiDeltaFrame.current !== null) window.cancelAnimationFrame(aiDeltaFrame.current);
-      aiDeltaFrame.current = null;
-      aiDeltaBuffer.current = '';
     },
     [],
   );
@@ -1064,6 +1097,7 @@ export function LogContent({
     aiLogSnippetId.current += 1;
     return {
       id: aiLogSnippetId.current,
+      sourceName,
       content,
       charCount: [...content].length,
       preview: content.replace(/\s+/g, ' ').slice(0, 120),
@@ -1080,7 +1114,7 @@ export function LogContent({
   async function sendAiFollowUp(immediateSnippets: AiPendingLogSnippet[] = []) {
     const snippets = [...aiLogSnippets, ...immediateSnippets];
     if (!aiResult || aiBusy || aiSendingRef.current) {
-      if (immediateSnippets.length) setAiLogSnippets(snippets);
+      if (immediateSnippets.length) setAiLogSnippets((items) => [...items, ...immediateSnippets]);
       return;
     }
     if (!aiQuestion.trim() && snippets.length === 0) return;
@@ -1099,8 +1133,8 @@ export function LogContent({
             charCount: attachment.charCount,
             kind: 'file' as const,
           })),
-          ...snippets.map((snippet, index) => ({
-            name: `日志选区 ${index + 1}`,
+          ...snippets.map((snippet) => ({
+            name: snippet.sourceName,
             charCount: snippet.charCount,
             kind: 'selection' as const,
           })),
@@ -1133,7 +1167,10 @@ export function LogContent({
         conversationBeforeSend.slice(-12),
         question,
         attachments.map((attachment) => attachment.path),
-        snippets.map((snippet) => snippet.content),
+        snippets.map(({ sourceName: snippetSourceName, content }) => ({
+          sourceName: snippetSourceName,
+          content,
+        })),
         aiHistoryId ?? undefined,
         historyUpdatedAt,
         (event) => queueAiDelta(generation, event),
@@ -1145,7 +1182,7 @@ export function LogContent({
         setAiError(formatAiRequestFailure(error));
         setAiQuestion(question);
         setAiAttachments(attachments);
-        setAiLogSnippets(snippets);
+        setAiLogSnippets((items) => [...snippets, ...items]);
       }
       return;
     } finally {
@@ -1172,6 +1209,9 @@ export function LogContent({
   }, [aiBusy, aiConversation.length, aiRequestTarget, aiResult]);
 
   const aiDisplayTarget = aiResult ?? aiRequestTarget;
+  const shouldRenderAiWorkspace =
+    (aiOpen || active !== false) &&
+    (aiOpen || aiPanelOpen || aiBusy || Boolean(aiError) || Boolean(aiDisplayTarget));
 
   if (!session && !activeKey) {
     return (
@@ -1424,7 +1464,7 @@ export function LogContent({
       )}
 
       {mountAiWorkspace(
-        (aiOpen || aiPanelOpen || aiBusy || aiError || aiDisplayTarget) && (
+        shouldRenderAiWorkspace && (
           <div className="ai-result-pop" role="dialog" aria-label="AI 日志分析">
             <div className="pop-head">
               <button
@@ -1605,12 +1645,12 @@ export function LogContent({
                             )}
                           {message.attachments && message.attachments.length > 0 && (
                             <div className="ai-chat-attachments">
-                              {message.attachments.map((attachment) => (
+                              {message.attachments.map((attachment, attachmentIndex) => (
                                 <span
-                                  key={`${attachment.name}-${attachment.charCount}`}
+                                  key={`${attachment.name}-${attachment.charCount}-${attachmentIndex}`}
                                   aria-label={`已发送附件 ${attachment.name}`}
                                 >
-                                  {attachment.kind === 'selection' ? '日志选区' : attachment.name}
+                                  {attachment.name}
                                   <small>{fmtNum(attachment.charCount)} 字符</small>
                                 </span>
                               ))}
@@ -1652,7 +1692,7 @@ export function LogContent({
                       {aiLogSnippets.map((snippet) => (
                         <div key={snippet.id} className="ai-log-snippet-card">
                           <div>
-                            <strong>日志选区</strong>
+                            <strong>{snippet.sourceName}</strong>
                             <small>{fmtNum(snippet.charCount)} 字符</small>
                           </div>
                           <p title={snippet.content}>{snippet.preview}</p>

@@ -426,6 +426,11 @@ export interface AiAttachmentSummary {
   charCount: number;
 }
 
+export interface AiLogSnippetInput {
+  sourceName: string;
+  content: string;
+}
+
 export interface AiHistoryMessage {
   role: 'user' | 'assistant';
   content: string;
