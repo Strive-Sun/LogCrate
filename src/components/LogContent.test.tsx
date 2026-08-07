@@ -785,6 +785,7 @@ test('new conversation keeps an application draft until its first request succee
   let currentSelection = 'ERROR initial session';
   const confirmations = [true, false, true, false, true, true];
   const draftRequests: Array<{
+    selectedText: string;
     question: string;
     snippets: AiLogSnippetInput[];
     historyId?: string;
@@ -839,7 +840,7 @@ test('new conversation keeps an application draft until its first request succee
   });
   api.continueAiConversation = async (
     providerId,
-    _selectedText,
+    selectedText,
     _history,
     question,
     _attachmentPaths,
@@ -849,7 +850,7 @@ test('new conversation keeps an application draft until its first request succee
     createHistory = false,
     onEvent,
   ) => {
-    draftRequests.push({ question, snippets, historyId, createHistory });
+    draftRequests.push({ selectedText, question, snippets, historyId, createHistory });
     if (draftRequests.length === 1) {
       onEvent?.({ type: 'delta', content: 'partial draft answer' });
       return new Promise((_, reject) => {
@@ -923,6 +924,7 @@ test('new conversation keeps an application draft until its first request succee
   harness.fireEvent.keyDown(document, { key: 'Escape' });
   assert.equal(harness.screen.queryByRole('menu', { name: 'AI 会话操作' }), null);
   assert.equal(draftRequests[0].question, 'Compare the selected logs');
+  assert.equal(draftRequests[0].selectedText, '');
   assert.deepEqual(draftRequests[0].snippets, [
     { sourceName: 'server.log', content: 'INFO queued in draft' },
     { sourceName: 'server.log', content: 'ERROR immediate draft selection' },
@@ -949,6 +951,7 @@ test('new conversation keeps an application draft until its first request succee
   harness.fireEvent.click(harness.screen.getByRole('button', { name: '发送追问' }));
   assert.ok(await harness.screen.findByText('New draft answer'));
   assert.equal(draftRequests[1].createHistory, true);
+  assert.equal(draftRequests[1].selectedText, '');
   assert.ok(draftRequests[1].historyId);
   assert.deepEqual(draftRequests[1].snippets, [
     { sourceName: 'server.log', content: 'INFO queued in draft' },
@@ -962,6 +965,7 @@ test('new conversation keeps an application draft until its first request succee
   harness.fireEvent.click(harness.screen.getByText('AI 分析'));
   await harness.waitFor(() => assert.equal(draftRequests.length, 3));
   assert.equal(draftRequests[2].createHistory, false);
+  assert.equal(draftRequests[2].selectedText, '');
   assert.equal(draftRequests[2].historyId, draftRequests[1].historyId);
 
   harness.fireEvent.click(sessionMenuButton);
@@ -973,6 +977,7 @@ test('new conversation keeps an application draft until its first request succee
   harness.fireEvent.click(harness.screen.getByText('AI 分析'));
   await harness.waitFor(() => assert.equal(draftRequests.length, 4));
   assert.equal(draftRequests[3].createHistory, false);
+  assert.equal(draftRequests[3].selectedText, 'restored selection');
   assert.equal(draftRequests[3].historyId, 'restored-history');
 });
 

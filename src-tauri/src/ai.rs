@@ -370,6 +370,10 @@ fn validate_analysis_text(text: &str) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("Select some log text before starting AI analysis".to_string());
     }
+    validate_analysis_text_size(text)
+}
+
+fn validate_analysis_text_size(text: &str) -> Result<(), String> {
     if text.chars().count() > MAX_ANALYSIS_CHARS {
         return Err(format!(
             "Selected log text is too large (maximum {MAX_ANALYSIS_CHARS} characters)"
@@ -1646,7 +1650,10 @@ pub async fn continue_ai_conversation(
             return Err("AI 历史记录已存在".to_string().into());
         }
     } else {
-        validate_analysis_text(&selected_text)?;
+        // A conversation created from an empty draft stores its initial log selections as
+        // encrypted message attachments, so its legacy selected_text field is legitimately
+        // empty. The required history identity below still fails closed before any request.
+        validate_analysis_text_size(&selected_text)?;
     }
     validate_follow_up_input(&question, &log_snippets)?;
     validate_conversation_history(&history)?;
@@ -1880,6 +1887,14 @@ mod tests {
         assert!(validate_analysis_text("ERROR something").is_ok());
         assert!(validate_analysis_text(" \n\t ").is_err());
         assert!(validate_analysis_text(&"x".repeat(MAX_ANALYSIS_CHARS + 1)).is_err());
+    }
+
+    #[test]
+    fn established_follow_up_allows_blank_legacy_selection_but_keeps_its_size_limit() {
+        assert!(validate_analysis_text_size("").is_ok());
+        assert!(validate_analysis_text_size(" \n\t ").is_ok());
+        assert!(validate_analysis_text_size(&"x".repeat(MAX_ANALYSIS_CHARS)).is_ok());
+        assert!(validate_analysis_text_size(&"x".repeat(MAX_ANALYSIS_CHARS + 1)).is_err());
     }
 
     #[test]
