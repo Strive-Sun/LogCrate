@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test, { afterEach, before } from 'node:test';
 import { JSDOM } from 'jsdom';
 import type { FileSearchPage, FileSearchResult, FileSearchStatus } from '../api/types';
@@ -165,4 +166,13 @@ test('搜索页面隐藏后保留结果且再次显示不重复初始化或查�
   } finally {
     Object.assign(api, original);
   }
+});
+
+test('搜索保活层不会拦截顶栏切换入口且搜索面板保持可交互', () => {
+  const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  const keepAliveRule = css.match(/\.file-search-keep-alive\s*\{([^}]*)\}/)?.[1] ?? '';
+  const panelRule = css.match(/\.file-search-panel\s*\{([^}]*)\}/)?.[1] ?? '';
+
+  assert.match(keepAliveRule, /pointer-events:\s*none;/);
+  assert.match(panelRule, /pointer-events:\s*auto;/);
 });
