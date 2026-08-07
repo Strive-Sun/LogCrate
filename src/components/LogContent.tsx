@@ -246,6 +246,7 @@ export function LogContent({
   const preferredEncoding = useRef<string | null>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
   const aiResultBodyRef = useRef<HTMLDivElement>(null);
+  const aiSessionMenuRef = useRef<HTMLDivElement>(null);
   const findGeneration = useRef(0);
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
@@ -269,6 +270,7 @@ export function LogContent({
   const [fieldMode, setFieldMode] = useState<LogFieldResultMode>('compact');
   const [includeUnparsed, setIncludeUnparsed] = useState(true);
   const [fieldFilterMenuOpen, setFieldFilterMenuOpen] = useState(false);
+  const [aiSessionMenuOpen, setAiSessionMenuOpen] = useState(false);
   const [logContextMenu, setLogContextMenu] = useState<{
     x: number;
     y: number;
@@ -314,6 +316,24 @@ export function LogContent({
     aiSuccessfulConversation,
     aiLogSnippetId,
   } = useAiWorkspace();
+
+  useEffect(() => {
+    if (!aiSessionMenuOpen) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!aiSessionMenuRef.current?.contains(event.target as Node)) {
+        setAiSessionMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setAiSessionMenuOpen(false);
+    };
+    document.addEventListener('mousedown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [aiSessionMenuOpen]);
 
   useEffect(() => {
     if (!aiOpenToken || active === false) return;
@@ -1670,19 +1690,41 @@ export function LogContent({
         shouldRenderAiWorkspace && (
           <div className="ai-result-pop" role="dialog" aria-label="AI 日志分析">
             <div className="pop-head">
-              <div className="ai-head-actions">
+              <div className="ai-head-actions" ref={aiSessionMenuRef}>
                 <button
                   type="button"
-                  onClick={async () => {
-                    setAiHistory(await api.listAiHistory());
-                    setAiHistoryOpen((open) => !open);
-                  }}
+                  aria-haspopup="menu"
+                  aria-expanded={aiSessionMenuOpen}
+                  onClick={() => setAiSessionMenuOpen((open) => !open)}
                 >
-                  历史记录
+                  会话
                 </button>
-                <button type="button" disabled={aiBusy} onClick={startNewAiConversation}>
-                  新对话
-                </button>
+                {aiSessionMenuOpen && (
+                  <div className="ai-session-menu" role="menu" aria-label="AI 会话操作">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={aiBusy}
+                      onClick={() => {
+                        setAiSessionMenuOpen(false);
+                        startNewAiConversation();
+                      }}
+                    >
+                      新对话
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={async () => {
+                        setAiSessionMenuOpen(false);
+                        setAiHistory(await api.listAiHistory());
+                        setAiHistoryOpen(true);
+                      }}
+                    >
+                      历史记录
+                    </button>
+                  </div>
+                )}
               </div>
               <span>AI 日志分析</span>
               <button
@@ -1690,6 +1732,7 @@ export function LogContent({
                 className="settings-close"
                 aria-label="关闭 AI 日志分析"
                 onClick={() => {
+                  setAiSessionMenuOpen(false);
                   resetAiRequestState();
                   setAiSessionState('none');
                   setAiPanelOpen(false);

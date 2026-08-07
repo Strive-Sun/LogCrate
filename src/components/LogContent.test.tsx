@@ -636,7 +636,7 @@ test('AI analysis result opens in a closable drawer body', async () => {
   assert.ok(drawer.classList.contains('ai-result-pop'));
   assert.equal(aiWorkspaceOpened, true);
   assert.ok(drawer.querySelector('.ai-result-body'));
-  assert.ok(harness.screen.getByRole('button', { name: '历史记录' }));
+  assert.ok(harness.screen.getByRole('button', { name: '会话' }));
   assert.equal(
     harness.screen.getByText('Synthetic analysis result').textContent,
     'Synthetic analysis result',
@@ -868,17 +868,26 @@ test('new conversation keeps an application draft until its first request succee
   harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
   harness.fireEvent.click(harness.screen.getByText('AI 分析'));
   assert.ok(await harness.screen.findByText('Old established answer'));
-  assert.ok(harness.screen.getByRole('button', { name: '历史记录' }));
-  assert.ok(harness.screen.getByRole('button', { name: '新对话' }));
+  const sessionMenuButton = harness.screen.getByRole('button', { name: '会话' });
+  assert.equal(sessionMenuButton.getAttribute('aria-expanded'), 'false');
+  harness.fireEvent.click(sessionMenuButton);
+  assert.ok(harness.screen.getByRole('menu', { name: 'AI 会话操作' }));
+  assert.ok(harness.screen.getByRole('menuitem', { name: '历史记录' }));
+  assert.ok(harness.screen.getByRole('menuitem', { name: '新对话' }));
+  harness.fireEvent.mouseDown(document.body);
+  assert.equal(harness.screen.queryByRole('menu', { name: 'AI 会话操作' }), null);
+  harness.fireEvent.click(sessionMenuButton);
 
   currentSelection = 'WARN unsent from old session';
   harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
   harness.fireEvent.click(harness.screen.getByText('添加到 AI 对话框'));
-  harness.fireEvent.click(harness.screen.getByRole('button', { name: '新对话' }));
+  harness.fireEvent.click(harness.screen.getByRole('menuitem', { name: '新对话' }));
   assert.ok(harness.screen.getByText('Old established answer'));
   assert.ok(harness.screen.getByText('WARN unsent from old session'));
+  assert.equal(harness.screen.queryByRole('menu', { name: 'AI 会话操作' }), null);
 
-  harness.fireEvent.click(harness.screen.getByRole('button', { name: '新对话' }));
+  harness.fireEvent.click(sessionMenuButton);
+  harness.fireEvent.click(harness.screen.getByRole('menuitem', { name: '新对话' }));
   assert.equal(harness.screen.queryByText('Old established answer'), null);
   assert.equal(harness.screen.queryByText('WARN unsent from old session'), null);
   assert.ok(harness.screen.getByRole('textbox', { name: '继续追问' }));
@@ -902,10 +911,17 @@ test('new conversation keeps an application draft until its first request succee
   harness.fireEvent.contextMenu(container.querySelector('.log-view') as HTMLElement);
   harness.fireEvent.click(harness.screen.getByText('AI 分析'));
   await harness.waitFor(() => assert.equal(draftRequests.length, 1));
+  harness.fireEvent.click(sessionMenuButton);
   assert.equal(
-    harness.screen.getByRole('button', { name: '新对话' }).hasAttribute('disabled'),
+    harness.screen.getByRole('menuitem', { name: '新对话' }).hasAttribute('disabled'),
     true,
   );
+  assert.equal(
+    harness.screen.getByRole('menuitem', { name: '历史记录' }).hasAttribute('disabled'),
+    false,
+  );
+  harness.fireEvent.keyDown(document, { key: 'Escape' });
+  assert.equal(harness.screen.queryByRole('menu', { name: 'AI 会话操作' }), null);
   assert.equal(draftRequests[0].question, 'Compare the selected logs');
   assert.deepEqual(draftRequests[0].snippets, [
     { sourceName: 'server.log', content: 'INFO queued in draft' },
@@ -948,7 +964,8 @@ test('new conversation keeps an application draft until its first request succee
   assert.equal(draftRequests[2].createHistory, false);
   assert.equal(draftRequests[2].historyId, draftRequests[1].historyId);
 
-  harness.fireEvent.click(harness.screen.getByRole('button', { name: '历史记录' }));
+  harness.fireEvent.click(sessionMenuButton);
+  harness.fireEvent.click(harness.screen.getByRole('menuitem', { name: '历史记录' }));
   harness.fireEvent.click(await harness.screen.findByText('Restored conversation'));
   assert.ok(await harness.screen.findByText('Restored answer'));
   currentSelection = 'ERROR after history restore';
@@ -971,7 +988,9 @@ test('AI workspace fills a root-level right column with an independently scrolli
   const hostRule = css.match(/\.ai-workspace-host\s*\{([^}]*)\}/)?.[1] ?? '';
   const drawerRule = css.match(/\.ai-result-pop\s*\{([^}]*)\}/)?.[1] ?? '';
   const headerRule = css.match(/\.ai-result-pop \.pop-head\s*\{([^}]*)\}/)?.[1] ?? '';
-  const historyRule = css.match(/\.ai-head-actions > button\s*\{([^}]*)\}/)?.[1] ?? '';
+  const sessionTriggerRule = css.match(/\.ai-head-actions > button\s*\{([^}]*)\}/)?.[1] ?? '';
+  const sessionMenuRule = css.match(/\.ai-session-menu\s*\{([^}]*)\}/)?.[1] ?? '';
+  const sessionMenuItemRule = css.match(/\.ai-session-menu > button\s*\{([^}]*)\}/)?.[1] ?? '';
   const bodyRule = css.match(/\.ai-result-body\s*\{([^}]*)\}/)?.[1] ?? '';
   const historyListRule = css.match(/\.ai-history-list\s*\{([^}]*)\}/)?.[1] ?? '';
   const historyToolbarRule = css.match(/\.ai-history-toolbar\s*\{([^}]*)\}/)?.[1] ?? '';
@@ -1005,9 +1024,12 @@ test('AI workspace fills a root-level right column with an independently scrolli
   assert.match(drawerRule, /overflow:\s*hidden;/);
   assert.match(headerRule, /display:\s*grid;/);
   assert.match(headerRule, /grid-template-columns:\s*1fr auto 1fr;/);
-  assert.match(historyRule, /width:\s*auto;/);
-  assert.match(historyRule, /font-size:\s*12px;/);
-  assert.match(historyRule, /font-weight:\s*400;/);
+  assert.match(sessionTriggerRule, /width:\s*auto;/);
+  assert.match(sessionTriggerRule, /font-size:\s*12px;/);
+  assert.match(sessionTriggerRule, /font-weight:\s*400;/);
+  assert.match(sessionMenuRule, /position:\s*absolute;/);
+  assert.match(sessionMenuRule, /min-width:\s*132px;/);
+  assert.match(sessionMenuItemRule, /text-align:\s*left;/);
   assert.match(bodyRule, /min-height:\s*0;/);
   assert.match(bodyRule, /overflow:\s*auto;/);
   assert.match(historyListRule, /max-height:\s*280px;/);

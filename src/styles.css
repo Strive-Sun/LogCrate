@@ -2809,9 +2809,9 @@ body.resizing {
   background: #fff;
 }
 .ai-head-actions {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 4px;
   justify-self: start;
 }
 .ai-head-actions > button {
@@ -2823,6 +2823,38 @@ body.resizing {
   font-weight: 400;
 }
 .ai-head-actions > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.ai-session-menu {
+  position: absolute;
+  z-index: 4;
+  top: calc(100% + 6px);
+  left: 0;
+  display: grid;
+  min-width: 132px;
+  padding: 4px;
+  border: 1px solid #e5e7eb;
+  border-radius: 7px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgb(15 23 42 / 14%);
+}
+.ai-session-menu > button {
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #374151;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.ai-session-menu > button:hover:not(:disabled),
+.ai-session-menu > button:focus-visible {
+  background: #f3f4f6;
+}
+.ai-session-menu > button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
 }
