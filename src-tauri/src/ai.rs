@@ -511,6 +511,26 @@ fn attachment_context(attachments: &[LoadedAiAttachment]) -> String {
         .join("\n\n")
 }
 
+fn follow_up_input(
+    selected_text: &str,
+    context: &str,
+    supplemental: &str,
+    question: &str,
+) -> String {
+    let request = if question.trim().is_empty() {
+        "请分析本轮新增的补充日志选区，结合原始日志和已有对话说明其中的异常、关联以及可由日志直接得出的结论。"
+    } else {
+        question
+    };
+    if supplemental.is_empty() {
+        format!("原始日志：\n{selected_text}\n\n已有对话：\n{context}\n\n用户请求：\n{request}")
+    } else {
+        format!(
+            "原始日志：\n{selected_text}\n\n已有对话：\n{context}\n\n本轮补充日志：\n{supplemental}\n\n用户请求：\n{request}"
+        )
+    }
+}
+
 fn history_attachments(
     attachments: &[LoadedAiAttachment],
 ) -> Vec<crate::ai_history::AiHistoryAttachment> {
@@ -1549,11 +1569,7 @@ pub async fn continue_ai_conversation(
         .map(|record| conversation_context(recent_stored_history(&record.messages)))
         .unwrap_or_else(|| conversation_context(&history));
     let supplemental = attachment_context(&attachments);
-    let input = if supplemental.is_empty() {
-        format!("原始日志：\n{selected_text}\n\n已有对话：\n{context}\n\n用户追问：\n{question}")
-    } else {
-        format!("原始日志：\n{selected_text}\n\n补充日志：\n{supplemental}\n\n已有对话：\n{context}\n\n用户追问：\n{question}")
-    };
+    let input = follow_up_input(&selected_text, &context, &supplemental, &question);
     let api_key = read_api_key(&provider.id)
         .map_err(|_| "Unable to access the API key in the system credential store".to_string())?;
     let outcome = send_ai_request(
@@ -2010,6 +2026,27 @@ mod tests {
         );
         assert!(load_ai_log_snippets(vec!["  ".into()]).is_err());
         assert!(load_ai_log_snippets(vec!["x".into(); MAX_AI_LOG_SNIPPETS + 1]).is_err());
+    }
+
+    #[test]
+    fn blank_question_with_log_snippet_builds_an_explicit_analysis_request() {
+        let snippets =
+            load_ai_log_snippets(vec!["ERROR capture failed".into()]).expect("valid log snippet");
+        let input = follow_up_input(
+            "INFO original session",
+            "user: prior question\nassistant: prior answer",
+            &attachment_context(&snippets),
+            "",
+        );
+
+        assert!(input.contains("本轮补充日志："));
+        assert!(input.contains("ERROR capture failed"));
+        assert!(input.contains("用户请求：\n请分析本轮新增的补充日志选区"));
+        assert!(!input.ends_with("用户请求：\n"));
+
+        let asked = follow_up_input("INFO original session", "", "", "具体原因？");
+        assert!(asked.ends_with("用户请求：\n具体原因？"));
+        assert!(!asked.contains("请分析本轮新增的补充日志选区"));
     }
 
     #[test]
