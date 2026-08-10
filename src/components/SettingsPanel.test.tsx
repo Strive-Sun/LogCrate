@@ -129,7 +129,7 @@ test('AI provider settings expose Responses paths and require confirmation for i
   }
 });
 
-test('AI provider test displays a string error returned by Tauri', async () => {
+test('AI provider test displays a prominent response panel for success and Tauri errors', async () => {
   const providerId = 'error-provider';
   const originalTestAiProvider = api.testAiProvider;
   await api.saveAiProvider(
@@ -145,9 +145,6 @@ test('AI provider test displays a string error returned by Tauri', async () => {
     },
     'test-key',
   );
-  api.testAiProvider = async () => {
-    throw 'AI provider returned HTTP 400';
-  };
   try {
     renderSettings();
     harness.fireEvent.click(harness.screen.getByRole('button', { name: /AI 供应商/ }));
@@ -164,8 +161,23 @@ test('AI provider test displays a string error returned by Tauri', async () => {
         .map((button) => button.textContent),
       ['编辑', '测试', '删除'],
     );
-    harness.fireEvent.click(harness.within(providerActions).getByRole('button', { name: '测试' }));
-    assert.ok(await harness.screen.findByText('AI provider returned HTTP 400'));
+    const testButton = harness.within(providerActions).getByRole('button', { name: '测试' });
+    harness.fireEvent.click(testButton);
+    const success = await harness.screen.findByRole('status');
+    assert.ok(success.classList.contains('settings-provider-response'));
+    assert.ok(success.classList.contains('is-success'));
+    assert.ok(harness.within(success).getByText('连接测试成功'));
+    assert.ok(harness.within(success).getByText('Error provider 已返回有效响应。'));
+
+    api.testAiProvider = async () => {
+      throw 'AI provider returned HTTP 400';
+    };
+    harness.fireEvent.click(testButton);
+    const failure = await harness.screen.findByText('AI provider returned HTTP 400');
+    const errorPanel = failure.closest<HTMLElement>('.settings-provider-response');
+    assert.ok(errorPanel);
+    assert.ok(errorPanel.classList.contains('is-error'));
+    assert.ok(harness.within(errorPanel).getByText('连接测试失败'));
   } finally {
     api.testAiProvider = originalTestAiProvider;
     await api.deleteAiProvider(providerId);
@@ -225,10 +237,14 @@ test('AI provider actions use a dedicated three-column row instead of the generi
   const cardRule = css.match(/\.settings-provider-card\s*\{([^}]*)\}/)?.[1] ?? '';
   const endpointRule = css.match(/\.settings-provider-endpoint\s*\{([^}]*)\}/)?.[1] ?? '';
   const actionsRule = css.match(/\.settings-provider-actions\s*\{([^}]*)\}/)?.[1] ?? '';
+  const responseRule = css.match(/\.settings-provider-response\s*\{([^}]*)\}/)?.[1] ?? '';
 
   assert.match(cardRule, /min-width:\s*0;/);
   assert.match(endpointRule, /overflow-wrap:\s*anywhere;/);
   assert.match(actionsRule, /grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\);/);
+  assert.match(responseRule, /grid-template-columns:\s*24px minmax\(0, 1fr\);/);
+  assert.match(responseRule, /padding:\s*10px 11px;/);
+  assert.match(responseRule, /border:\s*1px solid/);
 });
 
 test('disabled search entry cannot be clicked and exposes its settings hint on hover', () => {

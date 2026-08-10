@@ -66,6 +66,12 @@ function isNonLocalHttp(value: string): boolean {
   }
 }
 
+type ProviderFeedback = {
+  tone: 'info' | 'success' | 'error';
+  title: string;
+  message: string;
+};
+
 export function SettingsPanel(props: Props) {
   const { preference, setPreference, t } = useI18n();
   const busy = busyStatuses.includes(props.status);
@@ -81,14 +87,20 @@ export function SettingsPanel(props: Props) {
     allowInsecureHttp: false,
   });
   const [apiKey, setApiKey] = useState('');
-  const [providerMessage, setProviderMessage] = useState<string | null>(null);
+  const [providerFeedback, setProviderFeedback] = useState<ProviderFeedback | null>(null);
   const [providerBusy, setProviderBusy] = useState(false);
   const [providerExpanded, setProviderExpanded] = useState(false);
   useEffect(() => {
     void api
       .listAiProviders()
       .then(setProviders)
-      .catch(() => setProviderMessage('无法读取 AI 供应商配置'));
+      .catch(() =>
+        setProviderFeedback({
+          tone: 'error',
+          title: '无法读取供应商配置',
+          message: '请稍后重试或重新打开设置。',
+        }),
+      );
   }, []);
   const saveProvider = async () => {
     if (
@@ -97,11 +109,15 @@ export function SettingsPanel(props: Props) {
       !provider.model.trim() ||
       !provider.baseUrl.trim()
     ) {
-      setProviderMessage('请填写供应商名称、端点和模型');
+      setProviderFeedback({
+        tone: 'error',
+        title: '无法保存供应商',
+        message: '请填写供应商名称、端点和模型。',
+      });
       return;
     }
     setProviderBusy(true);
-    setProviderMessage(null);
+    setProviderFeedback(null);
     try {
       const saved = await api.saveAiProvider(
         {
@@ -116,9 +132,17 @@ export function SettingsPanel(props: Props) {
       setProviders((items) => [...items.filter((item) => item.id !== saved.id), saved]);
       setProvider({ ...saved });
       setApiKey('');
-      setProviderMessage('已保存（密钥存储在系统密钥链）');
+      setProviderFeedback({
+        tone: 'success',
+        title: '供应商已保存',
+        message: 'API Key 已安全存储在系统密钥链中。',
+      });
     } catch (error) {
-      setProviderMessage(errorMessage(error));
+      setProviderFeedback({
+        tone: 'error',
+        title: '保存供应商失败',
+        message: errorMessage(error),
+      });
     } finally {
       setProviderBusy(false);
     }
@@ -225,12 +249,29 @@ export function SettingsPanel(props: Props) {
                     </button>
                     <button
                       className="settings-button"
-                      onClick={() =>
+                      onClick={() => {
+                        setProviderFeedback({
+                          tone: 'info',
+                          title: '正在测试连接',
+                          message: `正在等待 ${item.name} 响应…`,
+                        });
                         void api
                           .testAiProvider(item.id)
-                          .then(() => setProviderMessage('连接成功'))
-                          .catch((error) => setProviderMessage(errorMessage(error)))
-                      }
+                          .then(() =>
+                            setProviderFeedback({
+                              tone: 'success',
+                              title: '连接测试成功',
+                              message: `${item.name} 已返回有效响应。`,
+                            }),
+                          )
+                          .catch((error) =>
+                            setProviderFeedback({
+                              tone: 'error',
+                              title: '连接测试失败',
+                              message: errorMessage(error),
+                            }),
+                          );
+                      }}
                     >
                       测试
                     </button>
@@ -412,9 +453,23 @@ export function SettingsPanel(props: Props) {
                 {providerBusy ? '保存中…' : '保存供应商'}
               </button>
             </div>
-            {providerMessage && (
-              <div className="settings-hint" role="status">
-                {providerMessage}
+            {providerFeedback && (
+              <div
+                className={`settings-provider-response is-${providerFeedback.tone}`}
+                role="status"
+                aria-live="polite"
+              >
+                <span className="settings-provider-response-icon" aria-hidden="true">
+                  {providerFeedback.tone === 'success'
+                    ? '✓'
+                    : providerFeedback.tone === 'error'
+                      ? '!'
+                      : '…'}
+                </span>
+                <div className="settings-provider-response-copy">
+                  <strong>{providerFeedback.title}</strong>
+                  <span>{providerFeedback.message}</span>
+                </div>
               </div>
             )}
           </div>

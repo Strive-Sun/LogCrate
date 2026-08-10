@@ -2779,6 +2779,57 @@ body.resizing {
   min-width: 0;
   padding-inline: 6px;
 }
+.settings-provider-response {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  margin: 10px 0 2px;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: 7px;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-panel));
+}
+.settings-provider-response-icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+.settings-provider-response-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  line-height: 1.4;
+}
+.settings-provider-response-copy strong {
+  font-size: 11px;
+}
+.settings-provider-response-copy span {
+  overflow-wrap: anywhere;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+.settings-provider-response.is-success {
+  border-color: color-mix(in srgb, #16a36a 48%, var(--border));
+  background: color-mix(in srgb, #16a36a 10%, var(--bg-panel));
+}
+.settings-provider-response.is-success .settings-provider-response-icon {
+  background: #16a36a;
+}
+.settings-provider-response.is-error {
+  border-color: color-mix(in srgb, #d33a3a 48%, var(--border));
+  background: color-mix(in srgb, #d33a3a 9%, var(--bg-panel));
+}
+.settings-provider-response.is-error .settings-provider-response-icon {
+  background: #d33a3a;
+}
 .settings-input {
   width: 100%;
   box-sizing: border-box;
