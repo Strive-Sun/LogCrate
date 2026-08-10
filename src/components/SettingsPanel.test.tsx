@@ -152,7 +152,19 @@ test('AI provider test displays a string error returned by Tauri', async () => {
     renderSettings();
     harness.fireEvent.click(harness.screen.getByRole('button', { name: /AI 供应商/ }));
     await harness.screen.findByText('Error provider');
-    harness.fireEvent.click(harness.screen.getByRole('button', { name: '测试' }));
+    const providerCard = harness.screen.getByRole('group', {
+      name: 'Error provider 供应商',
+    });
+    const providerActions = providerCard.querySelector<HTMLElement>('.settings-provider-actions');
+    assert.ok(providerActions);
+    assert.deepEqual(
+      harness
+        .within(providerActions)
+        .getAllByRole('button')
+        .map((button) => button.textContent),
+      ['编辑', '测试', '删除'],
+    );
+    harness.fireEvent.click(harness.within(providerActions).getByRole('button', { name: '测试' }));
     assert.ok(await harness.screen.findByText('AI provider returned HTTP 400'));
   } finally {
     api.testAiProvider = originalTestAiProvider;
@@ -206,6 +218,17 @@ test('settings and notification popovers stay anchored to the main top bar', () 
   assert.match(popRule, /position:\s*absolute;/);
   assert.match(bellRule, /right:\s*44px;/);
   assert.match(settingsRule, /right:\s*8px;/);
+});
+
+test('AI provider actions use a dedicated three-column row instead of the generic settings row', () => {
+  const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  const cardRule = css.match(/\.settings-provider-card\s*\{([^}]*)\}/)?.[1] ?? '';
+  const endpointRule = css.match(/\.settings-provider-endpoint\s*\{([^}]*)\}/)?.[1] ?? '';
+  const actionsRule = css.match(/\.settings-provider-actions\s*\{([^}]*)\}/)?.[1] ?? '';
+
+  assert.match(cardRule, /min-width:\s*0;/);
+  assert.match(endpointRule, /overflow-wrap:\s*anywhere;/);
+  assert.match(actionsRule, /grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\);/);
 });
 
 test('disabled search entry cannot be clicked and exposes its settings hint on hover', () => {

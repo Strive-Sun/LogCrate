@@ -189,51 +189,65 @@ export function SettingsPanel(props: Props) {
             <div className="settings-hint">
               日志仅在你确认分析后发送到所配置的第三方端点；API Key 不会写入配置文件。
             </div>
-            {providers.map((item) => (
-              <div className="settings-row" key={item.id}>
-                <div>
-                  <div className="settings-label">{item.name}</div>
-                  <div className="settings-hint">
-                    {item.baseUrl} · {item.model} ·{' '}
-                    {item.protocol === 'responses' ? 'Responses' : 'Chat Completions'} ·{' '}
-                    {item.keyConfigured ? '密钥已配置' : '未配置密钥'}
-                    {item.allowInsecureHttp ? ' · 不安全 HTTP' : ''}
+            <div className="settings-provider-list">
+              {providers.map((item) => (
+                <div
+                  className="settings-provider-card"
+                  role="group"
+                  aria-label={`${item.name} 供应商`}
+                  key={item.id}
+                >
+                  <div className="settings-provider-summary">
+                    <div className="settings-label">{item.name}</div>
+                    <div className="settings-provider-endpoint" title={item.baseUrl}>
+                      {item.baseUrl}
+                    </div>
+                    <div className="settings-provider-meta">
+                      <span>{item.model}</span>
+                      <span>
+                        {item.protocol === 'responses' ? 'Responses' : 'Chat Completions'}
+                      </span>
+                      <span className={item.keyConfigured ? 'is-ready' : 'is-missing'}>
+                        {item.keyConfigured ? '密钥已配置' : '未配置密钥'}
+                      </span>
+                      {item.allowInsecureHttp && <span className="is-warning">不安全 HTTP</span>}
+                    </div>
+                  </div>
+                  <div className="settings-provider-actions">
+                    <button
+                      className="settings-button"
+                      onClick={() => {
+                        setProvider({ ...item });
+                        setApiKey('');
+                      }}
+                    >
+                      编辑
+                    </button>
+                    <button
+                      className="settings-button"
+                      onClick={() =>
+                        void api
+                          .testAiProvider(item.id)
+                          .then(() => setProviderMessage('连接成功'))
+                          .catch((error) => setProviderMessage(errorMessage(error)))
+                      }
+                    >
+                      测试
+                    </button>
+                    <button
+                      className="settings-button danger"
+                      onClick={() =>
+                        void api
+                          .deleteAiProvider(item.id)
+                          .then(() => setProviders((all) => all.filter((p) => p.id !== item.id)))
+                      }
+                    >
+                      删除
+                    </button>
                   </div>
                 </div>
-                <span>
-                  <button
-                    className="settings-button"
-                    onClick={() => {
-                      setProvider({ ...item });
-                      setApiKey('');
-                    }}
-                  >
-                    编辑
-                  </button>{' '}
-                  <button
-                    className="settings-button"
-                    onClick={() =>
-                      void api
-                        .testAiProvider(item.id)
-                        .then(() => setProviderMessage('连接成功'))
-                        .catch((error) => setProviderMessage(errorMessage(error)))
-                    }
-                  >
-                    测试
-                  </button>{' '}
-                  <button
-                    className="settings-button"
-                    onClick={() =>
-                      void api
-                        .deleteAiProvider(item.id)
-                        .then(() => setProviders((all) => all.filter((p) => p.id !== item.id)))
-                    }
-                  >
-                    删除
-                  </button>
-                </span>
-              </div>
-            ))}
+              ))}
+            </div>
             <div className="settings-provider-form">
               <select
                 className="settings-input"

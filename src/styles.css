@@ -2722,6 +2722,63 @@ body.resizing {
   gap: 8px;
   margin-top: 10px;
 }
+.settings-provider-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.settings-provider-card {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-panel);
+}
+.settings-provider-summary {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+.settings-provider-endpoint {
+  overflow-wrap: anywhere;
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.settings-provider-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.settings-provider-meta > span {
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--fg-dim);
+  background: var(--hover);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.settings-provider-meta > .is-ready {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.settings-provider-meta > .is-missing,
+.settings-provider-meta > .is-warning {
+  color: #9b5c00;
+  background: rgb(217 154 34 / 12%);
+}
+.settings-provider-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.settings-provider-actions .settings-button {
+  min-width: 0;
+  padding-inline: 6px;
+}
 .settings-input {
   width: 100%;
   box-sizing: border-box;
@@ -4079,6 +4136,7 @@ body.resizing {
   :where(
     .file-search-settings,
     .file-search-provider,
+    .settings-provider-card,
     .log-field-filter-card,
     .log-field-settings,
     .update-card,
