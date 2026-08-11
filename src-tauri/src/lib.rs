@@ -1629,6 +1629,30 @@ pub fn run() {
                 });
                 background_trace.mark("core-state-ready");
 
+                #[cfg(desktop)]
+                if search.current_enabled {
+                    background_trace.mark("search-scheduled");
+                    let search_runtime = search.clone();
+                    let search_dir = search_dir.clone();
+                    let search_preferences = search_preferences.clone();
+                    let search_app = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let manager = tauri::async_runtime::spawn_blocking(move || {
+                            let manager = FileSearchManager::new_with_preferences(
+                                search_dir,
+                                &search_preferences,
+                            );
+                            let _ = manager.resume_or_watch(search_app);
+                            manager
+                        })
+                        .await
+                        .map_err(|error| format!("搜索模块初始化失败：{error}"));
+                        search_runtime.publish_manager(manager);
+                    });
+                } else {
+                    background_trace.mark("search-scheduled");
+                }
+
                 background_trace.mark("deferred-work-waiting");
                 let interactive = startup_handoff.wait_timeout(std::time::Duration::from_secs(30));
                 background_trace.mark(if interactive {
@@ -1654,7 +1678,7 @@ pub fn run() {
                     let _ = spawn_watch(&watch, &app_handle, &dir);
                 }
                 background_trace.mark("watchers-scheduled");
-                if search.current_enabled {
+                if false && search.current_enabled {
                     background_trace.mark("search-scheduled");
                     tauri::async_runtime::spawn(async move {
                         let manager = tauri::async_runtime::spawn_blocking(move || {

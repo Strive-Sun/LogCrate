@@ -106,7 +106,9 @@ impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             version: search_config_version(),
-            enabled: false,
+            // Local file search is a core capability.  An explicit value in an
+            // existing config still wins; this only affects first launch.
+            enabled: true,
             roots: local_fixed_roots(),
             exclusions: Vec::new(),
         }
@@ -377,10 +379,18 @@ impl FileSearchManager {
             status.error = Some(format!("Tantivy query index: {error}"));
         }
         let query_documents_at_start = query_index.as_ref().ok().map(SearchIndex::num_docs);
-        let database_state = initialize_database_with_query(
-            &data_dir.join("file-search.sqlite3"),
-            query_documents_at_start,
-        );
+        let database_path = data_dir.join("file-search.sqlite3");
+        let database_state =
+            initialize_database_with_query(&database_path, query_documents_at_start).or_else(
+                |error| {
+                    if is_database_corruption(&error) {
+                        quarantine_database(&database_path)?;
+                        initialize_database_with_query(&database_path, None)
+                    } else {
+                        Err(error)
+                    }
+                },
+            );
         let manager = Arc::new(Self {
             db_path: data_dir.join("file-search.sqlite3"),
             config_path,
@@ -1601,6 +1611,33 @@ impl FileSearchManager {
             }
         });
     }
+}
+
+fn is_database_corruption(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("database disk image is malformed")
+        || message.contains("database corruption")
+        || message.contains("malformed database")
+}
+
+fn quarantine_database(path: &Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let suffix = system_time_ms(SystemTime::now()).unwrap_or(0);
+    let base = path.with_extension(format!("sqlite3.corrupt-{suffix}"));
+    fs::rename(path, &base)?;
+    for extension in ["sqlite3-wal", "sqlite3-shm"] {
+        let sidecar = path.with_file_name(format!("file-search.{extension}"));
+        if sidecar.exists() {
+            let target = sidecar.with_file_name(format!(
+                "{}.corrupt-{suffix}",
+                sidecar.file_name().unwrap().to_string_lossy()
+            ));
+            let _ = fs::rename(sidecar, target);
+        }
+    }
+    Ok(())
 }
 
 fn search_query_index(
@@ -3988,14 +4025,14 @@ mod tests {
     }
 
     #[test]
-    fn search_feature_defaults_to_disabled() {
+    fn search_feature_defaults_to_enabled() {
         let config = SearchConfig::default();
-        assert!(!config.enabled);
+        assert!(config.enabled);
         assert_eq!(config.version, search_config_version());
     }
 
     #[test]
-    fn invalid_search_config_safely_falls_back_to_disabled() {
+    fn invalid_search_config_safely_falls_back_to_enabled() {
         let directory = test_directory("invalid-config");
         fs::write(directory.join("file-search.json"), b"not-json").unwrap();
         let preferences = SearchPreferenceStore::new(directory.clone());
@@ -4003,9 +4040,24 @@ mod tests {
             preferences.feature_state(false),
             SearchFeatureState {
                 current_enabled: false,
-                next_launch_enabled: false,
+                next_launch_enabled: true,
             }
         );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn corrupted_database_is_quarantined_for_rebuild() {
+        let directory = test_directory("quarantine-database");
+        let database = directory.join("file-search.sqlite3");
+        fs::write(&database, b"corrupt").unwrap();
+        fs::write(directory.join("file-search.sqlite3-wal"), b"wal").unwrap();
+        quarantine_database(&database).unwrap();
+        assert!(!database.exists());
+        assert!(fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains("corrupt-")));
         let _ = fs::remove_dir_all(directory);
     }
 
