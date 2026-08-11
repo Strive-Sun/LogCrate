@@ -1382,6 +1382,10 @@ impl FileSearchManager {
             let recovery = (|| -> anyhow::Result<()> {
                 self.stop_watcher();
                 quarantine_database(&self.db_path)?;
+                // A quarantined database leaves no schema behind. The rebuild
+                // path assumes metadata/files already exist, so recreate the
+                // empty persistent store before scheduling the scan.
+                initialize_database_with_query(&self.db_path, None)?;
                 self.query_index_ready.store(false, Ordering::Release);
                 if self.clear_query_index().is_err() {
                     if self.query_index_path.exists() {
@@ -1644,6 +1648,7 @@ fn is_database_corruption(error: &anyhow::Error) -> bool {
     message.contains("database disk image is malformed")
         || message.contains("database corruption")
         || message.contains("malformed database")
+        || message.contains("no such table: metadata")
 }
 
 fn quarantine_database(path: &Path) -> anyhow::Result<()> {
@@ -4084,6 +4089,18 @@ mod tests {
             .unwrap()
             .filter_map(Result::ok)
             .any(|entry| entry.file_name().to_string_lossy().contains("corrupt-")));
+        initialize_database_with_query(&database, None).unwrap();
+        let connection = open_database(&database).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key = 'schema_version'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            SCHEMA_VERSION
+        );
         let _ = fs::remove_dir_all(directory);
     }
 
