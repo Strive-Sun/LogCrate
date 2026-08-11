@@ -72,6 +72,7 @@ import {
   markMacOsFileAccessOnboardingSeen,
   shouldShowMacOsFileAccessOnboarding,
 } from './util/macOsFileAccess';
+import { resizeMainWorkspaceFromWindowEdge, type WindowGeometry } from './util/aiWorkspaceResize';
 
 function flattenNodes(nodes: readonly TreeNode[]): TreeNode[] {
   return nodes.flatMap((node) => [node, ...flattenNodes(node.children ?? [])]);
@@ -135,6 +136,7 @@ export function App() {
   const [mainWorkspaceWidth, setMainWorkspaceWidth] = useState<number | null>(null);
   const [aiWorkspaceHost, setAiWorkspaceHost] = useState<HTMLDivElement | null>(null);
   const aiWindowTransition = useRef(false);
+  const aiWindowGeometry = useRef<WindowGeometry | null>(null);
   const [uiTemplate, setUiTemplate] = useState(() => loadUiTemplate(localStorage));
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [fileSearchMounted, setFileSearchMounted] = useState(false);
@@ -1222,6 +1224,27 @@ export function App() {
   );
 
   const hasDirs = tree.length > 0;
+
+  useEffect(() => {
+    if (!aiOpen || mainWorkspaceWidth === null) {
+      aiWindowGeometry.current = null;
+      return;
+    }
+
+    aiWindowGeometry.current = { screenX: window.screenX, innerWidth: window.innerWidth };
+    const onWindowResize = () => {
+      const current = { screenX: window.screenX, innerWidth: window.innerWidth };
+      const previous = aiWindowGeometry.current;
+      aiWindowGeometry.current = current;
+      if (!previous) return;
+      setMainWorkspaceWidth((width) =>
+        width === null ? null : resizeMainWorkspaceFromWindowEdge(previous, current, width),
+      );
+    };
+
+    window.addEventListener('resize', onWindowResize);
+    return () => window.removeEventListener('resize', onWindowResize);
+  }, [aiOpen, mainWorkspaceWidth]);
 
   const openAiWorkspace = useCallback(async () => {
     if (aiOpen || aiWindowTransition.current) return;
