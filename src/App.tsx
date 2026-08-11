@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
+import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window';
 import { api, isTauri } from './api';
 import { whenStartupInteractive } from './startup';
 import type {
@@ -72,7 +73,10 @@ import {
   markMacOsFileAccessOnboardingSeen,
   shouldShowMacOsFileAccessOnboarding,
 } from './util/macOsFileAccess';
-import { resizeMainWorkspaceFromWindowEdge, type WindowGeometry } from './util/aiWorkspaceResize';
+import {
+  observeAiWorkspaceWindow,
+  resizeMainWorkspaceFromWindowEdge,
+} from './util/aiWorkspaceResize';
 
 function flattenNodes(nodes: readonly TreeNode[]): TreeNode[] {
   return nodes.flatMap((node) => [node, ...flattenNodes(node.children ?? [])]);
@@ -136,7 +140,6 @@ export function App() {
   const [mainWorkspaceWidth, setMainWorkspaceWidth] = useState<number | null>(null);
   const [aiWorkspaceHost, setAiWorkspaceHost] = useState<HTMLDivElement | null>(null);
   const aiWindowTransition = useRef(false);
-  const aiWindowGeometry = useRef<WindowGeometry | null>(null);
   const [uiTemplate, setUiTemplate] = useState(() => loadUiTemplate(localStorage));
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [fileSearchMounted, setFileSearchMounted] = useState(false);
@@ -1226,25 +1229,33 @@ export function App() {
   const hasDirs = tree.length > 0;
 
   useEffect(() => {
-    if (!aiOpen || mainWorkspaceWidth === null) {
-      aiWindowGeometry.current = null;
-      return;
-    }
+    if (!aiOpen || !isTauri) return;
+    let stopped = false;
+    let stopObserving: (() => void) | null = null;
 
-    aiWindowGeometry.current = { screenX: window.screenX, innerWidth: window.innerWidth };
-    const onWindowResize = () => {
-      const current = { screenX: window.screenX, innerWidth: window.innerWidth };
-      const previous = aiWindowGeometry.current;
-      aiWindowGeometry.current = current;
-      if (!previous) return;
-      setMainWorkspaceWidth((width) =>
-        width === null ? null : resizeMainWorkspaceFromWindowEdge(previous, current, width),
-      );
+    void observeAiWorkspaceWindow(
+      getCurrentWindow(),
+      cursorPosition,
+      (previous, current, resizeEdge) => {
+        setMainWorkspaceWidth((width) =>
+          width === null
+            ? null
+            : resizeMainWorkspaceFromWindowEdge(previous, current, width, resizeEdge),
+        );
+      },
+    ).then(
+      (stop) => {
+        if (stopped) stop();
+        else stopObserving = stop;
+      },
+      () => undefined,
+    );
+
+    return () => {
+      stopped = true;
+      stopObserving?.();
     };
-
-    window.addEventListener('resize', onWindowResize);
-    return () => window.removeEventListener('resize', onWindowResize);
-  }, [aiOpen, mainWorkspaceWidth]);
+  }, [aiOpen]);
 
   const openAiWorkspace = useCallback(async () => {
     if (aiOpen || aiWindowTransition.current) return;
