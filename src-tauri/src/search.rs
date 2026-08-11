@@ -340,6 +340,7 @@ pub struct FileSearchManager {
     query_index_bulk: AtomicBool,
     query_index_staged: AtomicBool,
     persistence_recovery: AtomicBool,
+    corruption_recovery: AtomicBool,
     operation: Mutex<()>,
     operation_snapshot: Mutex<Option<IndexOperationSnapshot>>,
     active_queries: AtomicU64,
@@ -408,6 +409,7 @@ impl FileSearchManager {
             query_index_bulk: AtomicBool::new(false),
             query_index_staged: AtomicBool::new(false),
             persistence_recovery: AtomicBool::new(false),
+            corruption_recovery: AtomicBool::new(false),
             operation: Mutex::new(()),
             operation_snapshot: Mutex::new(None),
             active_queries: AtomicU64::new(0),
@@ -588,6 +590,7 @@ impl FileSearchManager {
                         status.phase = "ready".into();
                         status.error = None;
                     }
+                    manager.corruption_recovery.store(false, Ordering::Release);
                     if let Some(snapshot) = manager.operation_snapshot.lock().unwrap().as_mut() {
                         let now = system_time_ms(SystemTime::now()).unwrap_or(0);
                         snapshot.query_ready_ms = Some(now);
@@ -1362,13 +1365,36 @@ impl FileSearchManager {
     }
 
     fn finish_with_error<S: SearchStatusSink>(
-        &self,
+        self: &Arc<Self>,
         app: &S,
         generation: u64,
         error: anyhow::Error,
     ) {
         if self.is_cancelled(generation) {
             return;
+        }
+        if is_database_corruption(&error)
+            && self
+                .corruption_recovery
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            let recovery = (|| -> anyhow::Result<()> {
+                self.stop_watcher();
+                quarantine_database(&self.db_path)?;
+                self.query_index_ready.store(false, Ordering::Release);
+                if self.clear_query_index().is_err() {
+                    if self.query_index_path.exists() {
+                        fs::remove_dir_all(&self.query_index_path)?;
+                    }
+                    *self.query_index.lock().unwrap() = None;
+                }
+                self.start(app.clone(), true)?;
+                Ok(())
+            })();
+            if recovery.is_ok() {
+                return;
+            }
         }
         let diagnostic = self.operation_diagnostic_context();
         let error_message = format!("{error}; {diagnostic}");
