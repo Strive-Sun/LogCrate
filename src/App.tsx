@@ -224,7 +224,7 @@ export function App() {
   );
 
   // 后缀筛选
-  const [filter, setFilter] = useState<string[]>(['.log', '.txt', '.out']);
+  const [filter, setFilter] = useState<string[]>(['.log', '.txt', '.out', '.docx']);
   const [showAll, setShowAll] = useState(false);
   // 用户一旦本地修改筛选,忽略启动时异步返回的旧配置,避免覆盖新值
   const filterEdited = useRef(false);

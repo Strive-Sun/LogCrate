@@ -145,7 +145,7 @@ export function TopBar(props: Props) {
                   setBellOpen(false);
                 }}
               >
-                <span>{it.kind === 'archive' ? '📦' : '📄'}</span>
+                <span>{it.kind === 'archive' ? '📦' : it.kind === 'document' ? '📝' : '📄'}</span>
                 <span>{it.name}</span>
                 <span className="src">
                   {it.source}/ {it.age}

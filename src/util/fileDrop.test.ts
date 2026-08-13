@@ -64,6 +64,24 @@ test('covered plain text opens and locates without another monitoring addition',
   );
 });
 
+test('DOCX is located as a document leaf without opening a log session', () => {
+  assert.deepEqual(
+    planFileDrop({
+      path: 'D:\\docs\\report.docx',
+      name: 'report.docx',
+      kind: 'document',
+      watchPath: 'D:\\docs',
+      isLog: false,
+      alreadyMonitored: false,
+    }),
+    {
+      openPath: null,
+      watchPathToAdd: 'D:\\docs',
+      locateInTree: true,
+    },
+  );
+});
+
 test('arbitrary files add their parent without opening and folders add themselves', () => {
   assert.deepEqual(
     planFileDrop({

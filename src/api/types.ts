@@ -143,7 +143,7 @@ export interface LogFieldSearchView {
 }
 
 /** 监控目录树中的节点类型 */
-export type NodeKind = 'dir' | 'archive' | 'file';
+export type NodeKind = 'dir' | 'archive' | 'document' | 'file';
 
 /** 目录树节点 */
 export interface TreeNode {
@@ -182,7 +182,7 @@ export interface MacOsSystemSettingsResult {
 export interface NewLogItem {
   id: string;
   name: string;
-  kind: 'archive' | 'file';
+  kind: 'archive' | 'document' | 'file';
   /** 来源目录短名 */
   source: string;
   /** 到达距今(如 "2m") */
@@ -241,7 +241,7 @@ export interface SnapshotExportResult {
 export interface DetectedItem {
   path: string;
   name: string;
-  kind: 'archive' | 'file';
+  kind: 'archive' | 'document' | 'file';
   size: number;
   source: string;
 }
@@ -250,7 +250,7 @@ export interface DetectedItem {
 export interface DroppedFileInfo {
   path: string;
   name: string;
-  kind: 'directory' | 'archive' | 'file';
+  kind: 'directory' | 'archive' | 'document' | 'file';
   watchPath: string;
   isLog: boolean;
   alreadyMonitored: boolean;

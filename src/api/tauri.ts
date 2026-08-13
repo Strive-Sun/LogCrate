@@ -90,7 +90,7 @@ const logFieldListenerReady = hasTauriBridge
 interface RawChild {
   id: string;
   name: string;
-  kind: 'dir' | 'archive' | 'file';
+  kind: 'dir' | 'archive' | 'document' | 'file';
   path: string;
   size: number;
   isLog: boolean;

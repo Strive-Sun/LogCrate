@@ -1,7 +1,7 @@
 //! Bounded DOCX/WordprocessingML validation and block parsing.
 //!
-//! This module deliberately does not participate in the central archive registry yet. Task 1.1
-//! establishes the parser and its security boundary; classification is wired in by task 1.2.
+//! The central format registry uses the bounded package validation here to distinguish DOCX
+//! documents from ordinary ZIP archives without parsing the main document body.
 
 use super::{ensure_scan_time, is_safe_entry_name, ArchiveLimits};
 use anyhow::{anyhow, bail, Context};

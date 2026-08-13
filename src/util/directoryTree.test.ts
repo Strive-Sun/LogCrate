@@ -193,4 +193,17 @@ describe('目录树增量同步', () => {
     assert.equal(isActiveTreeNode(source, null, null), false);
     assert.equal(isActiveTreeNode(archive, null, archive.id), true);
   });
+
+  it('DOCX 文档叶子遵守后缀筛选并可作为当前定位项', () => {
+    const document: TreeNode = {
+      id: 'D:\\docs\\report.docx',
+      path: 'D:\\docs\\report.docx',
+      name: 'report.docx',
+      kind: 'document',
+      isLog: false,
+    };
+    assert.equal(passesDirectoryFilter(document, ['.docx'], false), true);
+    assert.equal(passesDirectoryFilter(document, ['.log'], false), false);
+    assert.equal(isActiveTreeNode(document, null, document.id), true);
+  });
 });

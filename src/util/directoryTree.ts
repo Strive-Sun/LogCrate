@@ -180,5 +180,8 @@ export function isActiveTreeNode(
   if (node.kind === 'file') {
     return activeKey !== null && sameFilePath(path, activeKey);
   }
+  if (node.kind === 'document') {
+    return selectedArchive !== null && sameFilePath(path, selectedArchive);
+  }
   return false;
 }

@@ -359,7 +359,7 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
     );
   }
 
-  // 裸文本文件:叶子节点
+  // 文档与裸文本文件均为叶子节点；DOCX 会话在任务 1.3 接入。
   return (
     <div
       ref={rowRef}
@@ -370,12 +370,20 @@ function TreeItem(props: Props & { node: TreeNode; depth: number }) {
         (unread ? ' new-file' : '')
       }
       style={pad}
-      onClick={() => props.onOpenFile(node.path ?? node.name, unread ? node.id : undefined)}
+      onClick={() => {
+        if (node.kind === 'document') {
+          props.onSelectArchive(node.id, unread ? node.id : undefined);
+          return;
+        }
+        props.onOpenFile(node.path ?? node.name, unread ? node.id : undefined);
+      }}
       onContextMenu={(e) => tree?.openMenu(e, node)}
     >
       <span className="twisty" />
-      <span className="ico">{node.isLog === false ? '⬡' : '📄'}</span>
-      {renderLabel(node.isLog === false ? ' notlog' : '')}
+      <span className="ico">
+        {node.kind === 'document' ? '📝' : node.isLog === false ? '⬡' : '📄'}
+      </span>
+      {renderLabel(node.kind === 'document' || node.isLog !== false ? '' : ' notlog')}
       {unread && !renaming && <span className="dot-unread" />}
     </div>
   );

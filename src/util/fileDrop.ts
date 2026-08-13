@@ -17,6 +17,6 @@ export function planFileDrop(info: DroppedFileInfo): FileDropPlan {
   return {
     openPath: info.isLog ? info.path : null,
     watchPathToAdd: info.alreadyMonitored ? null : info.watchPath,
-    locateInTree: info.kind === 'archive' || info.isLog,
+    locateInTree: info.kind === 'archive' || info.kind === 'document' || info.isLog,
   };
 }

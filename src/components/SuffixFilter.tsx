@@ -8,7 +8,7 @@ interface Props {
   onShowAllChange: (v: boolean) => void;
 }
 
-const SUFFIX_CHOICES = ['.log', '.txt', '.out', '.json'];
+const SUFFIX_CHOICES = ['.log', '.txt', '.out', '.json', '.docx'];
 
 export function SuffixFilter(props: Props) {
   const { t } = useI18n();

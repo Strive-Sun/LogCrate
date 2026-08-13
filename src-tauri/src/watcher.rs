@@ -1,6 +1,9 @@
 //! 目录监控:多目录 notify + 大小稳定检测 + 类型判定 + 配置持久化。
 
-use crate::archive::{is_archive, is_archive_name, is_log_name};
+use crate::archive::{
+    detect_format, is_archive_name, is_document_name, is_log_name, is_unsupported_word_name,
+    ArchiveFormat,
+};
 use crate::macos_file_access::{MacOsFileAccess, WatchAccessStatus};
 use notify::event::{ModifyKind, RenameMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -24,7 +27,7 @@ const STABLE_WORKER_COUNT: usize = 2;
 pub struct DetectedItem {
     pub path: String,
     pub name: String,
-    pub kind: String, // "dir" | "archive" | "file"
+    pub kind: String, // "dir" | "archive" | "document" | "file"
     pub size: u64,
     pub source: String,
     pub is_log: bool,
@@ -102,7 +105,7 @@ fn default_config_version() -> u32 {
 }
 
 fn default_suffixes() -> Vec<String> {
-    vec![".log".into(), ".txt".into(), ".out".into()]
+    vec![".log".into(), ".txt".into(), ".out".into(), ".docx".into()]
 }
 
 pub struct WatchState {
@@ -294,6 +297,7 @@ fn is_arrival_candidate(config: &WatchConfig, path: &Path) -> bool {
     };
     let lower = name.to_lowercase();
     is_archive_name(&lower)
+        || is_document_name(&lower)
         || config
             .suffixes
             .iter()
@@ -680,7 +684,7 @@ impl WatchState {
         }
         std::fs::File::open(&canonical).map_err(|_| anyhow::anyhow!("文件不可读: {path}"))?;
 
-        let detected = classify(&canonical, "drop");
+        let detected = classify_result(&canonical, "drop")?;
         let kind = detected
             .as_ref()
             .map(|item| item.kind.clone())
@@ -1277,7 +1281,16 @@ fn stable_detect(path: &Path, source: &str) -> Option<DetectedItem> {
             last = cur;
         }
     }
-    classify(path, source)
+    match classify_result(path, source) {
+        Ok(item) => item,
+        Err(error) => {
+            eprintln!(
+                "arrival format validation failed for {}: {error:#}",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
 /// 目录树库存包含全部顶层普通文件；日志分类只影响展示样式与可打开性。
@@ -1299,13 +1312,22 @@ fn inventory_item(path: &Path, source: &str) -> Option<DetectedItem> {
     let name = path.file_name()?.to_str()?.to_string();
     let size = std::fs::metadata(path).ok()?.len();
     let path_str = path.to_str()?.to_string();
-    let archive = is_archive(path).unwrap_or(false);
+    let format = detect_format(path).ok();
+    let archive = format.is_some_and(ArchiveFormat::is_archive);
+    let document = format.is_some_and(ArchiveFormat::is_document);
     // 库存扫描不采样未知文件内容；稳定检测会异步补全其文本分类。
     let is_log = archive || is_log_name(&name);
     Some(DetectedItem {
         path: path_str,
         name,
-        kind: if archive { "archive" } else { "file" }.into(),
+        kind: if archive {
+            "archive"
+        } else if document {
+            "document"
+        } else {
+            "file"
+        }
+        .into(),
         size,
         source: source.to_string(),
         is_log,
@@ -1313,34 +1335,65 @@ fn inventory_item(path: &Path, source: &str) -> Option<DetectedItem> {
 }
 
 /// 类型判定:受支持归档 / 裸文本日志 / 其余忽略
+#[cfg(test)]
 fn classify(path: &Path, source: &str) -> Option<DetectedItem> {
-    let name = path.file_name()?.to_str()?.to_string();
-    let size = std::fs::metadata(path).ok()?.len();
-    let path_str = path.to_str()?.to_string();
+    classify_result(path, source).ok().flatten()
+}
 
-    if is_archive(path).unwrap_or(false) {
-        return Some(DetectedItem {
+fn classify_result(path: &Path, source: &str) -> anyhow::Result<Option<DetectedItem>> {
+    let Some(name) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+    else {
+        return Ok(None);
+    };
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Ok(None);
+    };
+    let Some(path_str) = path.to_str().map(str::to_string) else {
+        return Ok(None);
+    };
+    let size = metadata.len();
+
+    if is_unsupported_word_name(&name) {
+        anyhow::bail!("旧版 .doc 文档暂不支持预览");
+    }
+
+    let format = detect_format(path)?;
+    if format.is_document() {
+        return Ok(Some(DetectedItem {
+            path: path_str,
+            name,
+            kind: "document".into(),
+            size,
+            source: source.to_string(),
+            is_log: false,
+        }));
+    }
+    if format.is_archive() {
+        return Ok(Some(DetectedItem {
             path: path_str,
             name,
             kind: "archive".into(),
             size,
             source: source.to_string(),
             is_log: true,
-        });
+        }));
     }
     // 裸文本:扩展名或内容采样
     let is_text = is_log_name(&name) || sample_text(path);
     if is_text {
-        return Some(DetectedItem {
+        return Ok(Some(DetectedItem {
             path: path_str,
             name,
             kind: "file".into(),
             size,
             source: source.to_string(),
             is_log: true,
-        });
+        }));
     }
-    None
+    Ok(None)
 }
 
 fn sample_text(path: &Path) -> bool {
@@ -1363,7 +1416,9 @@ fn load_config(path: &Path) -> anyhow::Result<WatchConfig> {
 mod tests {
     use super::*;
     use notify::event::{CreateKind, DataChange, RemoveKind};
+    use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use zip::write::SimpleFileOptions;
 
     static DIR_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -1395,6 +1450,31 @@ mod tests {
         }
     }
 
+    fn write_minimal_docx(path: &Path) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, content) in [
+            (
+                "[Content_Types].xml",
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            (
+                "word/document.xml",
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>preview</w:t></w:r></w:p></w:body></w:document>"#,
+            ),
+        ] {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(content.as_bytes()).unwrap();
+        }
+        archive.finish().unwrap();
+    }
+
     fn item(name: &str, kind: &str) -> DetectedItem {
         DetectedItem {
             path: name.to_string(),
@@ -1418,6 +1498,31 @@ mod tests {
         assert_eq!(classify(&log, "test").unwrap().kind, "file");
         assert_eq!(classify(&sampled, "test").unwrap().kind, "file");
         assert!(classify(&binary, "test").is_none());
+    }
+
+    #[test]
+    fn docx_is_a_document_leaf_and_invalid_word_files_never_become_logs() {
+        let fixture = FixtureDir::new();
+        let valid = fixture.path.join("report.docx");
+        write_minimal_docx(&valid);
+        let invalid = fixture.write("forged.docx", b"PK\x03\x04not an OPC package");
+        let legacy = fixture.write("legacy.doc", b"plain-looking legacy content");
+
+        let inventory = inventory_item(&valid, "docs").unwrap();
+        assert_eq!(inventory.kind, "document");
+        assert!(!inventory.is_log);
+        let arrival = classify(&valid, "docs").unwrap();
+        assert_eq!(arrival.kind, "document");
+        assert!(!arrival.is_log);
+
+        assert_eq!(inventory_item(&invalid, "docs").unwrap().kind, "file");
+        assert!(classify(&invalid, "docs").is_none());
+        assert!(!inventory_item(&legacy, "docs").unwrap().is_log);
+        assert!(classify(&legacy, "docs").is_none());
+        assert!(classify_result(&legacy, "drop")
+            .unwrap_err()
+            .to_string()
+            .contains(".doc"));
     }
 
     #[test]
@@ -1461,6 +1566,35 @@ mod tests {
         assert_eq!(directory_info.kind, "directory");
         assert_eq!(directory_info.path, directory_info.watch_path);
         assert!(!directory_info.is_log);
+    }
+
+    #[test]
+    fn dropped_docx_is_locatable_without_becoming_a_log_session() {
+        let fixture = FixtureDir::new();
+        let state = WatchState::new(fixture.path.join("config.json"));
+        let docx = fixture.path.join("report.docx");
+        write_minimal_docx(&docx);
+
+        let info = state.inspect_dropped_file(docx.to_str().unwrap()).unwrap();
+        assert_eq!(info.kind, "document");
+        assert!(!info.is_log);
+        assert_eq!(
+            Path::new(&info.watch_path),
+            user_facing_path(&std::fs::canonicalize(&fixture.path).unwrap())
+        );
+
+        let invalid = fixture.write("forged.docx", b"PK\x03\x04not an OPC package");
+        assert!(state
+            .inspect_dropped_file(invalid.to_str().unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("DOCX"));
+        let legacy = fixture.write("legacy.doc", b"plain-looking legacy content");
+        assert!(state
+            .inspect_dropped_file(legacy.to_str().unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains(".doc"));
     }
 
     #[test]
@@ -1748,6 +1882,7 @@ mod tests {
         let zip = fixture.write("bundle.ZIP", b"PK\x03\x04");
         let log = fixture.write("server.LOG", b"log");
         let binary = fixture.write("image.bin", &[0, 1, 2]);
+        let docx = fixture.write("report.DOCX", b"candidate");
         let mut config = WatchConfig {
             suffixes: vec![".log".into()],
             ..WatchConfig::default()
@@ -1755,6 +1890,7 @@ mod tests {
 
         assert!(is_arrival_candidate(&config, &zip));
         assert!(is_arrival_candidate(&config, &log));
+        assert!(is_arrival_candidate(&config, &docx));
         assert!(!is_arrival_candidate(&config, &binary));
         config.show_all = true;
         assert!(is_arrival_candidate(&config, &binary));
@@ -2086,6 +2222,10 @@ mod tests {
         assert!(state.should_notify(&item("notes.txt", "file")));
         assert!(!state.should_notify(&item("trace.out", "file")));
         assert!(state.should_notify(&item("bundle.zip", "archive")));
+        assert!(!state.should_notify(&item("report.docx", "document")));
+
+        state.set_filter(vec![".docx".into()], false);
+        assert!(state.should_notify(&item("REPORT.DOCX", "document")));
 
         state.set_filter(vec![], true);
         assert!(state.should_notify(&item("anything.bin", "file")));

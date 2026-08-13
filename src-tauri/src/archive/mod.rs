@@ -3,8 +3,9 @@
 //! `open_entry()` 返回可流式读取的解压流。
 
 mod channel_reader;
-// Task 1.1 deliberately lands the parser before task 1.2 wires format detection.
-// Remove this temporary allowance when the registry starts constructing DocxDocument.
+// Task 1.2 uses DOCX package validation for classification. Block parsing and image metadata are
+// intentionally dormant until task 1.3 wires the dedicated preview session; remove this scoped
+// allowance when that production call path lands.
 #[allow(dead_code)]
 pub mod docx;
 mod plain;
@@ -202,6 +203,7 @@ pub(crate) fn ensure_scan_time(started: Instant, limits: ArchiveLimits) -> anyho
 /// inventory, drag-and-drop and arrival notifications.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveFormat {
+    Docx,
     Zip,
     SevenZip,
     Rar,
@@ -221,6 +223,7 @@ impl ArchiveFormat {
     #[allow(dead_code)]
     pub fn canonical_name(self) -> &'static str {
         match self {
+            Self::Docx => "DOCX",
             Self::Zip => "ZIP",
             Self::SevenZip => "7z",
             Self::Rar => "RAR",
@@ -238,7 +241,11 @@ impl ArchiveFormat {
     }
 
     pub fn is_archive(self) -> bool {
-        !matches!(self, Self::Plain)
+        !matches!(self, Self::Docx | Self::Plain)
+    }
+
+    pub fn is_document(self) -> bool {
+        matches!(self, Self::Docx)
     }
 }
 
@@ -328,6 +335,7 @@ pub fn open_archive_with_limits(
     }
     let started = Instant::now();
     let reader: Box<dyn ArchiveReader> = match detect_format(path)? {
+        ArchiveFormat::Docx => anyhow::bail!("DOCX 文档需要使用专用预览会话"),
         ArchiveFormat::Zip => Box::new(ZipArchiveReader::open_with_limits(path, limits)?),
         ArchiveFormat::SevenZip => Box::new(SevenZipArchiveReader::open_with_limits(path, limits)?),
         ArchiveFormat::Rar => Box::new(RarArchiveReader::open_with_limits(path, limits)?),
@@ -373,8 +381,18 @@ pub fn open_archive_with_limits(
     Ok(reader)
 }
 
-pub fn is_archive(path: &Path) -> anyhow::Result<bool> {
-    Ok(detect_format(path)?.is_archive())
+pub fn is_document_name(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("docx"))
+}
+
+pub fn is_unsupported_word_name(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("doc"))
 }
 
 pub fn is_archive_name(name: &str) -> bool {
@@ -408,6 +426,10 @@ fn format_from_name(name: &str) -> Option<ArchiveFormat> {
 }
 
 pub fn detect_format(path: &Path) -> anyhow::Result<ArchiveFormat> {
+    if is_document_name(path.to_string_lossy().as_ref()) {
+        docx::DocxDocument::open(path)?;
+        return Ok(ArchiveFormat::Docx);
+    }
     let mut file = File::open(path)?;
     let mut head = [0u8; 512];
     let count = file.read(&mut head)?;
@@ -560,6 +582,7 @@ mod format_tests {
     use super::*;
     use std::io::{Read, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use zip::write::SimpleFileOptions;
 
     static FIXTURE_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -585,6 +608,31 @@ mod format_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn write_minimal_docx(path: &Path) {
+        let file = File::create(path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, content) in [
+            (
+                "[Content_Types].xml",
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            (
+                "word/document.xml",
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>preview</w:t></w:r></w:p></w:body></w:document>"#,
+            ),
+        ] {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(content.as_bytes()).unwrap();
+        }
+        archive.finish().unwrap();
     }
 
     fn tar_bytes() -> Vec<u8> {
@@ -669,6 +717,33 @@ mod format_tests {
         assert!(!is_archive_name("archive.zip.txt"));
         assert!(!is_safe_entry_name("../outside.log", 4096));
         assert!(!is_safe_entry_name("C:\\outside.log", 4096));
+    }
+
+    #[test]
+    fn docx_suffix_requires_valid_opc_and_does_not_change_plain_zip_detection() {
+        let fixture = FixtureDir::new();
+        let docx = fixture.path("report.DOCX");
+        write_minimal_docx(&docx);
+        assert_eq!(detect_format(&docx).unwrap(), ArchiveFormat::Docx);
+        assert!(!detect_format(&docx).unwrap().is_archive());
+        assert!(detect_format(&docx).unwrap().is_document());
+        let error = match open_archive(&docx) {
+            Ok(_) => panic!("DOCX must not use the archive reader"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("专用预览会话"));
+
+        let same_container = fixture.path("report.zip");
+        write_minimal_docx(&same_container);
+        assert_eq!(detect_format(&same_container).unwrap(), ArchiveFormat::Zip);
+        assert!(detect_format(&same_container).unwrap().is_archive());
+
+        let forged = fixture.path("forged.docx");
+        std::fs::write(&forged, b"PK\x03\x04ordinary zip bytes").unwrap();
+        assert!(detect_format(&forged).is_err());
+        assert!(!is_archive_name("report.docx"));
+        assert!(is_document_name("report.DOCX"));
+        assert!(is_unsupported_word_name("legacy.Doc"));
     }
 
     #[test]
