@@ -32,6 +32,8 @@ import type {
   EncodingProgress,
   IndexProgress,
   LogLine,
+  OpenDocxSessionResult,
+  DocxPreviewBlock,
   LogFieldAnchorResult,
   LogFieldFilterRequest,
   LogFieldLayoutAnalysis,
@@ -367,6 +369,34 @@ export const tauriApi = {
     } finally {
       releaseQueue();
     }
+  },
+
+  async openDocxSession(path: string, requestId: string): Promise<OpenDocxSessionResult> {
+    const result = await invoke<Omit<OpenDocxSessionResult, 'kind'>>('open_docx_session', {
+      path,
+      requestId,
+    });
+    return { ...result, kind: 'docx' };
+  },
+
+  async cancelOpenDocxSession(requestId: string): Promise<void> {
+    await invoke('cancel_open_docx_session', { requestId });
+  },
+
+  async readDocxBlocks(
+    sessionId: string,
+    start: number,
+    count: number,
+  ): Promise<DocxPreviewBlock[]> {
+    return invoke<DocxPreviewBlock[]>('read_docx_blocks', { sessionId, start, count });
+  },
+
+  async readDocxImage(sessionId: string, imageId: string): Promise<Uint8Array> {
+    return new Uint8Array(await invoke<ArrayBuffer>('read_docx_image', { sessionId, imageId }));
+  },
+
+  async closeDocxSession(sessionId: string): Promise<void> {
+    await invoke('close_docx_session', { sessionId });
   },
 
   async closeLogSession(entryKey: string, expectedSessionId?: string): Promise<void> {

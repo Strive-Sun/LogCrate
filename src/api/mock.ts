@@ -575,6 +575,29 @@ export const mockApi = {
     };
   },
 
+  async openDocxSession(path: string, _requestId: string) {
+    return {
+      kind: 'docx' as const,
+      sessionId: `docx:${path}`,
+      sourcePath: path,
+      title: path.split(/[/\\]/).pop() ?? path,
+      blockCount: 0,
+      evictedSessionIds: [],
+    };
+  },
+
+  async cancelOpenDocxSession(_requestId: string) {},
+
+  async readDocxBlocks() {
+    return [];
+  },
+
+  async readDocxImage() {
+    return new Uint8Array();
+  },
+
+  async closeDocxSession() {},
+
   async closeLogSession(entryKey: string, _expectedSessionId?: string): Promise<void> {
     mockLogFieldStatus.delete(entryKey);
     mockLogFieldSubscribers.delete(entryKey);

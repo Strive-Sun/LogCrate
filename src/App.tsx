@@ -12,6 +12,7 @@ import type {
   MacOsFileAccessCapabilities,
   NewLogItem,
   OpenSessionResult,
+  OpenDocxSessionResult,
   TreeNode,
 } from './api';
 import { TopBar } from './components/TopBar';
@@ -93,7 +94,7 @@ interface ConfirmationRequest {
 }
 
 interface LogTab extends LogTabItem {
-  session: OpenSessionResult | null;
+  session: OpenSessionResult | OpenDocxSessionResult | null;
   sourcePath?: string;
   error?: string;
   sourceRevision?: string;
@@ -197,6 +198,7 @@ export function App() {
   const [tabLayout, setTabLayout] = useState(() => initialWorkspace);
   const tabLayoutRef = useRef(tabLayout);
   const tabOpenGeneration = useRef(new Map<string, number>());
+  const docxOpenRequests = useRef(new Map<string, string>());
   const potentialSourceChangeRef = useRef<(path: string) => void>(() => {});
   const deletedSourceRef = useRef<(path: string, subtree?: boolean) => void>(() => {});
   const selfDeletedSources = useRef<Array<{ path: string; subtree: boolean }>>([]);
@@ -620,8 +622,16 @@ export function App() {
   );
 
   const openEntry = useCallback(
-    async (entryKey: string, unreadId?: string, options?: { force?: boolean }) => {
+    async (
+      entryKey: string,
+      unreadId?: string,
+      options?: { force?: boolean; document?: boolean },
+    ) => {
       const existing = tabsRef.current[entryKey];
+      const isDocument =
+        options?.document ??
+        (existing?.session?.kind === 'docx' ||
+          (/\.docx$/i.test(entryKey) && !entryKey.includes('::')));
       updateTabLayout((layout) => openTab(layout, entryKey));
       // 打开压缩包内文件时由 activeKey 高亮该文件本身,不再额外高亮其外层压缩包(避免双重背景色)
       setSelectedArchive(null);
@@ -644,8 +654,17 @@ export function App() {
         if (unreadId) markSeen(unreadId);
         return;
       } else {
+        const previousRequest = docxOpenRequests.current.get(entryKey);
+        if (previousRequest) {
+          docxOpenRequests.current.delete(entryKey);
+          await api.cancelOpenDocxSession(previousRequest).catch(() => undefined);
+        }
         if (options?.force && existing.session) {
-          await api.closeLogSession(entryKey, existing.session.sessionId).catch(() => undefined);
+          if (existing.session.kind === 'docx') {
+            await api.closeDocxSession(existing.session.sessionId).catch(() => undefined);
+          } else {
+            await api.closeLogSession(entryKey, existing.session.sessionId).catch(() => undefined);
+          }
         }
         updateTabs((current) => ({
           ...current,
@@ -661,14 +680,21 @@ export function App() {
 
       const generation = (tabOpenGeneration.current.get(entryKey) ?? 0) + 1;
       tabOpenGeneration.current.set(entryKey, generation);
+      const docxRequestId = isDocument
+        ? `docx-open-${Date.now()}-${generation}-${Math.random().toString(36).slice(2)}`
+        : undefined;
+      if (docxRequestId) docxOpenRequests.current.set(entryKey, docxRequestId);
       try {
-        const opened = await api.openLogSession(entryKey);
+        const opened = isDocument
+          ? await api.openDocxSession(entryKey, docxRequestId!)
+          : await api.openLogSession(entryKey);
         const revision = await api
           .fileRevision(opened.sourcePath)
           .catch(() => ({ exists: true, revision: undefined }));
         if (unreadId) markSeen(unreadId);
         if (tabOpenGeneration.current.get(entryKey) !== generation || !tabsRef.current[entryKey]) {
-          await api.closeLogSession(entryKey, opened.sessionId);
+          if (opened.kind === 'docx') await api.closeDocxSession(opened.sessionId);
+          else await api.closeLogSession(entryKey, opened.sessionId);
           return;
         }
         updateTabs((current) => {
@@ -696,6 +722,10 @@ export function App() {
           };
         });
         alert(t('error.cannotOpen', { error: localizedError(error) }));
+      } finally {
+        if (docxRequestId && docxOpenRequests.current.get(entryKey) === docxRequestId) {
+          docxOpenRequests.current.delete(entryKey);
+        }
       }
     },
     [localizedError, markSeen, t, updateTabLayout, updateTabs],
@@ -707,7 +737,9 @@ export function App() {
       setSelectedArchive(null);
       const tab = tabsRef.current[entryKey];
       if (tab?.sourceState === 'deleted') return;
-      if (tab?.status === 'dormant' || tab?.status === 'error') void openEntry(entryKey);
+      if (tab?.status === 'dormant' || tab?.status === 'error') {
+        void openEntry(entryKey, undefined, { document: /\.docx$/i.test(entryKey) });
+      }
     },
     [openEntry, updateTabLayout],
   );
@@ -715,7 +747,15 @@ export function App() {
   const closeLogTab = useCallback(
     (entryKey: string) => {
       tabOpenGeneration.current.set(entryKey, (tabOpenGeneration.current.get(entryKey) ?? 0) + 1);
-      void api.closeLogSession(entryKey).catch(() => undefined);
+      const openingRequest = docxOpenRequests.current.get(entryKey);
+      if (openingRequest) {
+        docxOpenRequests.current.delete(entryKey);
+        void api.cancelOpenDocxSession(openingRequest).catch(() => undefined);
+      }
+      const session = tabsRef.current[entryKey]?.session;
+      if (session?.kind === 'docx')
+        void api.closeDocxSession(session.sessionId).catch(() => undefined);
+      else void api.closeLogSession(entryKey).catch(() => undefined);
       const nextActive = updateTabLayout((layout) => closeTab(layout, entryKey)).active;
       setSelectedArchive(null);
       updateTabs((current) => {
@@ -861,7 +901,11 @@ export function App() {
         if (id === active) continue;
         tabOpenGeneration.current.set(id, (tabOpenGeneration.current.get(id) ?? 0) + 1);
         const session = tabsRef.current[id]?.session;
-        if (session) await api.closeLogSession(id, session.sessionId).catch(() => undefined);
+        if (session?.kind === 'docx') {
+          await api.closeDocxSession(session.sessionId).catch(() => undefined);
+        } else if (session) {
+          await api.closeLogSession(id, session.sessionId).catch(() => undefined);
+        }
       }
       updateTabs((current) => {
         const next = { ...current };
@@ -967,6 +1011,8 @@ export function App() {
       if (item.kind === 'file') {
         if (options?.openFile === false) markSeen(item.id);
         else await openEntry(item.id, item.id);
+      } else if (item.kind === 'document') {
+        await openEntry(item.id, item.id, { document: true });
       } else {
         setSelectedArchive(item.id);
         markSeen(item.id);
@@ -1440,8 +1486,13 @@ export function App() {
           onExpandDirectory={expandDirectory}
           onCollapseDirectory={collapseDirectory}
           onSelectArchive={(name, id) => {
-            setSelectedArchive(name);
-            if (id) markSeen(id);
+            const node = findTreeNode(treeRef.current, name);
+            if (node?.kind === 'document') {
+              void openEntry(name, id, { document: true });
+            } else {
+              setSelectedArchive(name);
+              if (id) markSeen(id);
+            }
           }}
           onOpenFile={(name, id) => openEntry(name, id)}
           onRename={renameNode}
@@ -1483,18 +1534,25 @@ export function App() {
                       key={id}
                       className={'log-panel-slot' + (activeKey === id ? ' active' : '')}
                     >
-                      <LogContent
-                        session={tab.session}
-                        activeKey={id}
-                        sourceName={tab.title}
-                        active={activeKey === id && !fileSearchOpen}
-                        status={tab.status}
-                        error={tab.error}
-                        aiOpen={aiOpen && activeKey === id}
-                        aiWorkspaceHost={aiWorkspaceHost}
-                        onAiOpen={openAiWorkspace}
-                        onAiClose={closeAiWorkspace}
-                      />
+                      {tab.session?.kind === 'docx' ? (
+                        <div
+                          className="docx-preview-pending"
+                          data-session-id={tab.session.sessionId}
+                        />
+                      ) : (
+                        <LogContent
+                          session={tab.session}
+                          activeKey={id}
+                          sourceName={tab.title}
+                          active={activeKey === id && !fileSearchOpen}
+                          status={tab.status}
+                          error={tab.error}
+                          aiOpen={aiOpen && activeKey === id}
+                          aiWorkspaceHost={aiWorkspaceHost}
+                          onAiOpen={openAiWorkspace}
+                          onAiClose={closeAiWorkspace}
+                        />
+                      )}
                     </div>
                   );
                 })

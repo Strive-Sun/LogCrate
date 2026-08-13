@@ -3,10 +3,6 @@
 //! `open_entry()` 返回可流式读取的解压流。
 
 mod channel_reader;
-// Task 1.2 uses DOCX package validation for classification. Block parsing and image metadata are
-// intentionally dormant until task 1.3 wires the dedicated preview session; remove this scoped
-// allowance when that production call path lands.
-#[allow(dead_code)]
 pub mod docx;
 mod plain;
 mod rar_reader;

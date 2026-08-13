@@ -7,6 +7,7 @@ use super::{ensure_scan_time, is_safe_entry_name, ArchiveLimits};
 use anyhow::{anyhow, bail, Context};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -30,13 +31,15 @@ const WORD_DOCUMENT_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
 const PACKAGE_METADATA_LIMIT: u64 = 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
 pub enum DocxBlock {
     Text { text: String },
     Image(DocxImageBlock),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DocxImageBlock {
     pub image_id: String,
     pub relationship_id: String,
@@ -48,7 +51,8 @@ pub struct DocxImageBlock {
     pub status: DocxImageStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum DocxImageStatus {
     Supported,
     UnsupportedFormat,
@@ -210,9 +214,18 @@ impl DocxDocument {
         })
     }
 
+    #[cfg(test)]
     pub fn parse_blocks(
         &self,
         mut publish: impl FnMut(DocxBlock) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        self.parse_blocks_until(&mut publish, || false)
+    }
+
+    pub fn parse_blocks_until(
+        &self,
+        mut publish: impl FnMut(DocxBlock) -> anyhow::Result<()>,
+        mut cancelled: impl FnMut() -> bool,
     ) -> anyhow::Result<()> {
         let started = Instant::now();
         let file = File::open(&self.path)?;
@@ -235,6 +248,9 @@ impl DocxDocument {
         let mut output_bytes = 0u64;
         let mut block_count = 0usize;
         loop {
+            if cancelled() {
+                bail!("DOCX 打开已取消");
+            }
             ensure_scan_time(started, self.limits)?;
             match reader.read_event_into(&mut buffer) {
                 Ok(Event::Start(start)) => {
@@ -316,6 +332,95 @@ impl DocxDocument {
         ensure_scan_time(started, self.limits)?;
         Ok(())
     }
+
+    pub fn read_supported_image(
+        &self,
+        target_path: &str,
+        expected_mime: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        if !self.entry_names.contains(target_path)
+            || !is_safe_entry_name(target_path, self.limits.max_path_bytes)
+        {
+            bail!("DOCX 图片路径无效");
+        }
+        if !matches!(expected_mime, "image/png" | "image/jpeg")
+            || self.content_types.for_part(target_path) != Some(expected_mime)
+        {
+            bail!("DOCX 图片 MIME 不受支持或与部件声明不一致");
+        }
+        let file = File::open(&self.path)?;
+        let mut archive = ZipArchive::new(BufReader::new(file)).context("DOCX ZIP 结构无效")?;
+        let entry = archive.by_name(target_path)?;
+        if entry.encrypted() {
+            bail!("DOCX 图片已加密");
+        }
+        let mut limited = LimitedReader::new(entry, 16 * 1024 * 1024, "DOCX 图片");
+        let mut bytes = Vec::new();
+        limited.read_to_end(&mut bytes)?;
+        let (actual_mime, width, height) = image_metadata(&bytes)?;
+        if actual_mime != expected_mime {
+            bail!("DOCX 图片 magic 与 MIME 不一致");
+        }
+        if u64::from(width).saturating_mul(u64::from(height)) > 32_000_000 {
+            bail!("DOCX 图片像素超过 32 MP 安全上限");
+        }
+        Ok(bytes)
+    }
+}
+
+fn image_metadata(bytes: &[u8]) -> anyhow::Result<(&'static str, u32, u32)> {
+    if bytes.len() >= 24 && bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        if &bytes[12..16] != b"IHDR" {
+            bail!("PNG 缺少 IHDR");
+        }
+        let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+        if width == 0 || height == 0 {
+            bail!("PNG 尺寸无效");
+        }
+        return Ok(("image/png", width, height));
+    }
+    if bytes.len() >= 4 && bytes.starts_with(&[0xff, 0xd8]) {
+        let mut offset = 2usize;
+        while offset + 4 <= bytes.len() {
+            if bytes[offset] != 0xff {
+                offset += 1;
+                continue;
+            }
+            while offset < bytes.len() && bytes[offset] == 0xff {
+                offset += 1;
+            }
+            if offset >= bytes.len() {
+                break;
+            }
+            let marker = bytes[offset];
+            offset += 1;
+            if matches!(marker, 0xd8 | 0xd9 | 0x01) || (0xd0..=0xd7).contains(&marker) {
+                continue;
+            }
+            if offset + 2 > bytes.len() {
+                break;
+            }
+            let length = usize::from(u16::from_be_bytes([bytes[offset], bytes[offset + 1]]));
+            if length < 2 || offset + length > bytes.len() {
+                break;
+            }
+            if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
+                if length < 7 {
+                    break;
+                }
+                let height = u32::from(u16::from_be_bytes([bytes[offset + 3], bytes[offset + 4]]));
+                let width = u32::from(u16::from_be_bytes([bytes[offset + 5], bytes[offset + 6]]));
+                if width == 0 || height == 0 {
+                    bail!("JPEG 尺寸无效");
+                }
+                return Ok(("image/jpeg", width, height));
+            }
+            offset += length;
+        }
+        bail!("JPEG 缺少有效尺寸标记");
+    }
+    bail!("DOCX 图片 magic 不受支持")
 }
 
 #[cfg(test)]
@@ -430,6 +535,76 @@ mod tests {
             error.to_string().contains(expected),
             "unexpected error: {error:#}"
         );
+    }
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = vec![0; 24];
+        bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        bytes[12..16].copy_from_slice(b"IHDR");
+        bytes[16..20].copy_from_slice(&width.to_be_bytes());
+        bytes[20..24].copy_from_slice(&height.to_be_bytes());
+        bytes
+    }
+
+    fn jpeg(width: u16, height: u16) -> Vec<u8> {
+        vec![
+            0xff,
+            0xd8,
+            0xff,
+            0xc0,
+            0x00,
+            0x07,
+            0x08,
+            (height >> 8) as u8,
+            height as u8,
+            (width >> 8) as u8,
+            width as u8,
+            0xff,
+            0xd9,
+        ]
+    }
+
+    #[test]
+    fn validates_png_and_jpeg_magic_dimensions_and_pixel_limit() {
+        assert_eq!(image_metadata(&png(2, 3)).unwrap(), ("image/png", 2, 3));
+        assert_eq!(
+            image_metadata(&jpeg(320, 240)).unwrap(),
+            ("image/jpeg", 320, 240)
+        );
+        assert!(image_metadata(b"GIF89a").is_err());
+        assert!(image_metadata(&png(0, 3)).is_err());
+
+        let xml = document(
+            r#"<w:p><w:r><w:drawing><wp:inline><a:blip r:embed="img"/></wp:inline></w:drawing></w:r></w:p>"#,
+        );
+        let relationships = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="img" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/large.png"/></Relationships>"#;
+        let large = png(8000, 5000);
+        let fixture = Fixture::create(
+            &xml,
+            Some(relationships),
+            &[("word/media/large.png", &large)],
+        );
+        let document = DocxDocument::open(&fixture.path).unwrap();
+        let error = document
+            .read_supported_image("word/media/large.png", "image/png")
+            .expect_err("pixel limit must fail");
+        assert!(error.to_string().contains("32 MP"));
+        assert!(document
+            .read_supported_image("word/media/large.png", "image/jpeg")
+            .is_err());
+
+        let mut oversized = png(2, 3);
+        oversized.resize(16 * 1024 * 1024 + 1, 0);
+        let oversized_fixture = Fixture::create(
+            &xml,
+            Some(relationships),
+            &[("word/media/large.png", &oversized)],
+        );
+        let oversized_document = DocxDocument::open(&oversized_fixture.path).unwrap();
+        let error = oversized_document
+            .read_supported_image("word/media/large.png", "image/png")
+            .expect_err("decoded byte limit must fail");
+        assert!(error.to_string().contains("16 MiB") || error.to_string().contains("安全上限"));
     }
 
     #[test]

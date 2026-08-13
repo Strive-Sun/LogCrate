@@ -215,6 +215,7 @@ export interface EncodingProgress {
 
 /** 打开会话的结果 */
 export interface OpenSessionResult {
+  kind?: 'log';
   sessionId: string;
   /** 当前会话实际读取的最外层磁盘源绝对路径。 */
   sourcePath: string;
@@ -229,6 +230,31 @@ export interface OpenSessionResult {
   /** 本次打开因后端会话上限而被 LRU 回收的旧 session。 */
   evictedSessionIds: string[];
 }
+
+export interface OpenDocxSessionResult {
+  kind: 'docx';
+  sessionId: string;
+  sourcePath: string;
+  title: string;
+  blockCount: number;
+  evictedSessionIds: string[];
+}
+
+export type DocxImageStatus =
+  'supported' | 'unsupportedFormat' | 'external' | 'missing' | 'unsafePath';
+
+export type DocxPreviewBlock =
+  | { kind: 'text'; index: number; text: string }
+  | {
+      kind: 'image';
+      index: number;
+      imageId: string;
+      mimeType?: string;
+      altText?: string;
+      widthEmu?: number;
+      heightEmu?: number;
+      status: DocxImageStatus;
+    };
 
 /** 将当前只读会话缓存导出到用户选择路径后的结果。 */
 export interface SnapshotExportResult {

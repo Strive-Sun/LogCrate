@@ -1,6 +1,7 @@
 mod ai;
 mod ai_history;
 mod archive;
+mod docx_session;
 mod index;
 pub mod log_fields;
 mod macos_file_access;
@@ -27,6 +28,7 @@ use ai_history::{
     clear_ai_history, delete_ai_history, list_ai_history, load_ai_history, save_ai_history,
 };
 use archive::{open_archive, resolve_archive_chain, ArchiveEntry};
+use docx_session::{DocxPreviewBlock, DocxSessionManager, OpenDocxResult};
 use index::{
     IndexProgress, LogFieldAnchorResult, LogFieldFilterRequest, LogFieldMarkedLine,
     LogFieldResultMode, LogFieldStatus, LogLine, LogSearchRequest, LogSearchResult, OpenResult,
@@ -346,6 +348,7 @@ fn cleanup_stale_archive_caches(root: &std::path::Path, current: &std::path::Pat
 struct ReadyAppState {
     watch: Arc<WatchState>,
     sessions: Arc<SessionManager>,
+    docx_sessions: Arc<DocxSessionManager>,
     archive_cache: PathBuf,
     #[cfg(desktop)]
     search: Arc<SearchRuntime>,
@@ -1196,6 +1199,72 @@ async fn open_log_session(
     Ok(result)
 }
 
+#[tauri::command]
+async fn open_docx_session(
+    state: State<'_, AppState>,
+    path: String,
+    request_id: String,
+) -> Result<OpenDocxResult, String> {
+    let state = state.ready().await;
+    let sessions = state.docx_sessions.clone();
+    let cancel = sessions
+        .begin_open(&request_id)
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        sessions.open(PathBuf::from(path).as_path(), &request_id, &cancel)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn cancel_open_docx_session(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<(), String> {
+    let state = state.ready().await;
+    state.docx_sessions.cancel_open(&request_id);
+    Ok(())
+}
+
+#[tauri::command]
+async fn read_docx_blocks(
+    state: State<'_, AppState>,
+    session_id: String,
+    start: u64,
+    count: u64,
+) -> Result<Vec<DocxPreviewBlock>, String> {
+    let state = state.ready().await;
+    state
+        .docx_sessions
+        .read_blocks(&session_id, start, count)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn read_docx_image(
+    state: State<'_, AppState>,
+    session_id: String,
+    image_id: String,
+) -> Result<tauri::ipc::Response, String> {
+    let state = state.ready().await;
+    let sessions = state.docx_sessions.clone();
+    let bytes =
+        tauri::async_runtime::spawn_blocking(move || sessions.read_image(&session_id, &image_id))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+async fn close_docx_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    let state = state.ready().await;
+    state.docx_sessions.close(&session_id);
+    Ok(())
+}
+
 fn spawn_log_field_refresh(
     sessions: Arc<SessionManager>,
     session_id: String,
@@ -1616,6 +1685,8 @@ pub fn run() {
                 let watch = WatchState::new(config_dir.join("watch-config.json"));
                 let sessions = Arc::new(SessionManager::default());
                 sessions.set_cache_dir(cache_dir.clone());
+                let docx_sessions = Arc::new(DocxSessionManager::default());
+                docx_sessions.set_cache_dir(cache_dir.clone());
                 let archive_root = cache_dir.join("nested-archives");
                 let archive_cache = create_archive_cache(&cache_dir);
                 let search_dir = config_dir.join("file-search");
@@ -1624,6 +1695,7 @@ pub fn run() {
                 state.publish(ReadyAppState {
                     watch: watch.clone(),
                     sessions,
+                    docx_sessions,
                     archive_cache: archive_cache.clone(),
                     search: search.clone(),
                 });
@@ -1733,6 +1805,11 @@ pub fn run() {
             file_revision,
             list_archive_entries,
             open_log_session,
+            open_docx_session,
+            cancel_open_docx_session,
+            read_docx_blocks,
+            read_docx_image,
+            close_docx_session,
             read_lines,
             analyze_log_field_layout,
             set_log_field_filter,
@@ -2102,6 +2179,7 @@ mod lifecycle_tests {
         state.publish(ReadyAppState {
             watch: WatchState::new(root.join("watch.json")),
             sessions: Arc::new(SessionManager::default()),
+            docx_sessions: Arc::new(DocxSessionManager::default()),
             archive_cache: root.join("archive-cache"),
             search,
         });
