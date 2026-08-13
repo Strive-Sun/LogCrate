@@ -3,6 +3,10 @@
 //! `open_entry()` 返回可流式读取的解压流。
 
 mod channel_reader;
+// Task 1.1 deliberately lands the parser before task 1.2 wires format detection.
+// Remove this temporary allowance when the registry starts constructing DocxDocument.
+#[allow(dead_code)]
+pub mod docx;
 mod plain;
 mod rar_reader;
 mod sevenz_reader;
