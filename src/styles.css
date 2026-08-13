@@ -2502,6 +2502,75 @@ body.resizing {
   box-shadow: 0 8px 24px rgb(0 0 0 / 22%);
   font-size: 12px;
 }
+
+.docx-preview {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+.docx-preview-header {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+.docx-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+}
+.docx-virtual {
+  position: relative;
+  width: min(900px, calc(100% - 32px));
+  margin: 0 auto;
+}
+.docx-block {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  padding: 8px 24px;
+  box-sizing: border-box;
+}
+.docx-block.current {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-radius: 6px;
+}
+.docx-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+  font-family: system-ui, sans-serif;
+}
+.docx-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+  border-radius: 4px;
+}
+.docx-image-placeholder {
+  display: grid;
+  place-items: center;
+  gap: 4px;
+  min-height: 120px;
+  padding: 16px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  text-align: center;
+}
+.docx-find {
+  top: 48px;
+  right: 16px;
+}
 .log-find-head,
 .log-find-query,
 .log-find-options {

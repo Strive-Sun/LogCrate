@@ -21,6 +21,7 @@ import { MacOsFileAccessDialog } from './components/MacOsFileAccessDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { DirTree } from './components/DirTree';
 import { LogContent } from './components/LogContent';
+import { DocxPreview } from './components/DocxPreview';
 import { LogTabs, type LogTabItem } from './components/LogTabs';
 import { EmptyState } from './components/EmptyState';
 import { FileSearchPanel } from './components/FileSearchPanel';
@@ -1535,10 +1536,7 @@ export function App() {
                       className={'log-panel-slot' + (activeKey === id ? ' active' : '')}
                     >
                       {tab.session?.kind === 'docx' ? (
-                        <div
-                          className="docx-preview-pending"
-                          data-session-id={tab.session.sessionId}
-                        />
+                        <DocxPreview session={tab.session} active={activeKey === id} />
                       ) : (
                         <LogContent
                           session={tab.session}
