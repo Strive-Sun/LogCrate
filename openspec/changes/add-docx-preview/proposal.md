@@ -1,0 +1,22 @@
+# Change: 增加 DOCX 图文预览
+
+## Why
+
+LogCrate 已能查看多种裸文本与压缩日志，但 `.docx` 会因其 ZIP 容器结构被当作普通归档，用户只能看到内部 XML，无法直接阅读文档正文与嵌入截图。首版需要提供轻量、跨平台且资源受控的图文预览，而不是复制 Word 的完整排版渲染能力。
+
+## What Changes
+
+- 将结构有效的 `.docx` 识别为独立文档格式，不再作为普通 ZIP 展开。
+- 从主文档 `word/document.xml` 按阅读顺序流式提取正文，段落换行，显式换行保留，表格按行输出且单元格以制表符分隔。
+- 解析主文档关系并在对应段落位置显示内嵌 PNG/JPEG 图片；图片保持纵横比、限制为正文宽度并按视口附近惰性读取。
+- 通过单个文档条目接入选项卡工作区；正文复用现有 UTF-8 文本查找语义，图文块使用独立的分页/虚拟化预览会话，不把图片二进制编码进日志行。
+- 在目录监控、目录树与单文件拖入链路中把有效 `.docx` 作为可预览文档处理。
+- 对伪造后缀、缺少主文档、损坏 ZIP/XML/图片、加密或旧 `.doc`、解码超限、异常压缩比和图片资源超限返回明确错误或安全占位，并保持固定缓冲与有界缓存。
+- 首版不还原字体、颜色、样式、分页、精确浮动/环绕布局、图表、公式、批注、修订删除内容、页眉页脚、脚注或宏，也不支持旧二进制 `.doc`；EMF/WMF、SVG、GIF、外链及其它非 PNG/JPEG 图片显示不支持占位。
+
+## Impact
+
+- Affected specs: `archive-reading`, `log-viewing`, `directory-monitoring`, `file-drop-handling`
+- Affected code: `src-tauri/src/archive/`, `src-tauri/src/watcher.rs`、DOCX 图文会话 IPC、前端文档预览组件、文案与测试
+- Dependencies: 直接使用现有 `zip` 读取能力；采用与 Rust 1.70 兼容的流式 XML 解析器，实施前核对安装包体积与依赖锁文件变化
+- Compatibility: 不改变现有 ZIP、归档条目和裸文本日志行为；新增 DOCX 专用会话类型/命令，既有日志 IPC 字段保持兼容
