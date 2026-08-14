@@ -4141,17 +4141,17 @@ mod tests {
         let directory = test_directory("preference-write-failure");
         let preferences = SearchPreferenceStore::new(directory.clone());
         fs::create_dir(&preferences.config_path).unwrap();
-        assert!(preferences.set_enabled(true).is_err());
-        assert!(!preferences.feature_state(false).next_launch_enabled);
+        assert!(preferences.set_enabled(false).is_err());
+        assert!(preferences.feature_state(false).next_launch_enabled);
         let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
-    fn disabled_preference_read_does_not_create_search_storage() {
+    fn default_preference_read_does_not_create_search_storage() {
         let parent = test_directory("lightweight-preference");
         let search_dir = parent.join("search");
         let preferences = SearchPreferenceStore::new(search_dir.clone());
-        assert!(!preferences.config().enabled);
+        assert!(preferences.config().enabled);
         assert!(!search_dir.exists());
         let _ = fs::remove_dir_all(parent);
     }
