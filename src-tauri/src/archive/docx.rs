@@ -159,9 +159,76 @@ pub struct DocxDocument {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DocxListKind {
+enum NumberFormat {
     Bullet,
     Decimal,
+    DecimalZero,
+    UpperRoman,
+    LowerRoman,
+    UpperLetter,
+    LowerLetter,
+}
+
+#[derive(Debug, Clone)]
+struct NumberingLevel {
+    format: NumberFormat,
+    text: String,
+    start: u64,
+    restart_after: Option<Option<u8>>,
+    legal: bool,
+    paragraph_style: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct NumberingOverride {
+    start: Option<u64>,
+    level: Option<NumberingLevel>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct NumberingInstance {
+    abstract_id: String,
+    overrides: HashMap<u8, NumberingOverride>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct NumberingDefinitions {
+    abstracts: HashMap<String, HashMap<u8, NumberingLevel>>,
+    instances: HashMap<String, NumberingInstance>,
+}
+
+impl NumberingDefinitions {
+    fn level(&self, num_id: &str, level: u8) -> Option<(&NumberingLevel, Option<u64>)> {
+        let instance = self.instances.get(num_id)?;
+        let level_override = instance.overrides.get(&level);
+        let definition = level_override
+            .and_then(|value| value.level.as_ref())
+            .or_else(|| self.abstracts.get(&instance.abstract_id)?.get(&level))?;
+        Some((definition, level_override.and_then(|value| value.start)))
+    }
+
+    fn level_for_style(&self, num_id: &str, style_id: &str) -> Option<u8> {
+        (0..=8).find(|level| {
+            self.level(num_id, *level)
+                .and_then(|(definition, _)| definition.paragraph_style.as_deref())
+                == Some(style_id)
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ParagraphStyle {
+    role: DocxParagraphRole,
+    based_on: Option<String>,
+    num_id: Option<Option<String>>,
+    level: Option<u8>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResolvedParagraphStyle {
+    role: DocxParagraphRole,
+    num_id: Option<String>,
+    level: Option<u8>,
 }
 
 impl DocxDocument {
@@ -297,8 +364,8 @@ impl DocxDocument {
         let started = Instant::now();
         let file = File::open(&self.path)?;
         let mut archive = ZipArchive::new(BufReader::new(file)).context("DOCX ZIP 结构无效")?;
-        let style_roles = if self.entry_names.contains(STYLES_PATH) {
-            optional_structure_metadata(parse_style_roles(read_part(
+        let styles = if self.entry_names.contains(STYLES_PATH) {
+            optional_structure_metadata(parse_paragraph_styles(read_part(
                 &mut archive,
                 STYLES_PATH,
                 PACKAGE_METADATA_LIMIT,
@@ -313,7 +380,7 @@ impl DocxDocument {
                 PACKAGE_METADATA_LIMIT,
             )?))?
         } else {
-            HashMap::new()
+            NumberingDefinitions::default()
         };
         let document = archive.by_name(MAIN_DOCUMENT_PATH)?;
         if document.encrypted() {
@@ -355,7 +422,7 @@ impl DocxDocument {
                         body_seen = true;
                         inside_body = true;
                     } else if inside_body {
-                        state.start(&start, self, &style_roles)?;
+                        state.start(&start, self, &styles)?;
                     }
                 }
                 Ok(Event::End(end)) => {
@@ -725,7 +792,7 @@ mod tests {
     #[test]
     fn classifies_titles_headings_and_common_lists() {
         let styles = br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="CustomHeading"><w:name w:val="Heading 2"/></w:style></w:styles>"#;
-        let numbering = br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="7"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl></w:abstractNum><w:num w:numId="4"><w:abstractNumId w:val="7"/></w:num></w:numbering>"#;
+        let numbering = br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="7"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="4"><w:abstractNumId w:val="7"/></w:num></w:numbering>"#;
         let xml = document(
             r#"<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>Document title</w:t></w:r></w:p>
 <w:p><w:pPr><w:pStyle w:val="CustomHeading"/></w:pPr><w:r><w:t>Section</w:t></w:r></w:p>
@@ -749,6 +816,128 @@ mod tests {
         );
         assert!(
             matches!(&blocks[3], DocxBlock::Paragraph(paragraph) if paragraph.list_marker.as_deref() == Some("2."))
+        );
+    }
+
+    #[test]
+    fn renders_exact_multilevel_numbering_overrides_styles_and_table_continuation() {
+        let styles = br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:style w:type="paragraph" w:styleId="NumberedBase"><w:numPr><w:numId w:val="4"/></w:numPr></w:style>
+<w:style w:type="paragraph" w:styleId="NumberedHeading"><w:name w:val="Heading 2"/><w:basedOn w:val="NumberedBase"/></w:style>
+</w:styles>"#;
+        let numbering = br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:abstractNum w:abstractNumId="7">
+ <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+ <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="NumberedHeading"/><w:lvlText w:val="%1.%2"/></w:lvl>
+ <w:lvl w:ilvl="2"><w:start w:val="3"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%1.%2.%3)"/></w:lvl>
+</w:abstractNum>
+<w:num w:numId="4"><w:abstractNumId w:val="7"/></w:num>
+<w:num w:numId="5"><w:abstractNumId w:val="7"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="7"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="upperRoman"/><w:lvlText w:val="Section %1"/></w:lvl></w:lvlOverride></w:num>
+</w:numbering>"#;
+        let xml = document(
+            r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="4"/></w:numPr></w:pPr><w:r><w:t>First heading</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="NumberedHeading"/></w:pPr><w:r><w:t>First child</w:t></w:r></w:p>
+<w:tbl><w:tr><w:tc><w:p><w:pPr><w:pStyle w:val="NumberedHeading"/></w:pPr><w:r><w:t>Table child</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="4"/></w:numPr></w:pPr><w:r><w:t>Second heading</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="NumberedHeading"/></w:pPr><w:r><w:t>Reset child</w:t></w:r></w:p>
+<w:p><w:pPr><w:numPr><w:ilvl w:val="2"/><w:numId w:val="4"/></w:numPr></w:pPr><w:r><w:t>Letter child</w:t></w:r></w:p>
+<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="5"/></w:numPr></w:pPr><w:r><w:t>Overridden start</w:t></w:r></w:p>"#,
+        );
+        let fixture = Fixture::create(
+            &xml,
+            None,
+            &[(STYLES_PATH, styles), (NUMBERING_PATH, numbering)],
+        );
+        let blocks = fixture.blocks().expect("parse exact numbering");
+        let DocxBlock::Paragraph(first) = &blocks[0] else {
+            panic!("expected first heading")
+        };
+        assert_eq!(first.role, DocxParagraphRole::Heading1);
+        assert_eq!(first.list_marker.as_deref(), Some("1."));
+        assert!(
+            matches!(&blocks[1], DocxBlock::Paragraph(paragraph) if paragraph.role == DocxParagraphRole::Heading2 && paragraph.list_marker.as_deref() == Some("1.1"))
+        );
+        let DocxBlock::Table(table) = &blocks[2] else {
+            panic!("expected table")
+        };
+        assert_eq!(
+            table.rows[0].cells[0].paragraphs[0].list_marker.as_deref(),
+            Some("1.2")
+        );
+        assert_eq!(table.search_text, "Table child");
+        assert!(
+            matches!(&blocks[3], DocxBlock::Paragraph(paragraph) if paragraph.list_marker.as_deref() == Some("2."))
+        );
+        assert!(
+            matches!(&blocks[4], DocxBlock::Paragraph(paragraph) if paragraph.list_marker.as_deref() == Some("2.1"))
+        );
+        assert!(
+            matches!(&blocks[5], DocxBlock::Paragraph(paragraph) if paragraph.list_marker.as_deref() == Some("2.1.c)"))
+        );
+        assert!(
+            matches!(&blocks[6], DocxBlock::Paragraph(paragraph) if paragraph.list_marker.as_deref() == Some("Section VII"))
+        );
+    }
+
+    #[test]
+    fn honors_explicit_restart_and_supported_number_formats() {
+        assert_eq!(
+            format_number(1, NumberFormat::DecimalZero).as_deref(),
+            Some("01")
+        );
+        assert_eq!(
+            format_number(28, NumberFormat::UpperLetter).as_deref(),
+            Some("AB")
+        );
+        assert_eq!(
+            format_number(28, NumberFormat::LowerLetter).as_deref(),
+            Some("ab")
+        );
+        assert_eq!(
+            format_number(14, NumberFormat::UpperRoman).as_deref(),
+            Some("XIV")
+        );
+        assert_eq!(
+            format_number(14, NumberFormat::LowerRoman).as_deref(),
+            Some("xiv")
+        );
+
+        let numbering = br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:abstractNum w:abstractNumId="1">
+ <w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+ <w:lvl w:ilvl="1"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2"/><w:lvlRestart w:val="0"/></w:lvl>
+</w:abstractNum><w:num w:numId="9"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#;
+        let xml = document(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="9"/></w:numPr></w:pPr><w:r><w:t>A</w:t></w:r></w:p>
+<w:p><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="9"/></w:numPr></w:pPr><w:r><w:t>B</w:t></w:r></w:p>
+<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="9"/></w:numPr></w:pPr><w:r><w:t>C</w:t></w:r></w:p>
+<w:p><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="9"/></w:numPr></w:pPr><w:r><w:t>D</w:t></w:r></w:p>"#,
+        );
+        let fixture = Fixture::create(&xml, None, &[(NUMBERING_PATH, numbering)]);
+        let markers = fixture
+            .blocks()
+            .expect("parse restart behavior")
+            .into_iter()
+            .filter_map(|block| match block {
+                DocxBlock::Paragraph(paragraph) => paragraph.list_marker,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(markers, ["1.", "1.1", "2.", "2.2"]);
+    }
+
+    #[test]
+    fn invalid_numbering_keeps_heading_text_without_fabricated_marker() {
+        let numbering = br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="2"><w:lvl w:ilvl="0"><w:numFmt w:val="unknownFormat"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="6"><w:abstractNumId w:val="2"/></w:num></w:numbering>"#;
+        let xml = document(
+            r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="6"/></w:numPr></w:pPr><w:r><w:t>Visible heading</w:t></w:r></w:p>"#,
+        );
+        let fixture = Fixture::create(&xml, None, &[(NUMBERING_PATH, numbering)]);
+        let blocks = fixture
+            .blocks()
+            .expect("invalid numbering safely falls back");
+        assert!(
+            matches!(&blocks[0], DocxBlock::Paragraph(paragraph) if paragraph.text == "Visible heading" && paragraph.role == DocxParagraphRole::Heading1 && paragraph.list_marker.is_none())
         );
     }
 
@@ -1355,47 +1544,75 @@ fn parse_relationships(reader: impl Read) -> anyhow::Result<HashMap<String, Rela
     Ok(result)
 }
 
-fn parse_style_roles(reader: impl Read) -> anyhow::Result<HashMap<String, DocxParagraphRole>> {
+fn parse_paragraph_styles(reader: impl Read) -> anyhow::Result<HashMap<String, ParagraphStyle>> {
     let mut xml = Reader::from_reader(BufReader::new(reader));
     xml.trim_text(true);
     xml.expand_empty_elements(true);
     let mut buffer = Vec::new();
-    let mut roles = HashMap::new();
-    let mut current: Option<(String, DocxParagraphRole)> = None;
+    let mut styles = HashMap::new();
+    let mut current: Option<(String, ParagraphStyle)> = None;
+    let mut num_properties_depth = 0usize;
     loop {
         match xml.read_event_into(&mut buffer) {
             Ok(Event::Start(start)) => match local_name(start.name().as_ref()) {
                 b"style" => {
-                    current =
-                        attribute(&start, b"styleId")?.map(|id| (id, DocxParagraphRole::Normal));
+                    current = if attribute(&start, b"type")?.as_deref() == Some("paragraph") {
+                        attribute(&start, b"styleId")?.map(|id| (id, ParagraphStyle::default()))
+                    } else {
+                        None
+                    };
                 }
                 b"name" => {
-                    if let (Some((_, role)), Some(name)) =
+                    if let (Some((_, style)), Some(name)) =
                         (&mut current, attribute(&start, b"val")?)
                     {
-                        *role = paragraph_role_from_style(&name);
+                        style.role = paragraph_role_from_style(&name);
+                    }
+                }
+                b"basedOn" => {
+                    if let Some((_, style)) = &mut current {
+                        style.based_on = attribute(&start, b"val")?;
                     }
                 }
                 b"outlineLvl" => {
-                    if let (Some((_, role)), Some(level)) = (
+                    if let (Some((_, style)), Some(level)) = (
                         &mut current,
                         attribute(&start, b"val")?.and_then(|value| value.parse::<u8>().ok()),
                     ) {
-                        *role = match level {
+                        style.role = match level {
                             0 => DocxParagraphRole::Heading1,
                             1 => DocxParagraphRole::Heading2,
                             2 => DocxParagraphRole::Heading3,
-                            _ => *role,
+                            _ => style.role,
                         };
+                    }
+                }
+                b"numPr" if current.is_some() => num_properties_depth += 1,
+                b"ilvl" if num_properties_depth > 0 => {
+                    if let Some((_, style)) = &mut current {
+                        style.level = attribute(&start, b"val")?
+                            .and_then(|value| value.parse::<u8>().ok())
+                            .filter(|level| *level <= 8);
+                    }
+                }
+                b"numId" if num_properties_depth > 0 => {
+                    if let Some((_, style)) = &mut current {
+                        style.num_id =
+                            attribute(&start, b"val")?.map(|value| (value != "0").then_some(value));
                     }
                 }
                 _ => {}
             },
-            Ok(Event::End(end)) if local_name(end.name().as_ref()) == b"style" => {
-                if let Some((id, role)) = current.take() {
-                    roles.insert(id, role);
+            Ok(Event::End(end)) => match local_name(end.name().as_ref()) {
+                b"numPr" => num_properties_depth = num_properties_depth.saturating_sub(1),
+                b"style" => {
+                    num_properties_depth = 0;
+                    if let Some((id, style)) = current.take() {
+                        styles.insert(id, style);
+                    }
                 }
-            }
+                _ => {}
+            },
             Ok(Event::DocType(_)) => bail!("DOCX XML 禁止 DOCTYPE 或外部实体"),
             Ok(Event::Eof) => break,
             Ok(_) => {}
@@ -1403,7 +1620,40 @@ fn parse_style_roles(reader: impl Read) -> anyhow::Result<HashMap<String, DocxPa
         }
         buffer.clear();
     }
-    Ok(roles)
+    Ok(styles)
+}
+
+fn resolve_paragraph_style(
+    styles: &HashMap<String, ParagraphStyle>,
+    style_id: &str,
+) -> ResolvedParagraphStyle {
+    let mut result = ResolvedParagraphStyle::default();
+    let mut current = Some(style_id);
+    let mut visited = HashSet::new();
+    let mut numbering_resolved = false;
+    let mut level_resolved = false;
+    for _ in 0..64 {
+        let Some(id) = current else { break };
+        if !visited.insert(id.to_string()) {
+            return ResolvedParagraphStyle::default();
+        }
+        let Some(style) = styles.get(id) else { break };
+        if result.role == DocxParagraphRole::Normal && style.role != DocxParagraphRole::Normal {
+            result.role = style.role;
+        }
+        if !numbering_resolved {
+            if let Some(num_id) = &style.num_id {
+                result.num_id = num_id.clone();
+                numbering_resolved = true;
+            }
+        }
+        if !level_resolved && style.level.is_some() {
+            result.level = style.level;
+            level_resolved = true;
+        }
+        current = style.based_on.as_deref();
+    }
+    result
 }
 
 fn optional_structure_metadata<T: Default>(result: anyhow::Result<T>) -> anyhow::Result<T> {
@@ -1420,44 +1670,197 @@ fn optional_structure_metadata<T: Default>(result: anyhow::Result<T>) -> anyhow:
     }
 }
 
-fn parse_numbering(reader: impl Read) -> anyhow::Result<HashMap<String, DocxListKind>> {
+fn parse_number_format(value: &str) -> Option<NumberFormat> {
+    match value.to_ascii_lowercase().as_str() {
+        "bullet" => Some(NumberFormat::Bullet),
+        "decimal" => Some(NumberFormat::Decimal),
+        "decimalzero" => Some(NumberFormat::DecimalZero),
+        "upperroman" => Some(NumberFormat::UpperRoman),
+        "lowerroman" => Some(NumberFormat::LowerRoman),
+        "upperletter" => Some(NumberFormat::UpperLetter),
+        "lowerletter" => Some(NumberFormat::LowerLetter),
+        _ => None,
+    }
+}
+
+fn numbering_level_attribute(start: &BytesStart<'_>, name: &[u8]) -> anyhow::Result<u8> {
+    let value = required_attribute(start, name)?
+        .parse::<u8>()
+        .map_err(|_| anyhow!("DOCX 编号级别无效"))?;
+    if value > 8 {
+        bail!("DOCX 编号级别无效");
+    }
+    Ok(value)
+}
+
+#[derive(Debug, Default)]
+struct NumberingLevelBuilder {
+    format: Option<NumberFormat>,
+    text: Option<String>,
+    start: Option<u64>,
+    restart_after: Option<Option<u8>>,
+    legal: bool,
+    paragraph_style: Option<String>,
+}
+
+impl NumberingLevelBuilder {
+    fn build(self) -> Option<NumberingLevel> {
+        let format = self.format?;
+        let text = self.text?;
+        (text.len() <= 1024).then_some(NumberingLevel {
+            format,
+            text,
+            start: self.start.unwrap_or(1),
+            restart_after: self.restart_after,
+            legal: self.legal,
+            paragraph_style: self.paragraph_style,
+        })
+    }
+}
+
+fn parse_numbering(reader: impl Read) -> anyhow::Result<NumberingDefinitions> {
     let mut xml = Reader::from_reader(BufReader::new(reader));
     xml.trim_text(true);
     xml.expand_empty_elements(true);
     let mut buffer = Vec::new();
-    let mut abstract_kinds = HashMap::new();
-    let mut num_to_abstract = HashMap::new();
+    let mut result = NumberingDefinitions::default();
     let mut current_abstract: Option<String> = None;
     let mut current_num: Option<String> = None;
+    let mut current_override: Option<u8> = None;
+    let mut current_level: Option<(u8, NumberingLevelBuilder)> = None;
+    let mut abstract_ids = HashSet::new();
+    let mut num_ids = HashSet::new();
     loop {
         match xml.read_event_into(&mut buffer) {
             Ok(Event::Start(start)) => match local_name(start.name().as_ref()) {
-                b"abstractNum" => current_abstract = attribute(&start, b"abstractNumId")?,
-                b"numFmt" if current_abstract.is_some() => {
+                b"abstractNum" => {
+                    let id = required_attribute(&start, b"abstractNumId")?;
+                    if id.is_empty() || !abstract_ids.insert(id.clone()) {
+                        bail!("DOCX 抽象编号 ID 为空或重复");
+                    }
+                    current_abstract = Some(id);
+                }
+                b"num" => {
+                    let num_id = required_attribute(&start, b"numId")?;
+                    if num_id.is_empty() || !num_ids.insert(num_id.clone()) {
+                        bail!("DOCX 编号实例 ID 为空或重复");
+                    }
+                    result.instances.entry(num_id.clone()).or_default();
+                    current_num = Some(num_id);
+                }
+                b"abstractNumId" if current_num.is_some() => {
+                    let abstract_id = required_attribute(&start, b"val")?;
+                    result
+                        .instances
+                        .entry(current_num.as_ref().expect("num exists").clone())
+                        .or_default()
+                        .abstract_id = abstract_id;
+                }
+                b"lvlOverride" if current_num.is_some() => {
+                    current_override = Some(numbering_level_attribute(&start, b"ilvl")?);
+                }
+                b"startOverride" if current_override.is_some() => {
+                    let start_value = required_attribute(&start, b"val")?
+                        .parse::<u64>()
+                        .map_err(|_| anyhow!("DOCX 编号起始值无效"))?;
+                    result
+                        .instances
+                        .entry(current_num.as_ref().expect("num exists").clone())
+                        .or_default()
+                        .overrides
+                        .entry(current_override.expect("override exists"))
+                        .or_default()
+                        .start = Some(start_value);
+                }
+                b"lvl" if current_abstract.is_some() || current_override.is_some() => {
+                    current_level = Some((
+                        numbering_level_attribute(&start, b"ilvl")?,
+                        NumberingLevelBuilder::default(),
+                    ));
+                }
+                b"numFmt" if current_level.is_some() => {
                     if let Some(value) = attribute(&start, b"val")? {
-                        let kind = if value.eq_ignore_ascii_case("bullet") {
-                            Some(DocxListKind::Bullet)
-                        } else if value.eq_ignore_ascii_case("decimal") {
-                            Some(DocxListKind::Decimal)
-                        } else {
-                            None
-                        };
-                        if let (Some(id), Some(kind)) = (&current_abstract, kind) {
-                            abstract_kinds.entry(id.clone()).or_insert(kind);
-                        }
+                        current_level.as_mut().expect("level exists").1.format =
+                            parse_number_format(&value);
                     }
                 }
-                b"num" => current_num = attribute(&start, b"numId")?,
-                b"abstractNumId" if current_num.is_some() => {
-                    if let (Some(num), Some(abstract_id)) =
-                        (&current_num, attribute(&start, b"val")?)
-                    {
-                        num_to_abstract.insert(num.clone(), abstract_id);
+                b"lvlText" if current_level.is_some() => {
+                    current_level.as_mut().expect("level exists").1.text =
+                        attribute(&start, b"val")?;
+                }
+                b"pStyle" if current_level.is_some() => {
+                    current_level
+                        .as_mut()
+                        .expect("level exists")
+                        .1
+                        .paragraph_style = attribute(&start, b"val")?;
+                }
+                b"start" if current_level.is_some() => {
+                    current_level.as_mut().expect("level exists").1.start = Some(
+                        required_attribute(&start, b"val")?
+                            .parse::<u64>()
+                            .map_err(|_| anyhow!("DOCX 编号起始值无效"))?,
+                    );
+                }
+                b"lvlRestart" if current_level.is_some() => {
+                    let value = required_attribute(&start, b"val")?
+                        .parse::<u8>()
+                        .map_err(|_| anyhow!("DOCX 编号重启级别无效"))?;
+                    if value > 9 {
+                        bail!("DOCX 编号重启级别无效");
+                    }
+                    current_level
+                        .as_mut()
+                        .expect("level exists")
+                        .1
+                        .restart_after = Some(if value == 0 { None } else { Some(value - 1) });
+                }
+                b"isLgl" if current_level.is_some() => {
+                    let enabled = match attribute(&start, b"val")?.as_deref() {
+                        None | Some("1") | Some("true") | Some("on") => true,
+                        Some("0") | Some("false") | Some("off") => false,
+                        Some(_) => bail!("DOCX 编号合法格式标记无效"),
+                    };
+                    if enabled {
+                        current_level.as_mut().expect("level exists").1.legal = true;
                     }
                 }
                 _ => {}
             },
             Ok(Event::End(end)) => match local_name(end.name().as_ref()) {
+                b"lvl" => {
+                    if let Some((level, builder)) = current_level.take() {
+                        if let Some(definition) = builder.build() {
+                            if let (Some(num_id), Some(override_level)) =
+                                (&current_num, current_override)
+                            {
+                                if level == override_level {
+                                    let level_override = result
+                                        .instances
+                                        .entry(num_id.clone())
+                                        .or_default()
+                                        .overrides
+                                        .entry(level)
+                                        .or_default();
+                                    if level_override.level.replace(definition).is_some() {
+                                        bail!("DOCX 编号覆盖级别重复");
+                                    }
+                                }
+                            } else if let Some(abstract_id) = &current_abstract {
+                                if result
+                                    .abstracts
+                                    .entry(abstract_id.clone())
+                                    .or_default()
+                                    .insert(level, definition)
+                                    .is_some()
+                                {
+                                    bail!("DOCX 抽象编号级别重复");
+                                }
+                            }
+                        }
+                    }
+                }
+                b"lvlOverride" => current_override = None,
                 b"abstractNum" => current_abstract = None,
                 b"num" => current_num = None,
                 _ => {}
@@ -1469,15 +1872,10 @@ fn parse_numbering(reader: impl Read) -> anyhow::Result<HashMap<String, DocxList
         }
         buffer.clear();
     }
-    Ok(num_to_abstract
-        .into_iter()
-        .filter_map(|(num, abstract_id)| {
-            abstract_kinds
-                .get(&abstract_id)
-                .copied()
-                .map(|kind| (num, kind))
-        })
-        .collect())
+    result
+        .instances
+        .retain(|_, instance| !instance.abstract_id.is_empty());
+    Ok(result)
 }
 
 fn required_attribute(start: &BytesStart<'_>, name: &[u8]) -> anyhow::Result<String> {
@@ -1560,6 +1958,147 @@ struct DrawingState {
 }
 
 #[derive(Debug, Default)]
+struct NumberingState {
+    values: [Option<u64>; 9],
+}
+
+fn format_number(value: u64, format: NumberFormat) -> Option<String> {
+    match format {
+        NumberFormat::Decimal => Some(value.to_string()),
+        NumberFormat::DecimalZero => Some(if value < 10 {
+            format!("0{value}")
+        } else {
+            value.to_string()
+        }),
+        NumberFormat::UpperRoman | NumberFormat::LowerRoman => {
+            if !(1..=3999).contains(&value) {
+                return None;
+            }
+            let mut remaining = value;
+            let mut result = String::new();
+            for (number, digits) in [
+                (1000, "M"),
+                (900, "CM"),
+                (500, "D"),
+                (400, "CD"),
+                (100, "C"),
+                (90, "XC"),
+                (50, "L"),
+                (40, "XL"),
+                (10, "X"),
+                (9, "IX"),
+                (5, "V"),
+                (4, "IV"),
+                (1, "I"),
+            ] {
+                while remaining >= number {
+                    remaining -= number;
+                    result.push_str(digits);
+                }
+            }
+            if format == NumberFormat::LowerRoman {
+                result.make_ascii_lowercase();
+            }
+            Some(result)
+        }
+        NumberFormat::UpperLetter | NumberFormat::LowerLetter => {
+            if value == 0 {
+                return None;
+            }
+            let mut remaining = value;
+            let mut reversed = Vec::new();
+            while remaining > 0 {
+                remaining -= 1;
+                reversed.push((b'A' + (remaining % 26) as u8) as char);
+                remaining /= 26;
+            }
+            let mut result = reversed.into_iter().rev().collect::<String>();
+            if format == NumberFormat::LowerLetter {
+                result.make_ascii_lowercase();
+            }
+            Some(result)
+        }
+        NumberFormat::Bullet => None,
+    }
+}
+
+fn render_number_marker(
+    numbering: &NumberingDefinitions,
+    state: &mut NumberingState,
+    num_id: &str,
+    level: u8,
+) -> Option<String> {
+    let (definition, start_override) = numbering.level(num_id, level)?;
+    for lower_level in level.saturating_add(1)..=8 {
+        let Some((lower_definition, _)) = numbering.level(num_id, lower_level) else {
+            continue;
+        };
+        let restart_after = match lower_definition.restart_after {
+            Some(value) => value,
+            None => Some(lower_level.saturating_sub(1)),
+        };
+        if restart_after == Some(level) {
+            state.values[lower_level as usize] = None;
+        }
+    }
+
+    let start = start_override.unwrap_or(definition.start);
+    let value = state.values[level as usize]
+        .map(|value| value.saturating_add(1))
+        .unwrap_or(start);
+    state.values[level as usize] = Some(value);
+
+    if definition.format == NumberFormat::Bullet {
+        if definition.text.chars().any(|character| {
+            matches!(character as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
+        }) {
+            return Some("•".to_string());
+        }
+        return (!definition.text.is_empty()).then(|| definition.text.clone());
+    }
+
+    let mut marker = String::with_capacity(definition.text.len() + 16);
+    let mut characters = definition.text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '%' {
+            marker.push(character);
+            continue;
+        }
+        let Some(next) = characters.peek().copied() else {
+            marker.push('%');
+            continue;
+        };
+        if !next.is_ascii_digit() {
+            marker.push('%');
+            continue;
+        }
+        characters.next();
+        let placeholder = next.to_digit(10)?;
+        if placeholder == 0 {
+            return None;
+        }
+        let referenced_level = (placeholder - 1) as u8;
+        if referenced_level > level {
+            return None;
+        }
+        let (referenced_definition, referenced_override) =
+            numbering.level(num_id, referenced_level)?;
+        let referenced_value = state.values[referenced_level as usize]
+            .unwrap_or(referenced_override.unwrap_or(referenced_definition.start));
+        let format = if definition.legal {
+            NumberFormat::Decimal
+        } else {
+            referenced_definition.format
+        };
+        marker.push_str(&format_number(referenced_value, format)?);
+        if marker.len() > 1024 {
+            return None;
+        }
+    }
+    (!marker.is_empty()).then_some(marker)
+}
+
+#[derive(Debug, Default)]
 struct ParseState {
     ready: std::collections::VecDeque<DocxBlock>,
     paragraph_depth: usize,
@@ -1573,10 +2112,14 @@ struct ParseState {
     paragraph_role: DocxParagraphRole,
     paragraph_list_marker: Option<String>,
     paragraph_list_level: Option<u8>,
+    paragraph_style_id: Option<String>,
     paragraph_has_fragment: bool,
     num_properties_depth: usize,
-    current_num_id: Option<String>,
-    list_counters: HashMap<(String, u8), u64>,
+    style_num_id: Option<String>,
+    style_list_level: Option<u8>,
+    direct_num_id: Option<Option<String>>,
+    direct_list_level: Option<u8>,
+    numbering_states: HashMap<String, NumberingState>,
     row_cells: Vec<DocxTableCell>,
     row_logical_column: u16,
     cell_paragraphs: Vec<DocxParagraph>,
@@ -1598,7 +2141,7 @@ impl ParseState {
         &mut self,
         start: &BytesStart<'_>,
         document: &DocxDocument,
-        style_roles: &HashMap<String, DocxParagraphRole>,
+        styles: &HashMap<String, ParagraphStyle>,
     ) -> anyhow::Result<()> {
         match local_name(start.name().as_ref()) {
             b"tbl" => self.table_depth += 1,
@@ -1625,26 +2168,25 @@ impl ParseState {
                     self.paragraph_role = DocxParagraphRole::Normal;
                     self.paragraph_list_marker = None;
                     self.paragraph_list_level = None;
+                    self.paragraph_style_id = None;
                     self.paragraph_has_fragment = false;
-                    self.current_num_id = None;
+                    self.style_num_id = None;
+                    self.style_list_level = None;
+                    self.direct_num_id = None;
+                    self.direct_list_level = None;
                 }
             }
             b"pStyle" if self.paragraph_depth > 0 => {
                 if let Some(style) = attribute(start, b"val")? {
-                    self.paragraph_role = style_roles
-                        .get(&style)
-                        .copied()
-                        .unwrap_or_else(|| paragraph_role_from_style(&style));
-                    let normalized = style.to_ascii_lowercase();
-                    if normalized.contains("listbullet") {
-                        self.paragraph_role = DocxParagraphRole::ListItem;
-                        self.paragraph_list_marker = Some("•".to_string());
-                        self.paragraph_list_level.get_or_insert(0);
-                    } else if normalized.contains("listnumber") {
-                        self.paragraph_role = DocxParagraphRole::ListItem;
-                        self.paragraph_list_marker = Some("1.".to_string());
-                        self.paragraph_list_level.get_or_insert(0);
-                    }
+                    self.paragraph_style_id = Some(style.clone());
+                    let resolved = resolve_paragraph_style(styles, &style);
+                    self.paragraph_role = if resolved.role == DocxParagraphRole::Normal {
+                        paragraph_role_from_style(&style)
+                    } else {
+                        resolved.role
+                    };
+                    self.style_num_id = resolved.num_id;
+                    self.style_list_level = resolved.level;
                 }
             }
             b"outlineLvl" if self.paragraph_depth > 0 => {
@@ -1660,14 +2202,13 @@ impl ParseState {
             }
             b"numPr" if self.paragraph_depth > 0 => self.num_properties_depth += 1,
             b"ilvl" if self.num_properties_depth > 0 => {
-                self.paragraph_list_level = attribute(start, b"val")?
+                self.direct_list_level = attribute(start, b"val")?
                     .and_then(|value| value.parse::<u8>().ok())
-                    .map(|level| level.min(8));
+                    .filter(|level| *level <= 8);
             }
             b"numId" if self.num_properties_depth > 0 => {
-                if let Some(num_id) = attribute(start, b"val")?.filter(|value| value != "0") {
-                    self.paragraph_role = DocxParagraphRole::ListItem;
-                    self.current_num_id = Some(num_id);
+                if let Some(num_id) = attribute(start, b"val")? {
+                    self.direct_num_id = Some((num_id != "0").then_some(num_id));
                 }
             }
             b"gridSpan" if self.cell_depth > 0 => {
@@ -1726,38 +2267,49 @@ impl ParseState {
         Ok(())
     }
 
-    fn end(
-        &mut self,
-        name: &[u8],
-        numbering: &HashMap<String, DocxListKind>,
-    ) -> anyhow::Result<()> {
+    fn apply_numbering(&mut self, numbering: &NumberingDefinitions) {
+        let num_id = match &self.direct_num_id {
+            Some(value) => value.clone(),
+            None => self.style_num_id.clone(),
+        };
+        let level = self
+            .direct_list_level
+            .or(self.style_list_level)
+            .or_else(|| {
+                self.paragraph_style_id
+                    .as_deref()
+                    .and_then(|style_id| numbering.level_for_style(num_id.as_deref()?, style_id))
+            })
+            .unwrap_or(0);
+        let Some(num_id) = num_id else { return };
+        let marker = render_number_marker(
+            numbering,
+            self.numbering_states.entry(num_id.clone()).or_default(),
+            &num_id,
+            level,
+        );
+        if let Some(marker) = marker {
+            self.paragraph_list_marker = Some(marker);
+            self.paragraph_list_level = Some(level);
+            if self.paragraph_role == DocxParagraphRole::Normal {
+                self.paragraph_role = DocxParagraphRole::ListItem;
+            }
+        }
+    }
+
+    fn end(&mut self, name: &[u8], numbering: &NumberingDefinitions) -> anyhow::Result<()> {
         match name {
             b"t" => self.text_depth = self.text_depth.saturating_sub(1),
             b"del" => self.deleted_depth = self.deleted_depth.saturating_sub(1),
             b"instrText" => self.instruction_depth = self.instruction_depth.saturating_sub(1),
             b"numPr" => {
                 self.num_properties_depth = self.num_properties_depth.saturating_sub(1);
-                if self.num_properties_depth == 0 {
-                    if let Some(num_id) = self.current_num_id.take() {
-                        let level = *self.paragraph_list_level.get_or_insert(0);
-                        self.paragraph_list_marker = Some(match numbering.get(&num_id) {
-                            Some(DocxListKind::Decimal) => {
-                                let counter = self
-                                    .list_counters
-                                    .entry((num_id, level))
-                                    .and_modify(|counter| *counter = counter.saturating_add(1))
-                                    .or_insert(1);
-                                format!("{counter}.")
-                            }
-                            _ => "•".to_string(),
-                        });
-                    }
-                }
             }
             b"inline" | b"anchor" => self.drawing = None,
             b"p" => {
                 self.paragraph_depth = self.paragraph_depth.saturating_sub(1);
                 if self.paragraph_depth == 0 {
+                    self.apply_numbering(numbering);
                     if self.paragraph_text.len() > PARAGRAPH_TEXT_BYTES_LIMIT {
                         bail!("DOCX 单段文本超过安全上限");
                     }

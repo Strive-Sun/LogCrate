@@ -120,26 +120,37 @@ function DocxImage({
 function Paragraph({ paragraph, inCell = false }: { paragraph: DocxParagraph; inCell?: boolean }) {
   const content = paragraph.text || '\u00a0';
   const className = `docx-paragraph docx-${paragraph.role}${inCell ? ' in-cell' : ''}`;
+  const markedContent = paragraph.listMarker ? (
+    <>
+      <span className="docx-list-marker">{paragraph.listMarker}</span>
+      {content}
+    </>
+  ) : (
+    content
+  );
   switch (paragraph.role) {
     case 'title':
-      return <h1 className={className}>{content}</h1>;
+      return <h1 className={className}>{markedContent}</h1>;
     case 'heading1':
-      return <h2 className={className}>{content}</h2>;
+      return <h2 className={className}>{markedContent}</h2>;
     case 'heading2':
-      return <h3 className={className}>{content}</h3>;
+      return <h3 className={className}>{markedContent}</h3>;
     case 'heading3':
-      return <h4 className={className}>{content}</h4>;
+      return <h4 className={className}>{markedContent}</h4>;
     case 'listItem':
       return (
         <ul
           className={`${className} docx-list`}
           style={{ paddingInlineStart: `${2 + (paragraph.listLevel ?? 0) * 1.5}rem` }}
         >
-          <li data-marker={paragraph.listMarker ?? '•'}>{content}</li>
+          <li>
+            <span className="docx-list-marker">{paragraph.listMarker ?? '•'}</span>
+            <span>{content}</span>
+          </li>
         </ul>
       );
     default:
-      return <p className={className}>{content}</p>;
+      return <p className={className}>{markedContent}</p>;
   }
 }
 

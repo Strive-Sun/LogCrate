@@ -2574,11 +2574,17 @@ body.resizing {
   margin-top: 0;
   list-style: none;
 }
-.docx-list li::before {
-  content: attr(data-marker);
-  display: inline-block;
-  width: 1.6rem;
-  margin-left: -1.6rem;
+.docx-list li {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 0.45em;
+}
+.docx-list-marker {
+  margin-right: 0.45em;
+  white-space: nowrap;
+}
+.docx-list .docx-list-marker {
+  margin-right: 0;
 }
 .docx-table-wrap {
   width: 100%;

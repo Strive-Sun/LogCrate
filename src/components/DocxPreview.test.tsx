@@ -138,7 +138,14 @@ test('DOCX preview fills the active workspace panel instead of shrinking to its 
 test('preview renders semantic paragraphs and tables, lazily reads images, and searches cells', async () => {
   const { DocxPreview } = docxModule;
   const blocks: DocxPreviewBlock[] = [
-    { kind: 'paragraph', index: 0, text: 'Hello DOCX', role: 'heading1' },
+    {
+      kind: 'paragraph',
+      index: 0,
+      text: 'Hello DOCX',
+      role: 'heading1',
+      listMarker: '1.1',
+      listLevel: 1,
+    },
     {
       kind: 'table',
       index: 1,
@@ -209,7 +216,8 @@ test('preview renders semantic paragraphs and tables, lazily reads images, and s
     </I18nProvider>,
   );
   await harness.screen.findByText('Hello DOCX');
-  assert.equal(harness.screen.getByRole('heading', { level: 2 }).textContent, 'Hello DOCX');
+  assert.equal(harness.screen.getByRole('heading', { level: 2 }).textContent, '1.1Hello DOCX');
+  assert.equal(harness.screen.getByText('1.1').className, 'docx-list-marker');
   assert.equal(harness.screen.getByText('Cell A').closest('td')?.rowSpan, 2);
   assert.ok(harness.screen.getByText('Second paragraph'));
   await harness.screen.findByAltText('Screenshot');
