@@ -1,6 +1,9 @@
 //! Dedicated bounded DOCX preview sessions and lazy image reads.
 
-use crate::archive::docx::{DocxBlock, DocxDocument, DocxImageBlock, DocxImageStatus};
+use crate::archive::docx::{
+    DocxBlock, DocxDocument, DocxImageBlock, DocxImageStatus, DocxParagraph, DocxParagraphRole,
+    DocxTableBlock,
+};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -10,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 const MAX_DOCX_SESSIONS: usize = 5;
-const MAX_PAGE_BLOCKS: u64 = 500;
+const MAX_PAGE_BLOCKS: u64 = 100;
 static DOCX_SESSION_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize)]
@@ -24,11 +27,25 @@ pub struct OpenDocxResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum DocxPreviewBlock {
-    Text {
+    Paragraph {
         index: u64,
         text: String,
+        role: DocxParagraphRole,
+        list_marker: Option<String>,
+        list_level: Option<u8>,
+    },
+    Table {
+        index: u64,
+        rows: Vec<DocxPreviewTableRow>,
+        column_count: u16,
+        continuation: bool,
+        search_text: String,
     },
     Image {
         index: u64,
@@ -41,10 +58,134 @@ pub enum DocxPreviewBlock {
     },
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocxPreviewTableRow {
+    pub cells: Vec<DocxPreviewTableCell>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocxPreviewTableCell {
+    pub paragraphs: Vec<DocxPreviewParagraph>,
+    pub col_span: u16,
+    pub row_span: u16,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocxPreviewParagraph {
+    pub text: String,
+    pub role: DocxParagraphRole,
+    pub list_marker: Option<String>,
+    pub list_level: Option<u8>,
+}
+
 #[derive(Debug)]
 enum StoredBlock {
-    Text { offset: u64, length: u64 },
+    Paragraph(StoredParagraph),
+    Table(StoredTable),
     Image(DocxImageBlock),
+}
+
+#[derive(Debug)]
+struct StoredParagraph {
+    offset: u64,
+    length: u64,
+    role: DocxParagraphRole,
+    list_marker: Option<String>,
+    list_level: Option<u8>,
+}
+
+#[derive(Debug)]
+struct StoredTable {
+    rows: Vec<StoredTableRow>,
+    column_count: u16,
+    continuation: bool,
+}
+
+#[derive(Debug)]
+struct StoredTableRow {
+    cells: Vec<StoredTableCell>,
+}
+
+#[derive(Debug)]
+struct StoredTableCell {
+    paragraphs: Vec<StoredParagraph>,
+    col_span: u16,
+    row_span: u16,
+}
+
+fn store_paragraph(
+    writer: &mut BufWriter<File>,
+    offset: &mut u64,
+    paragraph: DocxParagraph,
+) -> anyhow::Result<StoredParagraph> {
+    writer.write_all(paragraph.text.as_bytes())?;
+    let length = paragraph.text.len() as u64;
+    let stored = StoredParagraph {
+        offset: *offset,
+        length,
+        role: paragraph.role,
+        list_marker: paragraph.list_marker,
+        list_level: paragraph.list_level,
+    };
+    *offset = (*offset).saturating_add(length);
+    Ok(stored)
+}
+
+fn store_table(
+    writer: &mut BufWriter<File>,
+    offset: &mut u64,
+    table: DocxTableBlock,
+) -> anyhow::Result<StoredTable> {
+    let rows = table
+        .rows
+        .into_iter()
+        .map(|row| {
+            let cells = row
+                .cells
+                .into_iter()
+                .map(|cell| {
+                    let paragraphs = cell
+                        .paragraphs
+                        .into_iter()
+                        .map(|paragraph| store_paragraph(writer, offset, paragraph))
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    Ok(StoredTableCell {
+                        paragraphs,
+                        col_span: cell.col_span,
+                        row_span: cell.row_span,
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(StoredTableRow { cells })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(StoredTable {
+        rows,
+        column_count: table.column_count,
+        continuation: table.continuation,
+    })
+}
+
+fn read_cached_text(cache: &mut File, offset: u64, length: u64) -> anyhow::Result<String> {
+    let mut bytes = vec![0; length as usize];
+    cache.seek(SeekFrom::Start(offset))?;
+    cache.read_exact(&mut bytes)?;
+    Ok(String::from_utf8(bytes)?)
+}
+
+fn read_stored_paragraph(
+    cache: &mut File,
+    paragraph: &StoredParagraph,
+) -> anyhow::Result<DocxPreviewParagraph> {
+    Ok(DocxPreviewParagraph {
+        text: read_cached_text(cache, paragraph.offset, paragraph.length)?,
+        role: paragraph.role,
+        list_marker: paragraph.list_marker.clone(),
+        list_level: paragraph.list_level,
+    })
 }
 
 #[derive(Debug)]
@@ -145,12 +286,14 @@ impl DocxSessionManager {
         let parsed = document.parse_blocks_until(
             |block| {
                 match block {
-                    DocxBlock::Text { text } => {
-                        writer.write_all(text.as_bytes())?;
-                        let length = text.len() as u64;
-                        blocks.push(StoredBlock::Text { offset, length });
-                        offset = offset.saturating_add(length);
-                    }
+                    DocxBlock::Paragraph(paragraph) => blocks.push(StoredBlock::Paragraph(
+                        store_paragraph(&mut writer, &mut offset, paragraph)?,
+                    )),
+                    DocxBlock::Table(table) => blocks.push(StoredBlock::Table(store_table(
+                        &mut writer,
+                        &mut offset,
+                        table,
+                    )?)),
                     DocxBlock::Image(image) => {
                         if image.status == DocxImageStatus::Supported {
                             images.insert(image.image_id.clone(), image.clone());
@@ -244,13 +387,63 @@ impl DocxSessionManager {
         let mut result = Vec::with_capacity((end - start) as usize);
         for index in start..end {
             match &session.blocks[index as usize] {
-                StoredBlock::Text { offset, length } => {
-                    let mut bytes = vec![0; *length as usize];
-                    cache.seek(SeekFrom::Start(*offset))?;
-                    cache.read_exact(&mut bytes)?;
-                    result.push(DocxPreviewBlock::Text {
+                StoredBlock::Paragraph(paragraph) => {
+                    result.push(DocxPreviewBlock::Paragraph {
                         index,
-                        text: String::from_utf8(bytes)?,
+                        text: read_cached_text(&mut cache, paragraph.offset, paragraph.length)?,
+                        role: paragraph.role,
+                        list_marker: paragraph.list_marker.clone(),
+                        list_level: paragraph.list_level,
+                    });
+                }
+                StoredBlock::Table(table) => {
+                    let rows = table
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            let cells = row
+                                .cells
+                                .iter()
+                                .map(|cell| {
+                                    let paragraphs = cell
+                                        .paragraphs
+                                        .iter()
+                                        .map(|paragraph| {
+                                            read_stored_paragraph(&mut cache, paragraph)
+                                        })
+                                        .collect::<anyhow::Result<Vec<_>>>()?;
+                                    Ok(DocxPreviewTableCell {
+                                        paragraphs,
+                                        col_span: cell.col_span,
+                                        row_span: cell.row_span,
+                                    })
+                                })
+                                .collect::<anyhow::Result<Vec<_>>>()?;
+                            Ok(DocxPreviewTableRow { cells })
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    result.push(DocxPreviewBlock::Table {
+                        index,
+                        search_text: rows
+                            .iter()
+                            .map(|row| {
+                                row.cells
+                                    .iter()
+                                    .map(|cell| {
+                                        cell.paragraphs
+                                            .iter()
+                                            .map(|paragraph| paragraph.text.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join("\n")
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\t")
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        rows,
+                        column_count: table.column_count,
+                        continuation: table.continuation,
                     });
                 }
                 StoredBlock::Image(image) => result.push(DocxPreviewBlock::Image {
@@ -316,7 +509,7 @@ mod tests {
             ("[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
             ("_rels/.rels", br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
             ("word/_rels/document.xml.rels", br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="img1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/p.png"/></Relationships>"#.to_vec()),
-            ("word/document.xml", br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:body><w:p><w:r><w:t>Hello</w:t><w:drawing><wp:inline><a:graphic><a:blip r:embed="img1"/></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#.to_vec()),
+            ("word/document.xml", br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:body><w:p><w:r><w:t>Hello</w:t><w:drawing><wp:inline><a:graphic><a:blip r:embed="img1"/></a:graphic></wp:inline></w:drawing></w:r></w:p><w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>Cell A</w:t></w:r></w:p><w:p><w:r><w:t>Cell B</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#.to_vec()),
             ("word/media/p.png", png),
         ];
         for (name, bytes) in parts {
@@ -338,7 +531,19 @@ mod tests {
         let opened = manager.open(&path, "request-1", &cancel).unwrap();
         let blocks = manager.read_blocks(&opened.session_id, 0, 20).unwrap();
         assert_eq!(blocks.len() as u64, opened.block_count);
-        assert!(matches!(&blocks[0], DocxPreviewBlock::Text { text, .. } if text == "Hello"));
+        assert!(matches!(&blocks[0], DocxPreviewBlock::Paragraph { text, .. } if text == "Hello"));
+        let table = blocks
+            .iter()
+            .find_map(|block| match block {
+                DocxPreviewBlock::Table {
+                    rows, search_text, ..
+                } => Some((rows, search_text)),
+                _ => None,
+            })
+            .expect("structured table block");
+        assert_eq!(table.0[0].cells[0].col_span, 2);
+        assert_eq!(table.0[0].cells[0].paragraphs.len(), 2);
+        assert_eq!(table.1, "Cell A\nCell B");
         let image_id = blocks
             .iter()
             .find_map(|block| match block {
@@ -364,6 +569,67 @@ mod tests {
             .exists());
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir(cache);
+    }
+
+    #[test]
+    fn preview_image_block_serializes_with_frontend_field_names() {
+        let value = serde_json::to_value(DocxPreviewBlock::Image {
+            index: 2,
+            image_id: "opaque-image".to_string(),
+            mime_type: Some("image/png".to_string()),
+            alt_text: Some("Screenshot".to_string()),
+            width_emu: Some(914_400),
+            height_emu: Some(457_200),
+            status: DocxImageStatus::Supported,
+        })
+        .unwrap();
+
+        assert_eq!(value["kind"], "image");
+        assert_eq!(value["imageId"], "opaque-image");
+        assert_eq!(value["mimeType"], "image/png");
+        assert_eq!(value["altText"], "Screenshot");
+        assert_eq!(value["widthEmu"], 914_400);
+        assert_eq!(value["heightEmu"], 457_200);
+        assert!(value.get("image_id").is_none());
+    }
+
+    #[test]
+    fn structured_blocks_serialize_with_frontend_field_names() {
+        let paragraph = serde_json::to_value(DocxPreviewBlock::Paragraph {
+            index: 0,
+            text: "Heading".to_string(),
+            role: DocxParagraphRole::Heading1,
+            list_marker: None,
+            list_level: None,
+        })
+        .unwrap();
+        assert_eq!(paragraph["kind"], "paragraph");
+        assert_eq!(paragraph["role"], "heading1");
+
+        let table = serde_json::to_value(DocxPreviewBlock::Table {
+            index: 1,
+            rows: vec![DocxPreviewTableRow {
+                cells: vec![DocxPreviewTableCell {
+                    paragraphs: vec![DocxPreviewParagraph {
+                        text: "Cell".to_string(),
+                        role: DocxParagraphRole::Normal,
+                        list_marker: None,
+                        list_level: None,
+                    }],
+                    col_span: 2,
+                    row_span: 3,
+                }],
+            }],
+            column_count: 2,
+            continuation: false,
+            search_text: "Cell".to_string(),
+        })
+        .unwrap();
+        assert_eq!(table["kind"], "table");
+        assert_eq!(table["columnCount"], 2);
+        assert_eq!(table["searchText"], "Cell");
+        assert_eq!(table["rows"][0]["cells"][0]["colSpan"], 2);
+        assert_eq!(table["rows"][0]["cells"][0]["rowSpan"], 3);
     }
 
     #[test]

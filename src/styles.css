@@ -2506,7 +2506,9 @@ body.resizing {
 .docx-preview {
   position: relative;
   display: flex;
+  flex: 1;
   flex-direction: column;
+  min-width: 0;
   height: 100%;
   min-height: 0;
   background: var(--bg);
@@ -2543,11 +2545,65 @@ body.resizing {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   border-radius: 6px;
 }
-.docx-text {
+.docx-paragraph {
+  margin: 0 0 0.7em;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.6;
   font-family: system-ui, sans-serif;
+}
+.docx-title {
+  margin-top: 0.25em;
+  margin-bottom: 0.8em;
+  font-size: 1.85rem;
+  line-height: 1.25;
+}
+.docx-heading1 {
+  margin-top: 0.8em;
+  font-size: 1.5rem;
+}
+.docx-heading2 {
+  margin-top: 0.65em;
+  font-size: 1.25rem;
+}
+.docx-heading3 {
+  margin-top: 0.55em;
+  font-size: 1.08rem;
+}
+.docx-list {
+  margin-top: 0;
+  list-style: none;
+}
+.docx-list li::before {
+  content: attr(data-marker);
+  display: inline-block;
+  width: 1.6rem;
+  margin-left: -1.6rem;
+}
+.docx-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+.docx-table-wrap.continuation {
+  margin-top: -8px;
+}
+.docx-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: auto;
+  font-family: system-ui, sans-serif;
+}
+.docx-table td {
+  min-width: 4rem;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  vertical-align: top;
+}
+.docx-table .docx-paragraph.in-cell {
+  margin: 0 0 0.45em;
+}
+.docx-table .docx-paragraph.in-cell:last-child {
+  margin-bottom: 0;
 }
 .docx-image {
   display: block;

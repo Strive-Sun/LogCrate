@@ -243,8 +243,36 @@ export interface OpenDocxSessionResult {
 export type DocxImageStatus =
   'supported' | 'unsupportedFormat' | 'external' | 'missing' | 'unsafePath';
 
+export type DocxParagraphRole =
+  'normal' | 'title' | 'heading1' | 'heading2' | 'heading3' | 'listItem';
+
+export interface DocxParagraph {
+  text: string;
+  role: DocxParagraphRole;
+  listMarker?: string;
+  listLevel?: number;
+}
+
+export interface DocxTableCell {
+  paragraphs: DocxParagraph[];
+  colSpan: number;
+  rowSpan: number;
+}
+
+export interface DocxTableRow {
+  cells: DocxTableCell[];
+}
+
 export type DocxPreviewBlock =
-  | { kind: 'text'; index: number; text: string }
+  | ({ kind: 'paragraph'; index: number } & DocxParagraph)
+  | {
+      kind: 'table';
+      index: number;
+      rows: DocxTableRow[];
+      columnCount: number;
+      continuation: boolean;
+      searchText: string;
+    }
   | {
       kind: 'image';
       index: number;

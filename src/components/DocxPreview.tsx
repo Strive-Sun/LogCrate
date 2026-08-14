@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { api, type DocxPreviewBlock, type OpenDocxSessionResult } from '../api';
+import { api, type DocxParagraph, type DocxPreviewBlock, type OpenDocxSessionResult } from '../api';
 import { useI18n } from '../i18n/I18nProvider';
 
 const PAGE = 100;
@@ -117,6 +117,59 @@ function DocxImage({
   return <img className="docx-image" src={url} alt={block.altText ?? ''} />;
 }
 
+function Paragraph({ paragraph, inCell = false }: { paragraph: DocxParagraph; inCell?: boolean }) {
+  const content = paragraph.text || '\u00a0';
+  const className = `docx-paragraph docx-${paragraph.role}${inCell ? ' in-cell' : ''}`;
+  switch (paragraph.role) {
+    case 'title':
+      return <h1 className={className}>{content}</h1>;
+    case 'heading1':
+      return <h2 className={className}>{content}</h2>;
+    case 'heading2':
+      return <h3 className={className}>{content}</h3>;
+    case 'heading3':
+      return <h4 className={className}>{content}</h4>;
+    case 'listItem':
+      return (
+        <ul
+          className={`${className} docx-list`}
+          style={{ paddingInlineStart: `${2 + (paragraph.listLevel ?? 0) * 1.5}rem` }}
+        >
+          <li data-marker={paragraph.listMarker ?? '•'}>{content}</li>
+        </ul>
+      );
+    default:
+      return <p className={className}>{content}</p>;
+  }
+}
+
+function DocxTable({ block }: { block: Extract<DocxPreviewBlock, { kind: 'table' }> }) {
+  return (
+    <div className={`docx-table-wrap${block.continuation ? ' continuation' : ''}`}>
+      <table className="docx-table">
+        <colgroup>
+          {Array.from({ length: block.columnCount }, (_, index) => (
+            <col key={index} style={{ width: `${100 / Math.max(1, block.columnCount)}%` }} />
+          ))}
+        </colgroup>
+        <tbody>
+          {block.rows.map((row, rowIndex) => (
+            <tr key={rowIndex}>
+              {row.cells.map((cell, cellIndex) => (
+                <td key={cellIndex} colSpan={cell.colSpan} rowSpan={cell.rowSpan}>
+                  {cell.paragraphs.map((paragraph, paragraphIndex) => (
+                    <Paragraph key={paragraphIndex} paragraph={paragraph} inCell />
+                  ))}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export function DocxPreview({
   session,
   active = true,
@@ -166,7 +219,10 @@ export function DocxPreview({
     count: session.blockCount,
     getScrollElement: () => scrollRef.current,
     initialRect: { width: 800, height: 600 },
-    estimateSize: (index) => (blocks.get(index)?.kind === 'image' ? 280 : 32),
+    estimateSize: (index) => {
+      const kind = blocks.get(index)?.kind;
+      return kind === 'image' ? 280 : kind === 'table' ? 180 : 48;
+    },
     overscan: 8,
   });
   const virtualItems = virtualizer.getVirtualItems();
@@ -219,7 +275,12 @@ export function DocxPreview({
       for (const block of ordered) {
         if (reverse ? block.index > index : block.index < index) continue;
         scanned += 1;
-        const text = block.kind === 'text' ? block.text : (block.altText ?? '');
+        const text =
+          block.kind === 'paragraph'
+            ? block.text
+            : block.kind === 'table'
+              ? block.searchText
+              : (block.altText ?? '');
         if (docxTextMatches(text, query, wholeWord, matchCase)) {
           setBlocks((current) => new Map(current).set(block.index, block));
           setMatch(block.index);
@@ -341,8 +402,10 @@ export function DocxPreview({
               >
                 {!block ? (
                   <span>{t('docx.loading')}</span>
-                ) : block.kind === 'text' ? (
-                  <div className="docx-text">{block.text || '\u00a0'}</div>
+                ) : block.kind === 'paragraph' ? (
+                  <Paragraph paragraph={block} />
+                ) : block.kind === 'table' ? (
+                  <DocxTable block={block} />
                 ) : (
                   <DocxImage sessionId={session.sessionId} block={block} cache={cache} />
                 )}

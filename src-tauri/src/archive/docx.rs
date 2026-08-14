@@ -19,6 +19,8 @@ const CONTENT_TYPES_PATH: &str = "[Content_Types].xml";
 const ROOT_RELATIONSHIPS_PATH: &str = "_rels/.rels";
 const MAIN_DOCUMENT_PATH: &str = "word/document.xml";
 const DOCUMENT_RELATIONSHIPS_PATH: &str = "word/_rels/document.xml.rels";
+const STYLES_PATH: &str = "word/styles.xml";
+const NUMBERING_PATH: &str = "word/numbering.xml";
 const OFFICE_DOCUMENT_RELATIONSHIP: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
 const STRICT_OFFICE_DOCUMENT_RELATIONSHIP: &str =
@@ -30,12 +32,71 @@ const STRICT_IMAGE_RELATIONSHIP: &str =
 const WORD_DOCUMENT_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
 const PACKAGE_METADATA_LIMIT: u64 = 1024 * 1024;
+const TABLE_ROWS_PER_BLOCK: usize = 64;
+const TABLE_TEXT_BYTES_PER_BLOCK: usize = 64 * 1024;
+const PARAGRAPH_TEXT_BYTES_LIMIT: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum DocxBlock {
-    Text { text: String },
+    Paragraph(DocxParagraph),
+    Table(DocxTableBlock),
     Image(DocxImageBlock),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DocxParagraphRole {
+    #[default]
+    Normal,
+    Title,
+    Heading1,
+    Heading2,
+    Heading3,
+    ListItem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocxParagraph {
+    pub text: String,
+    pub role: DocxParagraphRole,
+    pub list_marker: Option<String>,
+    pub list_level: Option<u8>,
+}
+
+impl DocxParagraph {
+    fn normal(text: String) -> Self {
+        Self {
+            text,
+            role: DocxParagraphRole::Normal,
+            list_marker: None,
+            list_level: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocxTableBlock {
+    pub rows: Vec<DocxTableRow>,
+    pub column_count: u16,
+    pub continuation: bool,
+    pub search_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocxTableRow {
+    pub cells: Vec<DocxTableCell>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocxTableCell {
+    pub paragraphs: Vec<DocxParagraph>,
+    pub col_span: u16,
+    pub row_span: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -95,6 +156,12 @@ pub struct DocxDocument {
     content_types: ContentTypes,
     relationships: HashMap<String, Relationship>,
     entry_names: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocxListKind {
+    Bullet,
+    Decimal,
 }
 
 impl DocxDocument {
@@ -230,6 +297,24 @@ impl DocxDocument {
         let started = Instant::now();
         let file = File::open(&self.path)?;
         let mut archive = ZipArchive::new(BufReader::new(file)).context("DOCX ZIP 结构无效")?;
+        let style_roles = if self.entry_names.contains(STYLES_PATH) {
+            optional_structure_metadata(parse_style_roles(read_part(
+                &mut archive,
+                STYLES_PATH,
+                PACKAGE_METADATA_LIMIT,
+            )?))?
+        } else {
+            HashMap::new()
+        };
+        let numbering = if self.entry_names.contains(NUMBERING_PATH) {
+            optional_structure_metadata(parse_numbering(read_part(
+                &mut archive,
+                NUMBERING_PATH,
+                PACKAGE_METADATA_LIMIT,
+            )?))?
+        } else {
+            HashMap::new()
+        };
         let document = archive.by_name(MAIN_DOCUMENT_PATH)?;
         if document.encrypted() {
             bail!("DOCX 主文档已加密");
@@ -270,7 +355,7 @@ impl DocxDocument {
                         body_seen = true;
                         inside_body = true;
                     } else if inside_body {
-                        state.start(&start, self)?;
+                        state.start(&start, self, &style_roles)?;
                     }
                 }
                 Ok(Event::End(end)) => {
@@ -279,7 +364,7 @@ impl DocxDocument {
                     if inside_body && xml_depth == 2 && name == b"body" {
                         inside_body = false;
                     } else if inside_body {
-                        state.end(name)?;
+                        state.end(name, &numbering)?;
                     }
                     xml_depth = xml_depth.saturating_sub(1);
                 }
@@ -298,7 +383,8 @@ impl DocxDocument {
             buffer.clear();
             while let Some(block) = state.ready.pop_front() {
                 let block_bytes = match &block {
-                    DocxBlock::Text { text } => text.len() as u64,
+                    DocxBlock::Paragraph(paragraph) => paragraph.text.len() as u64,
+                    DocxBlock::Table(table) => table.search_text.len() as u64,
                     DocxBlock::Image(image) => image
                         .alt_text
                         .as_ref()
@@ -619,24 +705,115 @@ mod tests {
 <w:p><w:r><w:del><w:t>deleted</w:t></w:del><w:instrText>field</w:instrText><w:t>tail</w:t></w:r></w:p>"#,
         );
         let fixture = Fixture::create(&xml, None, &[]);
-        assert_eq!(
-            fixture.blocks().expect("parse blocks"),
-            vec![
-                DocxBlock::Text {
-                    text: "Hello world\ttab\nline\n".into()
-                },
-                DocxBlock::Text { text: "\n".into() },
-                DocxBlock::Text {
-                    text: "A1 A2\tB\n".into()
-                },
-                DocxBlock::Text {
-                    text: "C\t\n".into()
-                },
-                DocxBlock::Text {
-                    text: "tail\n".into()
-                },
-            ]
+        let blocks = fixture.blocks().expect("parse blocks");
+        assert!(
+            matches!(&blocks[0], DocxBlock::Paragraph(paragraph) if paragraph.text == "Hello world\ttab\nline")
         );
+        assert!(matches!(&blocks[1], DocxBlock::Paragraph(paragraph) if paragraph.text.is_empty()));
+        let DocxBlock::Table(table) = &blocks[2] else {
+            panic!("expected structured table")
+        };
+        assert_eq!(table.rows.len(), 2);
+        assert_eq!(table.rows[0].cells.len(), 2);
+        assert_eq!(table.rows[0].cells[0].paragraphs.len(), 2);
+        assert_eq!(table.rows[0].cells[0].paragraphs[0].text, "A1");
+        assert_eq!(table.rows[0].cells[0].paragraphs[1].text, "A2");
+        assert_eq!(table.search_text, "A1\nA2\tB\nC\t");
+        assert!(matches!(&blocks[3], DocxBlock::Paragraph(paragraph) if paragraph.text == "tail"));
+    }
+
+    #[test]
+    fn classifies_titles_headings_and_common_lists() {
+        let styles = br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="CustomHeading"><w:name w:val="Heading 2"/></w:style></w:styles>"#;
+        let numbering = br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="7"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl></w:abstractNum><w:num w:numId="4"><w:abstractNumId w:val="7"/></w:num></w:numbering>"#;
+        let xml = document(
+            r#"<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>Document title</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="CustomHeading"/></w:pPr><w:r><w:t>Section</w:t></w:r></w:p>
+<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="4"/></w:numPr></w:pPr><w:r><w:t>First</w:t></w:r></w:p>
+<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="4"/></w:numPr></w:pPr><w:r><w:t>Second</w:t></w:r></w:p>"#,
+        );
+        let fixture = Fixture::create(
+            &xml,
+            None,
+            &[(STYLES_PATH, styles), (NUMBERING_PATH, numbering)],
+        );
+        let blocks = fixture.blocks().expect("parse semantic paragraphs");
+        assert!(
+            matches!(&blocks[0], DocxBlock::Paragraph(paragraph) if paragraph.role == DocxParagraphRole::Title)
+        );
+        assert!(
+            matches!(&blocks[1], DocxBlock::Paragraph(paragraph) if paragraph.role == DocxParagraphRole::Heading2)
+        );
+        assert!(
+            matches!(&blocks[2], DocxBlock::Paragraph(paragraph) if paragraph.list_marker.as_deref() == Some("1."))
+        );
+        assert!(
+            matches!(&blocks[3], DocxBlock::Paragraph(paragraph) if paragraph.list_marker.as_deref() == Some("2."))
+        );
+    }
+
+    #[test]
+    fn maps_grid_and_vertical_spans_and_bounds_large_table_groups() {
+        let mut rows = String::new();
+        rows.push_str(r#"<w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>Merged</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>R1</w:t></w:r></w:p></w:tc></w:tr>"#);
+        rows.push_str(r#"<w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/><w:vMerge/></w:tcPr><w:p/></w:tc><w:tc><w:p><w:r><w:t>R2</w:t></w:r></w:p></w:tc></w:tr>"#);
+        for index in 2..66 {
+            rows.push_str(&format!(
+                r#"<w:tr><w:tc><w:p><w:r><w:t>row-{index}</w:t></w:r></w:p></w:tc></w:tr>"#
+            ));
+        }
+        let fixture = Fixture::create(&document(&format!("<w:tbl>{rows}</w:tbl>")), None, &[]);
+        let tables = fixture
+            .blocks()
+            .expect("parse bounded table")
+            .into_iter()
+            .filter_map(|block| match block {
+                DocxBlock::Table(table) => Some(table),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tables.len(), 2);
+        assert_eq!(tables[0].rows.len(), TABLE_ROWS_PER_BLOCK);
+        assert!(!tables[0].continuation);
+        assert!(tables[1].continuation);
+        assert_eq!(tables[0].rows[0].cells[0].col_span, 2);
+        assert_eq!(tables[0].rows[0].cells[0].row_span, 2);
+        assert_eq!(tables[0].rows[1].cells.len(), 1);
+    }
+
+    #[test]
+    fn invalid_table_spans_fall_back_without_losing_text() {
+        let xml = document(
+            r#"<w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val="0"/><w:vMerge w:val="invalid"/></w:tcPr><w:p><w:r><w:t>Visible</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        );
+        let fixture = Fixture::create(&xml, None, &[]);
+        let blocks = fixture.blocks().expect("invalid spans safely fall back");
+        let DocxBlock::Table(table) = &blocks[0] else {
+            panic!("expected table")
+        };
+        assert_eq!(table.rows[0].cells[0].col_span, 1);
+        assert_eq!(table.rows[0].cells[0].row_span, 1);
+        assert_eq!(table.rows[0].cells[0].paragraphs[0].text, "Visible");
+    }
+
+    #[test]
+    fn malformed_optional_styles_fall_back_but_doctype_is_rejected_when_opened() {
+        let xml = document(
+            r#"<w:p><w:pPr><w:pStyle w:val="Broken"/></w:pPr><w:r><w:t>Visible</w:t></w:r></w:p>"#,
+        );
+        let malformed = Fixture::create(&xml, None, &[(STYLES_PATH, b"<w:styles><broken")]);
+        assert!(matches!(
+            &malformed.blocks().expect("malformed optional styles fall back")[0],
+            DocxBlock::Paragraph(paragraph)
+                if paragraph.role == DocxParagraphRole::Normal && paragraph.text == "Visible"
+        ));
+
+        let unsafe_styles = br#"<!DOCTYPE styles [<!ENTITY x SYSTEM "file:///x">]><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#;
+        let unsafe_fixture = Fixture::create(&xml, None, &[(STYLES_PATH, unsafe_styles)]);
+        let error = unsafe_fixture
+            .blocks()
+            .expect_err("optional metadata DOCTYPE must be rejected");
+        assert!(format!("{error:#}").contains("DOCTYPE"));
     }
 
     #[test]
@@ -661,17 +838,16 @@ mod tests {
         assert_eq!(blocks.len(), 5);
         assert_eq!(
             blocks[0],
-            DocxBlock::Text {
-                text: "before".into()
-            }
+            DocxBlock::Paragraph(DocxParagraph::normal("before".into()))
         );
         assert_eq!(
             blocks[2],
-            DocxBlock::Text {
-                text: "after\n".into()
-            }
+            DocxBlock::Paragraph(DocxParagraph::normal("after".into()))
         );
-        assert_eq!(blocks[4], DocxBlock::Text { text: "\n".into() });
+        assert_eq!(
+            blocks[4],
+            DocxBlock::Paragraph(DocxParagraph::normal(String::new()))
+        );
         let DocxBlock::Image(first) = &blocks[1] else {
             panic!("expected first image")
         };
@@ -715,7 +891,7 @@ mod tests {
             .into_iter()
             .filter_map(|block| match block {
                 DocxBlock::Image(image) => Some(image.status),
-                DocxBlock::Text { .. } => None,
+                DocxBlock::Paragraph(_) | DocxBlock::Table(_) => None,
             })
             .collect();
         assert_eq!(
@@ -988,7 +1164,7 @@ mod tests {
             .into_iter()
             .find_map(|block| match block {
                 DocxBlock::Image(image) => Some(image),
-                DocxBlock::Text { .. } => None,
+                DocxBlock::Paragraph(_) | DocxBlock::Table(_) => None,
             })
             .expect("image block");
         assert_eq!(image.status, DocxImageStatus::UnsafePath);
@@ -1179,6 +1355,131 @@ fn parse_relationships(reader: impl Read) -> anyhow::Result<HashMap<String, Rela
     Ok(result)
 }
 
+fn parse_style_roles(reader: impl Read) -> anyhow::Result<HashMap<String, DocxParagraphRole>> {
+    let mut xml = Reader::from_reader(BufReader::new(reader));
+    xml.trim_text(true);
+    xml.expand_empty_elements(true);
+    let mut buffer = Vec::new();
+    let mut roles = HashMap::new();
+    let mut current: Option<(String, DocxParagraphRole)> = None;
+    loop {
+        match xml.read_event_into(&mut buffer) {
+            Ok(Event::Start(start)) => match local_name(start.name().as_ref()) {
+                b"style" => {
+                    current =
+                        attribute(&start, b"styleId")?.map(|id| (id, DocxParagraphRole::Normal));
+                }
+                b"name" => {
+                    if let (Some((_, role)), Some(name)) =
+                        (&mut current, attribute(&start, b"val")?)
+                    {
+                        *role = paragraph_role_from_style(&name);
+                    }
+                }
+                b"outlineLvl" => {
+                    if let (Some((_, role)), Some(level)) = (
+                        &mut current,
+                        attribute(&start, b"val")?.and_then(|value| value.parse::<u8>().ok()),
+                    ) {
+                        *role = match level {
+                            0 => DocxParagraphRole::Heading1,
+                            1 => DocxParagraphRole::Heading2,
+                            2 => DocxParagraphRole::Heading3,
+                            _ => *role,
+                        };
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::End(end)) if local_name(end.name().as_ref()) == b"style" => {
+                if let Some((id, role)) = current.take() {
+                    roles.insert(id, role);
+                }
+            }
+            Ok(Event::DocType(_)) => bail!("DOCX XML 禁止 DOCTYPE 或外部实体"),
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(anyhow!("DOCX 样式 XML 无效: {error}")),
+        }
+        buffer.clear();
+    }
+    Ok(roles)
+}
+
+fn optional_structure_metadata<T: Default>(result: anyhow::Result<T>) -> anyhow::Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let message = format!("{error:#}");
+            if message.contains("DOCTYPE") || message.contains("安全上限") {
+                Err(error)
+            } else {
+                Ok(T::default())
+            }
+        }
+    }
+}
+
+fn parse_numbering(reader: impl Read) -> anyhow::Result<HashMap<String, DocxListKind>> {
+    let mut xml = Reader::from_reader(BufReader::new(reader));
+    xml.trim_text(true);
+    xml.expand_empty_elements(true);
+    let mut buffer = Vec::new();
+    let mut abstract_kinds = HashMap::new();
+    let mut num_to_abstract = HashMap::new();
+    let mut current_abstract: Option<String> = None;
+    let mut current_num: Option<String> = None;
+    loop {
+        match xml.read_event_into(&mut buffer) {
+            Ok(Event::Start(start)) => match local_name(start.name().as_ref()) {
+                b"abstractNum" => current_abstract = attribute(&start, b"abstractNumId")?,
+                b"numFmt" if current_abstract.is_some() => {
+                    if let Some(value) = attribute(&start, b"val")? {
+                        let kind = if value.eq_ignore_ascii_case("bullet") {
+                            Some(DocxListKind::Bullet)
+                        } else if value.eq_ignore_ascii_case("decimal") {
+                            Some(DocxListKind::Decimal)
+                        } else {
+                            None
+                        };
+                        if let (Some(id), Some(kind)) = (&current_abstract, kind) {
+                            abstract_kinds.entry(id.clone()).or_insert(kind);
+                        }
+                    }
+                }
+                b"num" => current_num = attribute(&start, b"numId")?,
+                b"abstractNumId" if current_num.is_some() => {
+                    if let (Some(num), Some(abstract_id)) =
+                        (&current_num, attribute(&start, b"val")?)
+                    {
+                        num_to_abstract.insert(num.clone(), abstract_id);
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::End(end)) => match local_name(end.name().as_ref()) {
+                b"abstractNum" => current_abstract = None,
+                b"num" => current_num = None,
+                _ => {}
+            },
+            Ok(Event::DocType(_)) => bail!("DOCX XML 禁止 DOCTYPE 或外部实体"),
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(anyhow!("DOCX 编号 XML 无效: {error}")),
+        }
+        buffer.clear();
+    }
+    Ok(num_to_abstract
+        .into_iter()
+        .filter_map(|(num, abstract_id)| {
+            abstract_kinds
+                .get(&abstract_id)
+                .copied()
+                .map(|kind| (num, kind))
+        })
+        .collect())
+}
+
 fn required_attribute(start: &BytesStart<'_>, name: &[u8]) -> anyhow::Result<String> {
     attribute(start, name)?.ok_or_else(|| anyhow!("DOCX XML 缺少必需属性"))
 }
@@ -1200,6 +1501,21 @@ fn attribute(start: &BytesStart<'_>, name: &[u8]) -> anyhow::Result<Option<Strin
 
 fn local_name(name: &[u8]) -> &[u8] {
     name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
+}
+
+fn paragraph_role_from_style(style: &str) -> DocxParagraphRole {
+    let normalized = style
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != '-')
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    match normalized.as_str() {
+        "title" | "标题" => DocxParagraphRole::Title,
+        "heading1" | "标题1" => DocxParagraphRole::Heading1,
+        "heading2" | "标题2" => DocxParagraphRole::Heading2,
+        "heading3" | "标题3" => DocxParagraphRole::Heading3,
+        _ => DocxParagraphRole::Normal,
+    }
 }
 
 fn is_office_document_relationship(kind: &str) -> bool {
@@ -1254,35 +1570,118 @@ struct ParseState {
     deleted_depth: usize,
     instruction_depth: usize,
     paragraph_text: String,
-    row_cells: Vec<String>,
-    cell_paragraphs: Vec<String>,
-    row_images: Vec<DocxImageBlock>,
+    paragraph_role: DocxParagraphRole,
+    paragraph_list_marker: Option<String>,
+    paragraph_list_level: Option<u8>,
+    paragraph_has_fragment: bool,
+    num_properties_depth: usize,
+    current_num_id: Option<String>,
+    list_counters: HashMap<(String, u8), u64>,
+    row_cells: Vec<DocxTableCell>,
+    row_logical_column: u16,
+    cell_paragraphs: Vec<DocxParagraph>,
+    cell_col_span: u16,
+    cell_v_merge: Option<bool>,
+    cell_start_column: u16,
+    table_rows: Vec<DocxTableRow>,
+    table_column_count: u16,
+    table_text_bytes: usize,
+    table_continuation: bool,
+    active_vertical_merges: HashMap<u16, (usize, usize)>,
+    table_images: Vec<DocxImageBlock>,
     drawing: Option<DrawingState>,
     image_sequence: usize,
 }
 
 impl ParseState {
-    fn start(&mut self, start: &BytesStart<'_>, document: &DocxDocument) -> anyhow::Result<()> {
+    fn start(
+        &mut self,
+        start: &BytesStart<'_>,
+        document: &DocxDocument,
+        style_roles: &HashMap<String, DocxParagraphRole>,
+    ) -> anyhow::Result<()> {
         match local_name(start.name().as_ref()) {
             b"tbl" => self.table_depth += 1,
             b"tr" if self.table_depth > 0 => {
                 self.row_depth += 1;
                 if self.row_depth == 1 {
                     self.row_cells.clear();
-                    self.row_images.clear();
+                    self.row_logical_column = 0;
                 }
             }
             b"tc" if self.row_depth > 0 => {
                 self.cell_depth += 1;
                 if self.cell_depth == 1 {
                     self.cell_paragraphs.clear();
+                    self.cell_col_span = 1;
+                    self.cell_v_merge = None;
+                    self.cell_start_column = self.row_logical_column;
                 }
             }
             b"p" => {
                 self.paragraph_depth += 1;
                 if self.paragraph_depth == 1 {
                     self.paragraph_text.clear();
+                    self.paragraph_role = DocxParagraphRole::Normal;
+                    self.paragraph_list_marker = None;
+                    self.paragraph_list_level = None;
+                    self.paragraph_has_fragment = false;
+                    self.current_num_id = None;
                 }
+            }
+            b"pStyle" if self.paragraph_depth > 0 => {
+                if let Some(style) = attribute(start, b"val")? {
+                    self.paragraph_role = style_roles
+                        .get(&style)
+                        .copied()
+                        .unwrap_or_else(|| paragraph_role_from_style(&style));
+                    let normalized = style.to_ascii_lowercase();
+                    if normalized.contains("listbullet") {
+                        self.paragraph_role = DocxParagraphRole::ListItem;
+                        self.paragraph_list_marker = Some("•".to_string());
+                        self.paragraph_list_level.get_or_insert(0);
+                    } else if normalized.contains("listnumber") {
+                        self.paragraph_role = DocxParagraphRole::ListItem;
+                        self.paragraph_list_marker = Some("1.".to_string());
+                        self.paragraph_list_level.get_or_insert(0);
+                    }
+                }
+            }
+            b"outlineLvl" if self.paragraph_depth > 0 => {
+                if let Some(level) = attribute(start, b"val")?.and_then(|value| value.parse().ok())
+                {
+                    self.paragraph_role = match level {
+                        0 => DocxParagraphRole::Heading1,
+                        1 => DocxParagraphRole::Heading2,
+                        2 => DocxParagraphRole::Heading3,
+                        _ => self.paragraph_role,
+                    };
+                }
+            }
+            b"numPr" if self.paragraph_depth > 0 => self.num_properties_depth += 1,
+            b"ilvl" if self.num_properties_depth > 0 => {
+                self.paragraph_list_level = attribute(start, b"val")?
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .map(|level| level.min(8));
+            }
+            b"numId" if self.num_properties_depth > 0 => {
+                if let Some(num_id) = attribute(start, b"val")?.filter(|value| value != "0") {
+                    self.paragraph_role = DocxParagraphRole::ListItem;
+                    self.current_num_id = Some(num_id);
+                }
+            }
+            b"gridSpan" if self.cell_depth > 0 => {
+                self.cell_col_span = attribute(start, b"val")?
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .filter(|span| (1..=256).contains(span))
+                    .unwrap_or(1);
+            }
+            b"vMerge" if self.cell_depth > 0 => {
+                self.cell_v_merge = match attribute(start, b"val")?.as_deref() {
+                    Some("restart") => Some(true),
+                    None | Some("continue") => Some(false),
+                    Some(_) => None,
+                };
             }
             b"t" => self.text_depth += 1,
             b"del" => self.deleted_depth += 1,
@@ -1313,9 +1712,11 @@ impl ParseState {
                 if let Some(relationship_id) = embedded.or(linked) {
                     let image = self.image_block(document, relationship_id, explicitly_linked);
                     if self.row_depth > 0 {
-                        self.row_images.push(image);
+                        self.table_images.push(image);
                     } else {
-                        self.flush_paragraph_fragment(false);
+                        if !self.paragraph_text.is_empty() {
+                            self.flush_paragraph_fragment();
+                        }
                         self.ready.push_back(DocxBlock::Image(image));
                     }
                 }
@@ -1325,42 +1726,139 @@ impl ParseState {
         Ok(())
     }
 
-    fn end(&mut self, name: &[u8]) -> anyhow::Result<()> {
+    fn end(
+        &mut self,
+        name: &[u8],
+        numbering: &HashMap<String, DocxListKind>,
+    ) -> anyhow::Result<()> {
         match name {
             b"t" => self.text_depth = self.text_depth.saturating_sub(1),
             b"del" => self.deleted_depth = self.deleted_depth.saturating_sub(1),
             b"instrText" => self.instruction_depth = self.instruction_depth.saturating_sub(1),
+            b"numPr" => {
+                self.num_properties_depth = self.num_properties_depth.saturating_sub(1);
+                if self.num_properties_depth == 0 {
+                    if let Some(num_id) = self.current_num_id.take() {
+                        let level = *self.paragraph_list_level.get_or_insert(0);
+                        self.paragraph_list_marker = Some(match numbering.get(&num_id) {
+                            Some(DocxListKind::Decimal) => {
+                                let counter = self
+                                    .list_counters
+                                    .entry((num_id, level))
+                                    .and_modify(|counter| *counter = counter.saturating_add(1))
+                                    .or_insert(1);
+                                format!("{counter}.")
+                            }
+                            _ => "•".to_string(),
+                        });
+                    }
+                }
+            }
             b"inline" | b"anchor" => self.drawing = None,
             b"p" => {
                 self.paragraph_depth = self.paragraph_depth.saturating_sub(1);
                 if self.paragraph_depth == 0 {
+                    if self.paragraph_text.len() > PARAGRAPH_TEXT_BYTES_LIMIT {
+                        bail!("DOCX 单段文本超过安全上限");
+                    }
                     if self.cell_depth > 0 {
-                        self.cell_paragraphs
-                            .push(std::mem::take(&mut self.paragraph_text));
-                    } else if self.row_depth == 0 {
-                        self.flush_paragraph_fragment(true);
+                        let paragraph = self.take_paragraph();
+                        self.cell_paragraphs.push(paragraph);
+                    } else if self.row_depth == 0
+                        && (!self.paragraph_text.is_empty() || !self.paragraph_has_fragment)
+                    {
+                        self.flush_paragraph_fragment();
                     }
                 }
             }
             b"tc" if self.cell_depth > 0 => {
                 self.cell_depth -= 1;
                 if self.cell_depth == 0 {
-                    self.row_cells.push(self.cell_paragraphs.join(" "));
-                    self.cell_paragraphs.clear();
+                    let mut cell = DocxTableCell {
+                        paragraphs: std::mem::take(&mut self.cell_paragraphs),
+                        col_span: self.cell_col_span,
+                        row_span: 1,
+                    };
+                    self.row_logical_column =
+                        self.row_logical_column.saturating_add(self.cell_col_span);
+                    let continuation = self.cell_v_merge == Some(false);
+                    let has_text = cell
+                        .paragraphs
+                        .iter()
+                        .any(|paragraph| !paragraph.text.is_empty());
+                    if continuation && !has_text {
+                        if let Some((row, cell_index)) = self
+                            .active_vertical_merges
+                            .get(&self.cell_start_column)
+                            .copied()
+                        {
+                            if let Some(origin) = self
+                                .table_rows
+                                .get_mut(row)
+                                .and_then(|row| row.cells.get_mut(cell_index))
+                            {
+                                origin.row_span = origin.row_span.saturating_add(1);
+                            } else {
+                                self.row_cells.push(cell);
+                            }
+                        } else {
+                            self.row_cells.push(cell);
+                        }
+                    } else {
+                        if self.cell_v_merge == Some(true) {
+                            let row = self.table_rows.len();
+                            let cell_index = self.row_cells.len();
+                            self.active_vertical_merges
+                                .insert(self.cell_start_column, (row, cell_index));
+                        } else {
+                            for column in self.cell_start_column
+                                ..self.cell_start_column.saturating_add(self.cell_col_span)
+                            {
+                                self.active_vertical_merges.remove(&column);
+                            }
+                        }
+                        if cell.paragraphs.is_empty() {
+                            cell.paragraphs.push(DocxParagraph::normal(String::new()));
+                        }
+                        self.row_cells.push(cell);
+                    }
                 }
             }
             b"tr" if self.row_depth > 0 => {
                 self.row_depth -= 1;
                 if self.row_depth == 0 {
-                    self.ready.push_back(DocxBlock::Text {
-                        text: format!("{}\n", self.row_cells.join("\t")),
-                    });
-                    for image in self.row_images.drain(..) {
-                        self.ready.push_back(DocxBlock::Image(image));
+                    let row = DocxTableRow {
+                        cells: std::mem::take(&mut self.row_cells),
+                    };
+                    let columns = self.row_logical_column;
+                    self.table_column_count = self.table_column_count.max(columns);
+                    self.table_text_bytes = self.table_text_bytes.saturating_add(
+                        row.cells
+                            .iter()
+                            .flat_map(|cell| &cell.paragraphs)
+                            .map(|paragraph| paragraph.text.len())
+                            .sum::<usize>(),
+                    );
+                    self.table_rows.push(row);
+                    if self.table_rows.len() >= TABLE_ROWS_PER_BLOCK
+                        || self.table_text_bytes >= TABLE_TEXT_BYTES_PER_BLOCK
+                    {
+                        self.flush_table();
                     }
                 }
             }
-            b"tbl" if self.table_depth > 0 => self.table_depth -= 1,
+            b"tbl" if self.table_depth > 0 => {
+                self.table_depth -= 1;
+                if self.table_depth == 0 {
+                    self.flush_table();
+                    for image in self.table_images.drain(..) {
+                        self.ready.push_back(DocxBlock::Image(image));
+                    }
+                    self.table_continuation = false;
+                    self.table_column_count = 0;
+                    self.active_vertical_merges.clear();
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -1377,15 +1875,52 @@ impl ParseState {
         self.paragraph_text.push_str(text);
     }
 
-    fn flush_paragraph_fragment(&mut self, paragraph_end: bool) {
-        if paragraph_end {
-            self.paragraph_text.push('\n');
+    fn take_paragraph(&mut self) -> DocxParagraph {
+        DocxParagraph {
+            text: std::mem::take(&mut self.paragraph_text),
+            role: self.paragraph_role,
+            list_marker: self.paragraph_list_marker.clone(),
+            list_level: self.paragraph_list_level,
         }
-        if !self.paragraph_text.is_empty() {
-            self.ready.push_back(DocxBlock::Text {
-                text: std::mem::take(&mut self.paragraph_text),
-            });
+    }
+
+    fn flush_paragraph_fragment(&mut self) {
+        let paragraph = self.take_paragraph();
+        self.paragraph_has_fragment = true;
+        self.ready.push_back(DocxBlock::Paragraph(paragraph));
+    }
+
+    fn flush_table(&mut self) {
+        if self.table_rows.is_empty() {
+            return;
         }
+        let rows = std::mem::take(&mut self.table_rows);
+        let search_text = rows
+            .iter()
+            .map(|row| {
+                row.cells
+                    .iter()
+                    .map(|cell| {
+                        cell.paragraphs
+                            .iter()
+                            .map(|paragraph| paragraph.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\t")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.ready.push_back(DocxBlock::Table(DocxTableBlock {
+            rows,
+            column_count: self.table_column_count,
+            continuation: self.table_continuation,
+            search_text,
+        }));
+        self.table_continuation = true;
+        self.table_text_bytes = 0;
+        self.active_vertical_merges.clear();
     }
 
     fn image_block(

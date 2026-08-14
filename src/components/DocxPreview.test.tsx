@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test, { afterEach, before } from 'node:test';
 import { JSDOM } from 'jsdom';
 import { api, type DocxPreviewBlock } from '../api';
@@ -126,13 +127,47 @@ test('blob LRU evicts the least recently used URL before its byte limit is excee
   cache.clear();
 });
 
-test('preview pages text, lazily reads visible image, shows placeholders, and opens find', async () => {
+test('DOCX preview fills the active workspace panel instead of shrinking to its content', () => {
+  const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  const rule = css.match(/\.docx-preview\s*\{([^}]+)\}/)?.[1] ?? '';
+
+  assert.match(rule, /\bflex:\s*1\s*;/);
+  assert.match(rule, /\bmin-width:\s*0\s*;/);
+});
+
+test('preview renders semantic paragraphs and tables, lazily reads images, and searches cells', async () => {
   const { DocxPreview } = docxModule;
   const blocks: DocxPreviewBlock[] = [
-    { kind: 'text', index: 0, text: 'Hello DOCX' },
+    { kind: 'paragraph', index: 0, text: 'Hello DOCX', role: 'heading1' },
+    {
+      kind: 'table',
+      index: 1,
+      columnCount: 2,
+      continuation: false,
+      searchText: 'Cell A\tCell B',
+      rows: [
+        {
+          cells: [
+            {
+              paragraphs: [
+                { text: 'Cell A', role: 'normal' },
+                { text: 'Second paragraph', role: 'normal' },
+              ],
+              colSpan: 1,
+              rowSpan: 2,
+            },
+            {
+              paragraphs: [{ text: 'Cell B', role: 'normal' }],
+              colSpan: 1,
+              rowSpan: 1,
+            },
+          ],
+        },
+      ],
+    },
     {
       kind: 'image',
-      index: 1,
+      index: 2,
       imageId: 'opaque-1',
       mimeType: 'image/png',
       altText: 'Screenshot',
@@ -140,7 +175,7 @@ test('preview pages text, lazily reads visible image, shows placeholders, and op
     },
     {
       kind: 'image',
-      index: 2,
+      index: 3,
       imageId: 'opaque-2',
       altText: 'Vector',
       status: 'unsupportedFormat',
@@ -167,13 +202,16 @@ test('preview pages text, lazily reads visible image, shows placeholders, and op
           sessionId: 'docx-1',
           sourcePath: 'sample.docx',
           title: 'sample.docx',
-          blockCount: 3,
+          blockCount: 4,
           evictedSessionIds: [],
         }}
       />
     </I18nProvider>,
   );
   await harness.screen.findByText('Hello DOCX');
+  assert.equal(harness.screen.getByRole('heading', { level: 2 }).textContent, 'Hello DOCX');
+  assert.equal(harness.screen.getByText('Cell A').closest('td')?.rowSpan, 2);
+  assert.ok(harness.screen.getByText('Second paragraph'));
   await harness.screen.findByAltText('Screenshot');
   assert.ok(await harness.screen.findByText('unsupportedFormat'));
   assert.deepEqual(blockReads[0], [0, 100]);
@@ -186,9 +224,9 @@ test('preview pages text, lazily reads visible image, shows placeholders, and op
   });
   assert.ok(await harness.screen.findByRole('dialog'));
   harness.fireEvent.input(harness.screen.getByRole('textbox', { name: 'Keyword' }), {
-    target: { value: 'Hello' },
+    target: { value: 'Cell B' },
   });
   harness.fireEvent.click(harness.screen.getByRole('button', { name: 'Find' }));
-  assert.ok(await harness.screen.findByText('1 / 3'));
+  assert.ok(await harness.screen.findByText('2 / 4'));
   view.unmount();
 });
