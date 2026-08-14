@@ -7,7 +7,8 @@ LogCrate 已能查看多种裸文本与压缩日志，但 `.docx` 会因其 ZIP 
 ## What Changes
 
 - 将结构有效的 `.docx` 识别为独立文档格式，不再作为普通 ZIP 展开。
-- 从主文档 `word/document.xml` 按阅读顺序流式提取正文，段落换行，显式换行保留，表格按行输出且单元格以制表符分隔。
+- 从主文档 `word/document.xml` 按阅读顺序流式提取结构化正文：段落独立显示，保留空段落、显式换行和制表符，识别常见标题层级与项目符号/编号列表。
+- 将 Word 表格显示为带边框的真实行列与单元格，保留单元格内多段落，并支持常见的横向与纵向合并；超大表格仍按有界行组分页。
 - 解析主文档关系并在对应段落位置显示内嵌 PNG/JPEG 图片；图片保持纵横比、限制为正文宽度并按视口附近惰性读取。
 - 通过单个文档条目接入选项卡工作区；正文复用现有 UTF-8 文本查找语义，图文块使用独立的分页/虚拟化预览会话，不把图片二进制编码进日志行。
 - 在目录监控、目录树与单文件拖入链路中把有效 `.docx` 作为可预览文档处理。
@@ -17,6 +18,6 @@ LogCrate 已能查看多种裸文本与压缩日志，但 `.docx` 会因其 ZIP 
 ## Impact
 
 - Affected specs: `archive-reading`, `log-viewing`, `directory-monitoring`, `file-drop-handling`
-- Affected code: `src-tauri/src/archive/`, `src-tauri/src/watcher.rs`、DOCX 图文会话 IPC、前端文档预览组件、文案与测试
+- Affected code: `src-tauri/src/archive/`, `src-tauri/src/watcher.rs`、DOCX 结构化图文会话 IPC、前端文档预览组件、文案与测试
 - Dependencies: 直接使用现有 `zip` 读取能力；采用与 Rust 1.70 兼容的流式 XML 解析器，实施前核对安装包体积与依赖锁文件变化
 - Compatibility: 不改变现有 ZIP、归档条目和裸文本日志行为；新增 DOCX 专用会话类型/命令，既有日志 IPC 字段保持兼容
