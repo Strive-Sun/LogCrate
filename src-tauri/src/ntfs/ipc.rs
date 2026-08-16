@@ -19,7 +19,7 @@ use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+use windows_sys::Win32::Storage::FileSystem::{FlushFileBuffers, PIPE_ACCESS_DUPLEX};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
@@ -231,8 +231,12 @@ fn connect_and_handshake_diagnostic() -> Result<File, ServiceFailure> {
 }
 
 pub fn run_pipe_server(stop: &AtomicBool, once: bool) -> anyhow::Result<()> {
+    run_pipe_server_at(PIPE_NAME, stop, once)
+}
+
+fn run_pipe_server_at(pipe_name: &str, stop: &AtomicBool, once: bool) -> anyhow::Result<()> {
     if once {
-        let pipe = create_server_pipe()?;
+        let pipe = create_server_pipe(pipe_name)?;
         connect_server_pipe(&pipe)?;
         if stop.load(Ordering::SeqCst) {
             return Ok(());
@@ -243,7 +247,7 @@ pub fn run_pipe_server(stop: &AtomicBool, once: bool) -> anyhow::Result<()> {
     let active = AtomicUsize::new(0);
     thread::scope(|scope| -> anyhow::Result<()> {
         loop {
-            let pipe = create_server_pipe()?;
+            let pipe = create_server_pipe(pipe_name)?;
             connect_server_pipe(&pipe)?;
             if stop.load(Ordering::SeqCst) {
                 return Ok(());
@@ -296,6 +300,7 @@ fn reject_busy_client(pipe: OwnedPipe) {
         },
     );
     unsafe {
+        FlushFileBuffers(raw as HANDLE);
         DisconnectNamedPipe(raw as HANDLE);
     }
 }
@@ -327,7 +332,11 @@ impl Drop for ActiveClientGuard<'_> {
 }
 
 pub fn wake_pipe_server() {
-    let _ = OpenOptions::new().read(true).write(true).open(PIPE_NAME);
+    wake_pipe_server_at(PIPE_NAME);
+}
+
+fn wake_pipe_server_at(pipe_name: &str) {
+    let _ = OpenOptions::new().read(true).write(true).open(pipe_name);
 }
 
 fn serve_client(pipe: &mut File) -> anyhow::Result<()> {
@@ -915,7 +924,7 @@ impl Drop for OwnedSecurityDescriptor {
     }
 }
 
-fn create_server_pipe() -> anyhow::Result<OwnedPipe> {
+fn create_server_pipe(pipe_name: &str) -> anyhow::Result<OwnedPipe> {
     let sddl = U16CString::from_str(PIPE_SDDL)?;
     let mut descriptor = null_mut::<c_void>();
     let converted = unsafe {
@@ -935,7 +944,7 @@ fn create_server_pipe() -> anyhow::Result<OwnedPipe> {
         lpSecurityDescriptor: descriptor.0,
         bInheritHandle: 0,
     };
-    let name = U16CString::from_str(PIPE_NAME)?;
+    let name = U16CString::from_str(pipe_name)?;
     let handle = unsafe {
         CreateNamedPipeW(
             name.as_ptr(),
@@ -985,7 +994,78 @@ mod tests {
     use super::*;
     use crate::ntfs::FileId;
     use std::io::Cursor;
+    use std::os::windows::io::AsRawHandle;
     use std::path::Path;
+    use std::sync::{mpsc, Arc};
+    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+    static TEST_PIPE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    fn unique_test_pipe_name() -> String {
+        let sequence = TEST_PIPE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        format!(
+            r"\\.\pipe\LogCrate.Index.Test.{}.{}",
+            std::process::id(),
+            sequence
+        )
+    }
+
+    fn open_test_pipe(pipe_name: &str, deadline: Instant) -> File {
+        loop {
+            match OpenOptions::new().read(true).write(true).open(pipe_name) {
+                Ok(pipe) => return pipe,
+                Err(_) if Instant::now() < deadline => sleep(Duration::from_millis(10)),
+                Err(error) => panic!("连接测试 named pipe {pipe_name} 失败: {error}"),
+            }
+        }
+    }
+
+    fn read_test_response(pipe: &mut File, deadline: Instant, stage: &str) -> Response {
+        let mut header = [0_u8; HEADER_SIZE];
+        loop {
+            let mut header_bytes = 0_u32;
+            let mut available = 0_u32;
+            let peeked = unsafe {
+                PeekNamedPipe(
+                    pipe.as_raw_handle() as HANDLE,
+                    header.as_mut_ptr().cast(),
+                    HEADER_SIZE as u32,
+                    &mut header_bytes,
+                    &mut available,
+                    null_mut(),
+                )
+            };
+            let peek_error = (peeked == 0)
+                .then(|| io::Error::last_os_error().raw_os_error())
+                .flatten();
+            if peeked != 0 && header_bytes as usize == HEADER_SIZE {
+                let body_len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
+                if available as usize >= HEADER_SIZE + body_len {
+                    return read_response(pipe).unwrap();
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "等待测试 named pipe {stage} 响应超时: error={peek_error:?}, header_bytes={header_bytes}, available={available}"
+            );
+            sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn connect_test_client(pipe_name: &str, deadline: Instant) -> File {
+        loop {
+            let mut pipe = open_test_pipe(pipe_name, deadline);
+            write_request(&mut pipe, &Request::Hello).unwrap();
+            match read_test_response(&mut pipe, deadline, "handshake") {
+                Response::Hello { protocol } if protocol == PROTOCOL_VERSION => return pipe,
+                Response::Error {
+                    code: BUSY_RESPONSE_CODE,
+                    ..
+                } if Instant::now() < deadline => sleep(Duration::from_millis(10)),
+                response => panic!("测试 named pipe 握手响应无效: {response:?}"),
+            }
+        }
+    }
 
     fn record() -> MftRecord {
         MftRecord {
@@ -1192,6 +1272,57 @@ mod tests {
         let mut bytes = Vec::new();
         write_response(&mut bytes, &busy).unwrap();
         assert_eq!(read_response(&mut Cursor::new(bytes)).unwrap(), busy);
+    }
+
+    #[test]
+    fn real_pipe_saturation_reconnect_disconnect_and_stop_are_bounded() {
+        let pipe_name = unique_test_pipe_name();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let server_pipe_name = pipe_name.clone();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let result = run_pipe_server_at(&server_pipe_name, &server_stop, false);
+            let _ = finished_tx.send(result);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut active_clients = (0..MAX_CONCURRENT_CLIENTS)
+            .map(|_| connect_test_client(&pipe_name, deadline))
+            .collect::<Vec<_>>();
+
+        let mut extra = open_test_pipe(&pipe_name, deadline);
+        assert!(matches!(
+            read_test_response(&mut extra, deadline, "busy"),
+            Response::Error {
+                code: BUSY_RESPONSE_CODE,
+                ..
+            }
+        ));
+        drop(extra);
+
+        let mut disconnected = active_clients.remove(0);
+        disconnected.write_all(&MAGIC[..2]).unwrap();
+        drop(disconnected);
+        active_clients.push(connect_test_client(&pipe_name, deadline));
+
+        drop(active_clients.remove(0));
+        active_clients.push(connect_test_client(&pipe_name, deadline));
+
+        drop(active_clients);
+        stop.store(true, Ordering::SeqCst);
+        wake_pipe_server_at(&pipe_name);
+        let result = finished_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("索引服务未在停止唤醒后有界退出");
+        result.unwrap();
+        server.join().unwrap();
+
+        assert!(OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&pipe_name)
+            .is_err());
     }
 
     #[test]
