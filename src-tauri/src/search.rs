@@ -374,6 +374,11 @@ impl FileSearchManager {
     ) -> Arc<Self> {
         let _ = fs::create_dir_all(&data_dir);
         let config_path = preferences.config_path.clone();
+        let database_path = data_dir.join("file-search.sqlite3");
+        #[cfg(windows)]
+        if let Err(error) = cleanup_mft_stage_residue(&database_path) {
+            eprintln!("[search-index] stage=startup-cleanup event=failed error={error}");
+        }
         let query_index_path = data_dir.join("file-search-orange-gpl-v1");
         let _ = recover_query_index_directories(&query_index_path);
         let config_state = preferences.config.clone();
@@ -387,7 +392,6 @@ impl FileSearchManager {
             status.error = Some(format!("Tantivy query index: {error}"));
         }
         let query_documents_at_start = query_index.as_ref().ok().map(SearchIndex::num_docs);
-        let database_path = data_dir.join("file-search.sqlite3");
         let database_state =
             initialize_database_with_query(&database_path, query_documents_at_start).or_else(
                 |error| {
@@ -623,7 +627,7 @@ impl FileSearchManager {
                     for job in outcome.ntfs_finalize_jobs {
                         let root = job.root.clone();
                         if let Err(error) =
-                            persist_and_finalize_ntfs_volume(&manager.db_path, job, false)
+                            persist_and_finalize_ntfs_volume(&manager, generation, job, false)
                         {
                             let _ = finish_ntfs_nodes_bulk(&manager.db_path);
                             set_provider_stage(
@@ -804,9 +808,7 @@ impl FileSearchManager {
                                                 None,
                                             );
                                             persist_and_finalize_ntfs_volume(
-                                                &manager.db_path,
-                                                job,
-                                                true,
+                                                &manager, generation, job, true,
                                             )
                                         })
                                 }
@@ -2162,17 +2164,16 @@ fn refresh_provider_totals(status: &mut SearchStatus) {
 struct MftVolumeStage {
     path: PathBuf,
     connection: Option<Connection>,
+    generation: u64,
+    volume: char,
     record_count: u64,
     searchable_files: u64,
 }
 
 #[cfg(windows)]
 impl MftVolumeStage {
-    fn create(db_path: &Path, volume: char) -> anyhow::Result<Self> {
-        let directory = db_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(format!("file-search-mft-stage-v{MFT_STAGE_SCHEMA_VERSION}"));
+    fn create(db_path: &Path, volume: char, generation: u64) -> anyhow::Result<Self> {
+        let directory = mft_stage_directory(db_path);
         fs::create_dir_all(&directory)?;
         let sequence = MFT_STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let path = directory.join(format!(
@@ -2209,11 +2210,33 @@ impl MftVolumeStage {
                is_archive INTEGER NOT NULL,
                file_id BLOB,
                parent_id BLOB
+             );
+             CREATE TABLE stage_metadata(
+               singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+               schema_version INTEGER NOT NULL,
+               generation TEXT NOT NULL,
+               volume TEXT NOT NULL,
+               complete INTEGER NOT NULL CHECK(complete IN (0, 1)),
+               record_count INTEGER NOT NULL,
+               searchable_files INTEGER NOT NULL
              );",
+        )?;
+        connection.execute(
+            "INSERT INTO stage_metadata(
+               singleton, schema_version, generation, volume, complete,
+               record_count, searchable_files
+             ) VALUES(1, ?1, ?2, ?3, 0, 0, 0)",
+            params![
+                MFT_STAGE_SCHEMA_VERSION,
+                generation.to_string(),
+                volume.to_ascii_uppercase().to_string(),
+            ],
         )?;
         Ok(Self {
             path,
             connection: Some(connection),
+            generation,
+            volume: volume.to_ascii_uppercase(),
             record_count: 0,
             searchable_files: 0,
         })
@@ -2341,6 +2364,28 @@ impl MftVolumeStage {
         Ok(())
     }
 
+    fn mark_complete_and_close(&mut self) -> anyhow::Result<()> {
+        let connection = self
+            .connection
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("按卷 MFT 暂存已关闭"))?;
+        let changed = connection.execute(
+            "UPDATE stage_metadata
+                SET complete = 1, record_count = ?1, searchable_files = ?2
+              WHERE singleton = 1 AND generation = ?3 AND volume = ?4 AND complete = 0",
+            params![
+                self.record_count,
+                self.searchable_files,
+                self.generation.to_string(),
+                self.volume.to_string(),
+            ],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("按卷 MFT 暂存完成标记与当前 generation 不一致");
+        }
+        self.close_writer()
+    }
+
     fn seed_resolved_roots(&self, root: &str) -> anyhow::Result<()> {
         let connection = self.connection()?;
         connection.execute("DELETE FROM resolved_directories", [])?;
@@ -2410,6 +2455,40 @@ impl MftVolumeStage {
 }
 
 #[cfg(windows)]
+fn mft_stage_directory(db_path: &Path) -> PathBuf {
+    db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("file-search-mft-stage-v{MFT_STAGE_SCHEMA_VERSION}"))
+}
+
+#[cfg(windows)]
+fn cleanup_mft_stage_residue(db_path: &Path) -> anyhow::Result<usize> {
+    let directory = mft_stage_directory(db_path);
+    if !directory.is_dir() {
+        return Ok(0);
+    }
+    let mut removed = 0_usize;
+    let mut first_error = None;
+    for entry in fs::read_dir(&directory)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() && !file_type.is_symlink() {
+            continue;
+        }
+        match fs::remove_file(entry.path()) {
+            Ok(()) => removed += 1,
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Err(_) => {}
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error.into());
+    }
+    Ok(removed)
+}
+
+#[cfg(windows)]
 impl Drop for MftVolumeStage {
     fn drop(&mut self) {
         self.connection.take();
@@ -2474,6 +2553,7 @@ fn mft_stage_join_path(parent: &str, name: &str) -> String {
 fn copy_mft_stage_to_active(
     connection: &mut Connection,
     stage: &MftVolumeStage,
+    expected_generation: u64,
     root: &str,
     rebuild_node_index: bool,
 ) -> anyhow::Result<()> {
@@ -2482,6 +2562,33 @@ fn copy_mft_stage_to_active(
         params![stage.path.to_string_lossy().as_ref()],
     )?;
     let result = (|| -> anyhow::Result<()> {
+        let metadata = connection.query_row(
+            "SELECT schema_version, generation, volume, complete,
+                    record_count, searchable_files
+               FROM mft_volume_stage.stage_metadata
+              WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
+                    row.get::<_, u64>(4)?,
+                    row.get::<_, u64>(5)?,
+                ))
+            },
+        )?;
+        if metadata.0 != MFT_STAGE_SCHEMA_VERSION
+            || metadata.1 != expected_generation.to_string()
+            || stage.generation != expected_generation
+            || metadata.2 != stage.volume.to_string()
+            || !metadata.3
+            || metadata.4 != stage.record_count
+            || metadata.5 != stage.searchable_files
+        {
+            anyhow::bail!("按卷 MFT 暂存未完成或 generation/计数不一致");
+        }
         if rebuild_node_index {
             connection.execute_batch("DROP INDEX IF EXISTS ntfs_nodes_parent_idx")?;
         }
@@ -2551,7 +2658,7 @@ fn enumerate_ntfs_volume_snapshot<S: SearchStatusSink>(
         None,
     );
     let journal_before = query_usn_via_service(volume)?;
-    let mut stage = MftVolumeStage::create(&manager.db_path, volume)?;
+    let mut stage = MftVolumeStage::create(&manager.db_path, volume, generation)?;
     set_provider_stage(
         manager,
         app,
@@ -2615,13 +2722,19 @@ fn index_ntfs_volume_paths<S: SearchStatusSink>(
             add_provider_progress(manager, app, &root, "resolvingPaths", 0, files.len() as u64);
             Ok(())
         })?;
-    snapshot.stage.close_writer()?;
+    if manager.is_cancelled(generation) {
+        anyhow::bail!("MFT 路径重建已取消");
+    }
     let resolving_elapsed = started.elapsed().saturating_sub(merge_elapsed);
     eprintln!(
         "[search-index] root={root} stage=resolvingPaths event=complete records={searchable_files} elapsed_ms={}",
         resolving_elapsed.as_millis()
     );
     manager.commit_query_index()?;
+    if manager.is_cancelled(generation) {
+        anyhow::bail!("MFT 查询索引提交后 generation 已取消");
+    }
+    snapshot.stage.mark_complete_and_close()?;
     eprintln!(
         "[search-index] root={root} stage=merging event=complete records={searchable_files} elapsed_ms={}",
         merge_elapsed.as_millis()
@@ -2689,7 +2802,8 @@ where
 
 #[cfg(windows)]
 fn persist_and_finalize_ntfs_volume(
-    db_path: &Path,
+    manager: &FileSearchManager,
+    generation: u64,
     job: NtfsFinalizeJob,
     rebuild_node_index: bool,
 ) -> anyhow::Result<()> {
@@ -2754,12 +2868,21 @@ fn persist_and_finalize_ntfs_volume(
             Ok((journal_after, changes, watcher_reconcile_reason))
         });
 
-        let mut connection = open_database(db_path)?;
+        let mut connection = open_database(&manager.db_path)?;
         connection.pragma_update(None, "synchronous", "OFF")?;
         connection.pragma_update(None, "cache_size", -524_288)?;
         connection.pragma_update(None, "mmap_size", 268_435_456_i64)?;
         let paths_started = std::time::Instant::now();
-        copy_mft_stage_to_active(&mut connection, &stage, &root, rebuild_node_index)?;
+        if manager.is_cancelled(generation) || stage.generation != generation {
+            anyhow::bail!("按卷 MFT 暂存所属 generation 已取消");
+        }
+        copy_mft_stage_to_active(
+            &mut connection,
+            &stage,
+            generation,
+            &root,
+            rebuild_node_index,
+        )?;
         eprintln!(
             "[search-index] root={} sqlite-paths-ready records={} elapsed_ms={}",
             root,
@@ -6439,7 +6562,7 @@ mod tests {
         let directory = test_directory("mft-volume-stage-resolve");
         let db = directory.join("search.sqlite3");
         initialize_database(&db).unwrap();
-        let mut stage = MftVolumeStage::create(&db, 'C').unwrap();
+        let mut stage = MftVolumeStage::create(&db, 'C', 7).unwrap();
         let records = vec![
             staged_mft_record(10, 5, "Logs", FILE_ATTRIBUTE_DIRECTORY),
             staged_mft_record(11, 10, "Nested", FILE_ATTRIBUTE_DIRECTORY),
@@ -6475,9 +6598,23 @@ mod tests {
             vec![vec!["C:\\Logs\\Nested\\日志🚀.log".to_owned()]]
         );
 
-        stage.close_writer().unwrap();
         let mut connection = open_database(&db).unwrap();
-        copy_mft_stage_to_active(&mut connection, &stage, "C:\\", true).unwrap();
+        let incomplete_error = copy_mft_stage_to_active(&mut connection, &stage, 7, "C:\\", true)
+            .unwrap_err()
+            .to_string();
+        assert!(incomplete_error.contains("未完成"));
+        stage.mark_complete_and_close().unwrap();
+        let stale_error = copy_mft_stage_to_active(&mut connection, &stage, 8, "C:\\", true)
+            .unwrap_err()
+            .to_string();
+        assert!(stale_error.contains("generation"));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        copy_mft_stage_to_active(&mut connection, &stage, 7, "C:\\", true).unwrap();
         let file = connection
             .query_row(
                 "SELECT path, parent FROM files WHERE root = 'C:\\'",
@@ -6505,7 +6642,7 @@ mod tests {
     fn mft_volume_stage_exclusions_do_not_end_rowid_pagination_early() {
         let directory = test_directory("mft-volume-stage-exclusions");
         let db = directory.join("search.sqlite3");
-        let mut stage = MftVolumeStage::create(&db, 'D').unwrap();
+        let mut stage = MftVolumeStage::create(&db, 'D', 8).unwrap();
         stage
             .append_records(&[staged_mft_record(
                 10,
@@ -6544,8 +6681,8 @@ mod tests {
     fn mft_volume_stages_use_independent_files_and_remove_sidecars_on_drop() {
         let directory = test_directory("mft-volume-stage-cleanup");
         let db = directory.join("search.sqlite3");
-        let first = MftVolumeStage::create(&db, 'C').unwrap();
-        let second = MftVolumeStage::create(&db, 'C').unwrap();
+        let first = MftVolumeStage::create(&db, 'C', 9).unwrap();
+        let second = MftVolumeStage::create(&db, 'C', 9).unwrap();
         let first_path = first.path.clone();
         let second_path = second.path.clone();
         let first_wal = first_path.with_extension("sqlite3-wal");
@@ -6570,7 +6707,7 @@ mod tests {
         let directory = test_directory("mft-volume-stage-copy-rollback");
         let db = directory.join("search.sqlite3");
         initialize_database(&db).unwrap();
-        let mut stage = MftVolumeStage::create(&db, 'C').unwrap();
+        let mut stage = MftVolumeStage::create(&db, 'C', 10).unwrap();
         let staged_record = staged_mft_record(20, 5, "new.log", 0);
         stage
             .append_records(std::slice::from_ref(&staged_record))
@@ -6578,7 +6715,7 @@ mod tests {
         stage
             .resolve_and_stage_files("C:\\", &[], |_| Ok(()))
             .unwrap();
-        stage.close_writer().unwrap();
+        stage.mark_complete_and_close().unwrap();
 
         let mut connection = open_database(&db).unwrap();
         write_files(
@@ -6613,7 +6750,7 @@ mod tests {
             )
             .unwrap();
 
-        let error = copy_mft_stage_to_active(&mut connection, &stage, "C:\\", true)
+        let error = copy_mft_stage_to_active(&mut connection, &stage, 10, "C:\\", true)
             .unwrap_err()
             .to_string();
         assert!(error.contains("forced stage copy failure"));
@@ -6658,7 +6795,7 @@ mod tests {
         connection
             .execute_batch("DROP TRIGGER reject_mft_stage_files")
             .unwrap();
-        copy_mft_stage_to_active(&mut connection, &stage, "C:\\", true).unwrap();
+        copy_mft_stage_to_active(&mut connection, &stage, 10, "C:\\", true).unwrap();
         assert_eq!(
             connection
                 .query_row("SELECT path FROM files WHERE root = 'C:\\'", [], |row| {
@@ -6669,6 +6806,60 @@ mod tests {
         );
         drop(connection);
         drop(stage);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mft_volume_stage_startup_cleanup_preserves_active_data() {
+        let directory = test_directory("mft-volume-stage-startup-cleanup");
+        let db = directory.join("file-search.sqlite3");
+        initialize_database(&db).unwrap();
+        let mut connection = open_database(&db).unwrap();
+        write_files(
+            &mut connection,
+            &[IndexedFile {
+                path: "C:\\active.log".into(),
+                name: "active.log".into(),
+                root: "C:\\".into(),
+                size: 0,
+                modified_ms: None,
+                is_log: true,
+                is_archive: false,
+                file_id: None,
+                parent_id: None,
+            }],
+            true,
+        )
+        .unwrap();
+        drop(connection);
+
+        let mut incomplete = MftVolumeStage::create(&db, 'C', 11).unwrap();
+        incomplete
+            .append_records(&[staged_mft_record(20, 5, "unfinished.log", 0)])
+            .unwrap();
+        incomplete.close_writer().unwrap();
+        let incomplete_path = incomplete.path.clone();
+        std::mem::forget(incomplete);
+        let corrupt_path = mft_stage_directory(&db).join("corrupt.sqlite3");
+        fs::write(&corrupt_path, b"not sqlite").unwrap();
+        assert!(incomplete_path.exists());
+        assert!(corrupt_path.exists());
+
+        let manager = FileSearchManager::new(directory.clone());
+        assert!(!incomplete_path.exists());
+        assert!(!corrupt_path.exists());
+        let connection = open_database(&db).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT path FROM files WHERE root = 'C:\\'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "C:\\active.log"
+        );
+        drop(connection);
+        drop(manager);
         let _ = fs::remove_dir_all(directory);
     }
 
