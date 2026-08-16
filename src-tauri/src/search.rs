@@ -1,7 +1,7 @@
 use crate::archive::{is_archive_name, is_log_name};
 #[cfg(windows)]
 use crate::ntfs::{
-    ipc::{enumerate_mft_via_service, query_usn_via_service, read_usn_via_service},
+    ipc::{enumerate_mft_via_service, query_usn_via_service, read_usn_via_service, ServiceFailure},
     resolve_mft_files_in_batches, resolve_mft_files_in_batches_retain, MftRecord, UsnJournalInfo,
     FILE_ATTRIBUTE_DIRECTORY,
 };
@@ -756,6 +756,7 @@ impl FileSearchManager {
                             })
                         }
                     };
+                    let mut fallback_roots = Vec::new();
                     let resume_result = run_ntfs_volume_tasks(
                         ntfs_roots,
                         &work,
@@ -805,6 +806,41 @@ impl FileSearchManager {
                                 Err(error) => Err(error),
                             };
                             if let Err(error) = applied {
+                                if !manager.is_cancelled(generation) {
+                                    match compatible_provider_fallback_reason(&root, &error) {
+                                        Ok(Some(reason)) => {
+                                            eprintln!(
+                                                "[search-index] root={root} strategy=folder-fallback reason={error}"
+                                            );
+                                            set_provider_stage(
+                                                &manager,
+                                                &app,
+                                                &root,
+                                                "folderScan",
+                                                "fallback",
+                                                "fallback",
+                                                Some(reason),
+                                            );
+                                            fallback_roots.push(root);
+                                            return Ok(());
+                                        }
+                                        Ok(None) => {}
+                                        Err(fallback_error) => {
+                                            let combined = anyhow::anyhow!(
+                                                "{error}; 自动降级兼容 provider 失败: {fallback_error}"
+                                            );
+                                            set_provider_status(
+                                                &manager,
+                                                &app,
+                                                &root,
+                                                "windowsNtfs",
+                                                "error",
+                                                Some(combined.to_string()),
+                                            );
+                                            return Err(combined);
+                                        }
+                                    }
+                                }
                                 set_provider_status(
                                     &manager,
                                     &app,
@@ -849,6 +885,23 @@ impl FileSearchManager {
                     if manager.is_cancelled(generation) {
                         manager.stop_watcher();
                         return;
+                    }
+                    if !fallback_roots.is_empty() {
+                        for root in &fallback_roots {
+                            if let Err(error) =
+                                clear_root_for_compatible_provider(&manager.db_path, root)
+                            {
+                                manager.finish_with_error(&app, generation, error);
+                                return;
+                            }
+                        }
+                        if let Err(error) =
+                            scan_folder_roots(&manager, &app, generation, &config, &fallback_roots)
+                                .and_then(|_| manager.drain_query_index_changes())
+                        {
+                            manager.finish_with_error(&app, generation, error);
+                            return;
+                        }
                     }
                     if recover_persistence {
                         if let Err(error) = finish_bulk_index(&manager.db_path) {
@@ -1755,6 +1808,41 @@ impl ScanOutcome {
     }
 }
 
+#[cfg(windows)]
+fn compatible_provider_fallback_reason(
+    root: &str,
+    failure: &anyhow::Error,
+) -> anyhow::Result<Option<String>> {
+    if !failure
+        .chain()
+        .any(|cause| cause.downcast_ref::<ServiceFailure>().is_some())
+    {
+        return Ok(None);
+    }
+    let root_path = Path::new(root);
+    let metadata = fs::metadata(root_path)
+        .map_err(|error| anyhow::anyhow!("兼容 provider 无法读取卷根 {root}: {error}"))?;
+    if !metadata.is_dir() {
+        anyhow::bail!("兼容 provider 的卷根不是目录: {root}");
+    }
+    fs::read_dir(root_path)
+        .map_err(|error| anyhow::anyhow!("兼容 provider 无权枚举卷根 {root}: {error}"))?;
+    Ok(Some(format!(
+        "Windows NTFS 快速索引服务不可用，已自动降级到兼容目录扫描: {failure}"
+    )))
+}
+
+#[cfg(windows)]
+fn clear_root_for_compatible_provider(db_path: &Path, root: &str) -> anyhow::Result<()> {
+    let mut connection = open_database(db_path)?;
+    let transaction = connection.transaction()?;
+    transaction.execute("DELETE FROM files WHERE root = ?1", params![root])?;
+    transaction.execute("DELETE FROM ntfs_nodes WHERE root = ?1", params![root])?;
+    transaction.execute("DELETE FROM search_volumes WHERE root = ?1", params![root])?;
+    transaction.commit()?;
+    Ok(())
+}
+
 fn scan_with_providers<S: SearchStatusSink>(
     manager: &Arc<FileSearchManager>,
     app: &S,
@@ -1767,6 +1855,7 @@ fn scan_with_providers<S: SearchStatusSink>(
         let mut folder_roots = Vec::new();
         let mut ntfs_roots = Vec::new();
         let mut finalize_jobs = Vec::new();
+        let mut fallback_roots = Vec::new();
         for root in &config.roots {
             if manager.is_cancelled(generation) {
                 return Ok(ScanOutcome::default());
@@ -1819,6 +1908,22 @@ fn scan_with_providers<S: SearchStatusSink>(
                         finalize_jobs.push(job);
                     }
                     Err(error) if !manager.is_cancelled(generation) => {
+                        if let Some(reason) = compatible_provider_fallback_reason(&root, &error)? {
+                            eprintln!(
+                                "[search-index] root={root} strategy=folder-fallback reason={error}"
+                            );
+                            set_provider_stage(
+                                manager,
+                                app,
+                                &root,
+                                "folderScan",
+                                "fallback",
+                                "fallback",
+                                Some(reason),
+                            );
+                            fallback_roots.push(root);
+                            return Ok(());
+                        }
                         set_provider_status(
                             manager,
                             app,
@@ -1837,6 +1942,7 @@ fn scan_with_providers<S: SearchStatusSink>(
         if !completed {
             return Ok(ScanOutcome::default());
         }
+        folder_roots.extend(fallback_roots);
         scan_folder_roots(manager, app, generation, config, &folder_roots)?;
         eprintln!(
             "[search-index] generation={generation} all-volumes-query-ready elapsed_ms={}",
@@ -4075,6 +4181,78 @@ mod tests {
             }
         );
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn readable_root_falls_back_from_service_failure_to_folder_provider() {
+        let directory = test_directory("service-folder-fallback");
+        let root_path = directory.join("root");
+        let data_path = directory.join("data");
+        fs::create_dir_all(&root_path).unwrap();
+        fs::write(root_path.join("fallback.log"), b"fallback").unwrap();
+        let root = root_path.to_string_lossy().into_owned();
+        let manager = Arc::new(FileSearchManager::new(data_path));
+        {
+            let mut status = manager.status.lock().unwrap();
+            status.roots = vec![root.clone()];
+            status.providers = planned_provider_statuses(&status.roots);
+        }
+        let failure = anyhow::Error::new(ServiceFailure {
+            code: crate::ntfs::ipc::ServiceFailureCode::ProtocolMismatch,
+            message: "protocol mismatch".into(),
+        });
+        let reason = compatible_provider_fallback_reason(&root, &failure)
+            .unwrap()
+            .expect("服务软件故障且卷根可读时必须允许兼容 provider 降级");
+        assert!(reason.contains("自动降级到兼容目录扫描"));
+
+        set_provider_stage(
+            &manager,
+            &NoopSearchStatusSink,
+            &root,
+            "folderScan",
+            "fallback",
+            "fallback",
+            Some(reason),
+        );
+        clear_root_for_compatible_provider(&manager.db_path, &root).unwrap();
+        let config = SearchConfig {
+            version: search_config_version(),
+            enabled: true,
+            roots: vec![root.clone()],
+            exclusions: vec![directory.join("data").to_string_lossy().into_owned()],
+        };
+        scan_folder_roots(
+            &manager,
+            &NoopSearchStatusSink,
+            0,
+            &config,
+            std::slice::from_ref(&root),
+        )
+        .unwrap();
+
+        assert_eq!(indexed_root_count(&manager.db_path, &root), 1);
+        let status = manager.status();
+        assert_eq!(status.providers[0].provider, "folderScan");
+        assert_eq!(status.providers[0].phase, "ready");
+        assert!(status.providers[0]
+            .fallback_reason
+            .as_deref()
+            .unwrap()
+            .contains("protocol mismatch"));
+
+        let missing_root = directory.join("missing").to_string_lossy().into_owned();
+        assert!(compatible_provider_fallback_reason(&missing_root, &failure).is_err());
+        let non_service_failure = anyhow::anyhow!("query index merge failed");
+        assert!(
+            compatible_provider_fallback_reason(&missing_root, &non_service_failure)
+                .unwrap()
+                .is_none()
+        );
+
+        drop(manager);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

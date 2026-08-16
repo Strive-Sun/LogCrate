@@ -253,7 +253,11 @@ fn connect_and_handshake() -> anyhow::Result<File> {
 }
 
 fn connect_and_handshake_diagnostic() -> Result<File, ServiceFailure> {
-    run_client_recovery_round(connect_and_handshake_once, sleep)
+    let mut auto_start_available = true;
+    run_client_recovery_round(
+        || connect_and_handshake_once(&mut auto_start_available),
+        sleep,
+    )
 }
 
 fn run_client_recovery_round<T, Attempt, Wait>(
@@ -287,8 +291,8 @@ where
     }))
 }
 
-fn connect_and_handshake_once() -> Result<File, ServiceFailure> {
-    let mut pipe = connect()?;
+fn connect_and_handshake_once(auto_start_available: &mut bool) -> Result<File, ServiceFailure> {
+    let mut pipe = connect(auto_start_available)?;
     write_request(&mut pipe, &Request::Hello).map_err(handshake_failure)?;
     match read_response(&mut pipe).map_err(handshake_failure)? {
         Response::Hello { protocol } if protocol == PROTOCOL_VERSION => Ok(pipe),
@@ -495,7 +499,7 @@ fn write_service_error(pipe: &mut File, error: &anyhow::Error) -> anyhow::Result
     )
 }
 
-fn connect() -> Result<File, ServiceFailure> {
+fn connect(auto_start_available: &mut bool) -> Result<File, ServiceFailure> {
     match open_pipe() {
         Ok(pipe) => return Ok(pipe),
         Err(error) => match pipe_open_failure(error) {
@@ -503,7 +507,7 @@ fn connect() -> Result<File, ServiceFailure> {
             failure => return Err(failure),
         },
     }
-    match start_installed_service()? {
+    match start_installed_service_with_budget(auto_start_available)? {
         ServiceState::Running => Err(ServiceFailure::new(
             ServiceFailureCode::PipeMissing,
             "LogCrate Index Service 正在运行，但 named pipe 尚不存在",
@@ -536,6 +540,13 @@ fn pipe_open_failure(error: io::Error) -> ServiceFailure {
 }
 
 fn start_installed_service() -> Result<ServiceState, ServiceFailure> {
+    let mut auto_start_available = true;
+    start_installed_service_with_budget(&mut auto_start_available)
+}
+
+fn start_installed_service_with_budget(
+    auto_start_available: &mut bool,
+) -> Result<ServiceState, ServiceFailure> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(|error| classify_service_error("连接 Windows Service Control Manager", error))?;
     let service = manager
@@ -548,16 +559,31 @@ fn start_installed_service() -> Result<ServiceState, ServiceFailure> {
         .query_status()
         .map_err(|error| classify_service_error("查询 LogCrate Index Service 状态", error))?
         .current_state;
+    if claim_auto_start(state, auto_start_available)? {
+        service
+            .start::<&str>(&[])
+            .map_err(|error| classify_service_error("启动 LogCrate Index Service", error))?;
+        return Ok(ServiceState::StartPending);
+    }
+    Ok(state)
+}
+
+fn claim_auto_start(
+    state: ServiceState,
+    auto_start_available: &mut bool,
+) -> Result<bool, ServiceFailure> {
     match state {
         ServiceState::Running | ServiceState::StartPending | ServiceState::ContinuePending => {
-            Ok(state)
+            Ok(false)
         }
-        ServiceState::Stopped => {
-            service
-                .start::<&str>(&[])
-                .map_err(|error| classify_service_error("启动 LogCrate Index Service", error))?;
-            Ok(ServiceState::StartPending)
+        ServiceState::Stopped if *auto_start_available => {
+            *auto_start_available = false;
+            Ok(true)
         }
+        ServiceState::Stopped => Err(ServiceFailure::new(
+            ServiceFailureCode::Stopped,
+            "当前客户端恢复轮已经自动启动过 LogCrate Index Service",
+        )),
         state => Err(service_state_failure(state)),
     }
 }
@@ -1287,6 +1313,23 @@ mod tests {
             service_state_failure(ServiceState::Paused).code,
             ServiceFailureCode::StartFailed
         );
+    }
+
+    #[test]
+    fn client_recovery_round_claims_at_most_one_automatic_service_start() {
+        let mut auto_start_available = true;
+        assert!(claim_auto_start(ServiceState::Stopped, &mut auto_start_available).unwrap());
+        assert!(!auto_start_available);
+
+        let repeated = claim_auto_start(ServiceState::Stopped, &mut auto_start_available)
+            .expect_err("同一恢复轮不得第二次自动启动服务");
+        assert_eq!(repeated.code, ServiceFailureCode::Stopped);
+
+        let mut untouched_budget = true;
+        assert!(!claim_auto_start(ServiceState::Running, &mut untouched_budget).unwrap());
+        assert!(untouched_budget);
+        assert!(!claim_auto_start(ServiceState::StartPending, &mut untouched_budget).unwrap());
+        assert!(untouched_budget);
     }
 
     #[test]
