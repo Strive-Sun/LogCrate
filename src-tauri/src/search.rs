@@ -6562,6 +6562,24 @@ mod tests {
         let directory = test_directory("mft-volume-stage-resolve");
         let db = directory.join("search.sqlite3");
         initialize_database(&db).unwrap();
+        let mut active = open_database(&db).unwrap();
+        write_files(
+            &mut active,
+            &[IndexedFile {
+                path: "C:\\previous.log".into(),
+                name: "previous.log".into(),
+                root: "C:\\".into(),
+                size: 0,
+                modified_ms: None,
+                is_log: true,
+                is_archive: false,
+                file_id: None,
+                parent_id: None,
+            }],
+            true,
+        )
+        .unwrap();
+        drop(active);
         let mut stage = MftVolumeStage::create(&db, 'C', 7).unwrap();
         let records = vec![
             staged_mft_record(10, 5, "Logs", FILE_ATTRIBUTE_DIRECTORY),
@@ -6603,6 +6621,14 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(incomplete_error.contains("未完成"));
+        assert_eq!(
+            connection
+                .query_row("SELECT path FROM files WHERE root = 'C:\\'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "C:\\previous.log"
+        );
         stage.mark_complete_and_close().unwrap();
         let stale_error = copy_mft_stage_to_active(&mut connection, &stage, 8, "C:\\", true)
             .unwrap_err()
@@ -6610,9 +6636,11 @@ mod tests {
         assert!(stale_error.contains("generation"));
         assert_eq!(
             connection
-                .query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, u64>(0))
+                .query_row("SELECT path FROM files WHERE root = 'C:\\'", [], |row| {
+                    row.get::<_, String>(0)
+                })
                 .unwrap(),
-            0
+            "C:\\previous.log"
         );
         copy_mft_stage_to_active(&mut connection, &stage, 7, "C:\\", true).unwrap();
         let file = connection
@@ -6861,6 +6889,56 @@ mod tests {
         drop(connection);
         drop(manager);
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    fn run_completed_stage_retention_matrix(scope_count: usize) -> (usize, usize, usize) {
+        let directory = test_directory(&format!("mft-stage-retention-{scope_count}"));
+        let db = directory.join("file-search.sqlite3");
+        let stage_directory = mft_stage_directory(&db);
+        let mut max_input_batch = 0_usize;
+        let mut max_output_batch = 0_usize;
+        let mut max_stage_files = 0_usize;
+        for scope in 0..scope_count {
+            let mut stage = MftVolumeStage::create(&db, 'C', scope as u64 + 1).unwrap();
+            for batch_index in 0..9_u64 {
+                let batch = (0..257_u64)
+                    .map(|offset| {
+                        staged_mft_record(
+                            100 + batch_index * 257 + offset,
+                            5,
+                            format!("scope-{scope}-file-{batch_index}-{offset}.log"),
+                            0,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                max_input_batch = max_input_batch.max(batch.len());
+                stage.append_records(&batch).unwrap();
+            }
+            stage
+                .resolve_and_stage_files("C:\\", &[], |files| {
+                    max_output_batch = max_output_batch.max(files.len());
+                    Ok(())
+                })
+                .unwrap();
+            stage.mark_complete_and_close().unwrap();
+            max_stage_files = max_stage_files.max(fs::read_dir(&stage_directory).unwrap().count());
+            drop(stage);
+            assert_eq!(fs::read_dir(&stage_directory).unwrap().count(), 0);
+        }
+        let _ = fs::remove_dir_all(directory);
+        (max_input_batch, max_output_batch, max_stage_files)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn completed_stage_retention_is_constant_from_one_to_sixty_four_scopes() {
+        let single = run_completed_stage_retention_matrix(1);
+        let many = run_completed_stage_retention_matrix(64);
+        assert_eq!(single, many);
+        assert_eq!(many.0, 257);
+        assert_eq!(many.1, MFT_STAGE_ROW_BATCH);
+        assert!(many.2 <= 3);
     }
 
     #[test]
