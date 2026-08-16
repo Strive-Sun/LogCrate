@@ -1,9 +1,10 @@
 use crate::archive::{is_archive_name, is_log_name};
+#[cfg(all(windows, test))]
+use crate::ntfs::resolve_mft_files_in_batches_retain;
 #[cfg(windows)]
 use crate::ntfs::{
     ipc::{enumerate_mft_via_service, query_usn_via_service, read_usn_via_service, ServiceFailure},
-    resolve_mft_files_in_batches, resolve_mft_files_in_batches_retain, MftRecord, UsnJournalInfo,
-    FILE_ATTRIBUTE_DIRECTORY,
+    resolve_mft_files_in_batches, MftRecord, UsnJournalInfo, FILE_ATTRIBUTE_DIRECTORY,
 };
 use crate::search_index::{SearchIndex, SearchIndexEntry};
 use crate::search_query_store::{
@@ -48,6 +49,12 @@ const PERSISTENCE_USN_REPLAY_MAX_DURATION: Duration = Duration::from_secs(30);
 const PERSISTENCE_USN_REPLAY_MAX_RANGE: i64 = 0;
 #[cfg(windows)]
 const NTFS_VOLUME_WORKERS_MAX: usize = 4;
+#[cfg(windows)]
+const MFT_STAGE_SCHEMA_VERSION: u32 = 1;
+#[cfg(windows)]
+const MFT_STAGE_ROW_BATCH: usize = 2_048;
+#[cfg(windows)]
+static MFT_STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const CREATE_FTS_TRIGGERS: &str =
     "CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
@@ -2152,12 +2159,375 @@ fn refresh_provider_totals(status: &mut SearchStatus) {
 }
 
 #[cfg(windows)]
+struct MftVolumeStage {
+    path: PathBuf,
+    connection: Option<Connection>,
+    record_count: u64,
+    searchable_files: u64,
+}
+
+#[cfg(windows)]
+impl MftVolumeStage {
+    fn create(db_path: &Path, volume: char) -> anyhow::Result<Self> {
+        let directory = db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("file-search-mft-stage-v{MFT_STAGE_SCHEMA_VERSION}"));
+        fs::create_dir_all(&directory)?;
+        let sequence = MFT_STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = directory.join(format!(
+            "{}-{}-{}.sqlite3",
+            std::process::id(),
+            volume.to_ascii_uppercase(),
+            sequence
+        ));
+        let connection = Connection::open(&path)?;
+        connection.busy_timeout(Duration::from_secs(15))?;
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "synchronous", "OFF")?;
+        connection.execute_batch(
+            "CREATE TABLE mft_records(
+               file_id BLOB PRIMARY KEY NOT NULL,
+               parent_id BLOB NOT NULL,
+               name TEXT NOT NULL,
+               attributes INTEGER NOT NULL,
+               reason INTEGER NOT NULL,
+               usn INTEGER NOT NULL
+             );
+             CREATE INDEX mft_records_parent_idx ON mft_records(parent_id);
+             CREATE TABLE resolved_directories(
+               file_id BLOB PRIMARY KEY NOT NULL,
+               path TEXT NOT NULL
+             );
+             CREATE TABLE resolved_files(
+               path TEXT PRIMARY KEY NOT NULL,
+               name TEXT NOT NULL,
+               parent TEXT NOT NULL,
+               size INTEGER NOT NULL,
+               modified_ms INTEGER,
+               is_log INTEGER NOT NULL,
+               is_archive INTEGER NOT NULL,
+               file_id BLOB,
+               parent_id BLOB
+             );",
+        )?;
+        Ok(Self {
+            path,
+            connection: Some(connection),
+            record_count: 0,
+            searchable_files: 0,
+        })
+    }
+
+    fn connection(&self) -> anyhow::Result<&Connection> {
+        self.connection
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("按卷 MFT 暂存已关闭"))
+    }
+
+    fn append_records(&mut self, records: &[MftRecord]) -> anyhow::Result<()> {
+        let connection = self
+            .connection
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("按卷 MFT 暂存已关闭"))?;
+        let transaction = connection.transaction()?;
+        {
+            let mut insert = transaction.prepare_cached(
+                "INSERT OR REPLACE INTO mft_records(
+                   file_id, parent_id, name, attributes, reason, usn
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for record in records {
+                insert.execute(params![
+                    record.id.as_bytes().as_slice(),
+                    record.parent_id.as_bytes().as_slice(),
+                    &record.name,
+                    record.attributes,
+                    record.reason,
+                    record.usn,
+                ])?;
+            }
+        }
+        transaction.commit()?;
+        self.record_count = self.record_count.saturating_add(records.len() as u64);
+        Ok(())
+    }
+
+    fn resolve_and_stage_files<F>(
+        &mut self,
+        root: &str,
+        exclusions: &[String],
+        mut on_batch: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(&[IndexedFile]) -> anyhow::Result<()>,
+    {
+        self.seed_resolved_roots(root)?;
+        self.resolve_directory_layers()?;
+        self.connection()?
+            .execute("DELETE FROM resolved_files", [])?;
+        let mut after_rowid = 0_i64;
+        let mut searchable_files = 0_u64;
+        loop {
+            let connection = self.connection()?;
+            let mut statement = connection.prepare(
+                "SELECT r.rowid, r.file_id, r.parent_id, r.name, d.path
+                   FROM mft_records r
+                   JOIN resolved_directories d ON d.file_id = r.parent_id
+                  WHERE r.rowid > ?1 AND (r.attributes & ?2) = 0
+                  ORDER BY r.rowid
+                  LIMIT ?3",
+            )?;
+            let rows = statement.query_map(
+                params![
+                    after_rowid,
+                    FILE_ATTRIBUTE_DIRECTORY,
+                    MFT_STAGE_ROW_BATCH as i64
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )?;
+            let mut files = Vec::with_capacity(MFT_STAGE_ROW_BATCH);
+            let mut rows_seen = 0_usize;
+            for row in rows {
+                let (rowid, id, parent_id, name, parent) = row?;
+                rows_seen += 1;
+                after_rowid = rowid;
+                let path = mft_stage_join_path(&parent, &name);
+                if is_excluded(Path::new(&path), exclusions) {
+                    continue;
+                }
+                files.push(IndexedFile {
+                    path,
+                    name,
+                    root: root.into(),
+                    size: 0,
+                    modified_ms: None,
+                    is_log: false,
+                    is_archive: false,
+                    file_id: Some(mft_stage_id(&id)?),
+                    parent_id: Some(mft_stage_id(&parent_id)?),
+                });
+                if let Some(file) = files.last_mut() {
+                    file.is_log = is_log_name(&file.name);
+                    file.is_archive = is_archive_name(&file.name);
+                }
+            }
+            drop(statement);
+            if !files.is_empty() {
+                write_staged_files(connection, &files)?;
+                on_batch(&files)?;
+                searchable_files = searchable_files.saturating_add(files.len() as u64);
+            }
+            if rows_seen < MFT_STAGE_ROW_BATCH {
+                break;
+            }
+        }
+        self.searchable_files = searchable_files;
+        Ok(())
+    }
+
+    fn close_writer(&mut self) -> anyhow::Result<()> {
+        if let Some(connection) = self.connection.take() {
+            connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        }
+        Ok(())
+    }
+
+    fn seed_resolved_roots(&self, root: &str) -> anyhow::Result<()> {
+        let connection = self.connection()?;
+        connection.execute("DELETE FROM resolved_directories", [])?;
+        connection.execute(
+            "INSERT OR IGNORE INTO resolved_directories(file_id, path)
+             SELECT parent_id, ?1
+               FROM mft_records
+              WHERE length(parent_id) = 16
+                AND substr(parent_id, 1, 6) = X'050000000000'
+             UNION
+             SELECT file_id, ?1
+               FROM mft_records
+              WHERE (file_id = parent_id OR name = '.')
+                AND length(file_id) = 16
+                AND substr(file_id, 1, 6) = X'050000000000'",
+            params![root],
+        )?;
+        Ok(())
+    }
+
+    fn resolve_directory_layers(&self) -> anyhow::Result<()> {
+        let connection = self.connection()?;
+        loop {
+            let directories = {
+                let mut statement = connection.prepare(
+                    "SELECT r.file_id, r.name, p.path
+                       FROM mft_records r
+                       JOIN resolved_directories p ON p.file_id = r.parent_id
+                       LEFT JOIN resolved_directories current ON current.file_id = r.file_id
+                      WHERE current.file_id IS NULL
+                        AND (r.attributes & ?1) != 0
+                        AND (r.attributes & ?2) = 0
+                      LIMIT ?3",
+                )?;
+                let rows = statement.query_map(
+                    params![
+                        FILE_ATTRIBUTE_DIRECTORY,
+                        0x400_u32,
+                        MFT_STAGE_ROW_BATCH as i64
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            if directories.is_empty() {
+                break;
+            }
+            let transaction = connection.unchecked_transaction()?;
+            {
+                let mut insert = transaction.prepare_cached(
+                    "INSERT OR IGNORE INTO resolved_directories(file_id, path) VALUES(?1, ?2)",
+                )?;
+                for (id, name, parent) in directories {
+                    insert.execute(params![id, mft_stage_join_path(&parent, &name)])?;
+                }
+            }
+            transaction.commit()?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for MftVolumeStage {
+    fn drop(&mut self) {
+        self.connection.take();
+        let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_file(self.path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(self.path.with_extension("sqlite3-shm"));
+    }
+}
+
+#[cfg(windows)]
+fn mft_stage_id(bytes: &[u8]) -> anyhow::Result<[u8; 16]> {
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("按卷 MFT 暂存包含无效文件引用长度"))
+}
+
+#[cfg(windows)]
+fn write_staged_files(connection: &Connection, files: &[IndexedFile]) -> anyhow::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    {
+        let mut insert = transaction.prepare_cached(
+            "INSERT OR REPLACE INTO resolved_files(
+               path, name, parent, size, modified_ms, is_log, is_archive, file_id, parent_id
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )?;
+        for file in files {
+            insert.execute(params![
+                &file.path,
+                &file.name,
+                mft_stage_parent_path(&file.path),
+                file.size,
+                file.modified_ms,
+                file.is_log,
+                file.is_archive,
+                file.file_id.as_ref().map(|id| id.as_slice()),
+                file.parent_id.as_ref().map(|id| id.as_slice()),
+            ])?;
+        }
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn mft_stage_parent_path(path: &str) -> String {
+    Path::new(path)
+        .parent()
+        .map(|parent| parent.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn mft_stage_join_path(parent: &str, name: &str) -> String {
+    if parent.ends_with(['\\', '/']) {
+        format!("{parent}{name}")
+    } else {
+        format!("{parent}\\{name}")
+    }
+}
+
+#[cfg(windows)]
+fn copy_mft_stage_to_active(
+    connection: &mut Connection,
+    stage: &MftVolumeStage,
+    root: &str,
+    rebuild_node_index: bool,
+) -> anyhow::Result<()> {
+    connection.execute(
+        "ATTACH DATABASE ?1 AS mft_volume_stage",
+        params![stage.path.to_string_lossy().as_ref()],
+    )?;
+    let result = (|| -> anyhow::Result<()> {
+        if rebuild_node_index {
+            connection.execute_batch("DROP INDEX IF EXISTS ntfs_nodes_parent_idx")?;
+        }
+        let transaction = connection.transaction()?;
+        transaction.execute("DELETE FROM files WHERE root = ?1", params![root])?;
+        transaction.execute("DELETE FROM ntfs_nodes WHERE root = ?1", params![root])?;
+        transaction.execute(
+            "INSERT INTO files(
+               path, name, parent, root, size, modified_ms, is_log, is_archive,
+               file_id, parent_id
+             )
+             SELECT path, name, parent, ?1, size, modified_ms, is_log, is_archive,
+                    file_id, parent_id
+               FROM mft_volume_stage.resolved_files",
+            params![root],
+        )?;
+        transaction.execute(
+            "INSERT INTO ntfs_nodes(root, file_id, parent_id, name, attributes, usn)
+             SELECT ?1, file_id, parent_id, name, attributes, usn
+               FROM mft_volume_stage.mft_records",
+            params![root],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })();
+    let detach_result = connection.execute_batch("DETACH DATABASE mft_volume_stage");
+    let index_result = if rebuild_node_index {
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS ntfs_nodes_parent_idx
+               ON ntfs_nodes(root, parent_id)",
+        )
+    } else {
+        Ok(())
+    };
+    result.and(detach_result.map_err(Into::into))?;
+    index_result?;
+    Ok(())
+}
+
+#[cfg(windows)]
 struct NtfsFinalizeJob {
     root: String,
     volume: char,
     exclusions: Vec<String>,
     journal_before: UsnJournalInfo,
-    records: Vec<MftRecord>,
+    stage: MftVolumeStage,
 }
 
 #[cfg(windows)]
@@ -2181,7 +2551,7 @@ fn enumerate_ntfs_volume_snapshot<S: SearchStatusSink>(
         None,
     );
     let journal_before = query_usn_via_service(volume)?;
-    let mut records = Vec::<MftRecord>::new();
+    let mut stage = MftVolumeStage::create(&manager.db_path, volume)?;
     set_provider_stage(
         manager,
         app,
@@ -2196,7 +2566,7 @@ fn enumerate_ntfs_volume_snapshot<S: SearchStatusSink>(
             anyhow::bail!("MFT 枚举已取消");
         }
         add_provider_progress(manager, app, root, "enumeratingMft", batch.len() as u64, 0);
-        records.extend(batch);
+        stage.append_records(&batch)?;
         Ok(())
     })?;
     eprintln!(
@@ -2214,7 +2584,7 @@ fn enumerate_ntfs_volume_snapshot<S: SearchStatusSink>(
         volume,
         exclusions: config.exclusions.clone(),
         journal_before,
-        records,
+        stage,
     })
 }
 
@@ -2231,27 +2601,21 @@ fn index_ntfs_volume_paths<S: SearchStatusSink>(
     let mut searchable_files = 0_u64;
     eprintln!("[search-index] root={root} stage=resolvingPaths event=start records=0");
     eprintln!("[search-index] root={root} stage=merging event=start records=0");
-    let (_, records) = resolve_mft_files_in_batches_retain(
-        &root,
-        snapshot.records,
-        NTFS_RESOLVE_BATCH,
-        |entries| {
+    let mut snapshot = snapshot;
+    snapshot
+        .stage
+        .resolve_and_stage_files(&root, &snapshot.exclusions, |files| {
             if manager.is_cancelled(generation) {
                 anyhow::bail!("MFT 路径重建已取消");
             }
-            let files = entries
-                .into_iter()
-                .filter(|entry| !is_excluded(Path::new(&entry.path), &snapshot.exclusions))
-                .map(|entry| indexed_mft_entry(&root, entry))
-                .collect::<Vec<_>>();
             let merge_started = std::time::Instant::now();
-            manager.index_files(&files)?;
+            manager.index_files(files)?;
             merge_elapsed = merge_elapsed.saturating_add(merge_started.elapsed());
             searchable_files = searchable_files.saturating_add(files.len() as u64);
             add_provider_progress(manager, app, &root, "resolvingPaths", 0, files.len() as u64);
             Ok(())
-        },
-    )?;
+        })?;
+    snapshot.stage.close_writer()?;
     let resolving_elapsed = started.elapsed().saturating_sub(merge_elapsed);
     eprintln!(
         "[search-index] root={root} stage=resolvingPaths event=complete records={searchable_files} elapsed_ms={}",
@@ -2262,13 +2626,7 @@ fn index_ntfs_volume_paths<S: SearchStatusSink>(
         "[search-index] root={root} stage=merging event=complete records={searchable_files} elapsed_ms={}",
         merge_elapsed.as_millis()
     );
-    Ok(NtfsFinalizeJob {
-        root,
-        volume: snapshot.volume,
-        exclusions: snapshot.exclusions,
-        journal_before: snapshot.journal_before,
-        records,
-    })
+    Ok(snapshot)
 }
 
 #[cfg(windows)]
@@ -2340,19 +2698,16 @@ fn persist_and_finalize_ntfs_volume(
         volume,
         exclusions,
         journal_before,
-        records: snapshot_records,
+        stage,
     } = job;
+    let snapshot_records = stage.record_count;
+    let snapshot_files = stage.searchable_files;
+    let stage_path = stage.path.clone();
     let started = std::time::Instant::now();
     eprintln!(
         "[search-index] root={} stage=persisting event=start records={}",
-        root,
-        snapshot_records.len()
+        root, snapshot_records
     );
-    let directory_ids = snapshot_records
-        .iter()
-        .filter(|record| record.is_directory())
-        .map(|record| record.id)
-        .collect::<HashSet<_>>();
     std::thread::scope(|scope| -> anyhow::Result<()> {
         let usn_reconciliation = scope.spawn(|| -> anyhow::Result<_> {
             let journal_after = query_usn_via_service(volume)?;
@@ -2365,8 +2720,25 @@ fn persist_and_finalize_ntfs_volume(
             {
                 return Ok((journal_after, Vec::new(), Some("bounded-usn-range-limit")));
             }
+            let stage_reader = Connection::open_with_flags(
+                &stage_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            let mut directory_lookup = stage_reader.prepare_cached(
+                "SELECT EXISTS(
+                   SELECT 1 FROM mft_records
+                    WHERE file_id = ?1 AND (attributes & ?2) != 0
+                 )",
+            )?;
             let (changes, watcher_reconcile_reason) = collect_persistence_usn_changes(
-                &directory_ids,
+                |id| {
+                    directory_lookup
+                        .query_row(
+                            params![id.as_bytes().as_slice(), FILE_ATTRIBUTE_DIRECTORY],
+                            |row| row.get(0),
+                        )
+                        .map_err(Into::into)
+                },
                 MAX_USN_REPLAY_RECORDS,
                 PERSISTENCE_USN_REPLAY_MAX_DURATION,
                 |on_batch| {
@@ -2386,40 +2758,19 @@ fn persist_and_finalize_ntfs_volume(
         connection.pragma_update(None, "synchronous", "OFF")?;
         connection.pragma_update(None, "cache_size", -524_288)?;
         connection.pragma_update(None, "mmap_size", 268_435_456_i64)?;
-        let transaction = connection.transaction()?;
-        transaction.execute("DELETE FROM files WHERE root = ?1", params![&root])?;
         let paths_started = std::time::Instant::now();
-        let (_, records) = resolve_mft_files_in_batches_retain(
-            &root,
-            snapshot_records,
-            NTFS_RESOLVE_BATCH,
-            |entries| {
-                let files = entries
-                    .into_iter()
-                    .filter(|entry| !is_excluded(Path::new(&entry.path), &exclusions))
-                    .map(|entry| indexed_mft_entry(&root, entry))
-                    .collect::<Vec<_>>();
-                write_file_rows(&transaction, &files, false)
-            },
-        )?;
-        transaction.commit()?;
+        copy_mft_stage_to_active(&mut connection, &stage, &root, rebuild_node_index)?;
         eprintln!(
             "[search-index] root={} sqlite-paths-ready records={} elapsed_ms={}",
             root,
-            records.len(),
+            snapshot_files,
             paths_started.elapsed().as_millis()
         );
-        let nodes_started = std::time::Instant::now();
-        if rebuild_node_index {
-            replace_ntfs_nodes(&mut connection, &root, &records)?;
-        } else {
-            replace_ntfs_node_rows(&mut connection, &root, &records)?;
-        }
         eprintln!(
             "[search-index] root={} sqlite-nodes-ready records={} elapsed_ms={}",
             root,
-            records.len(),
-            nodes_started.elapsed().as_millis()
+            snapshot_records,
+            paths_started.elapsed().as_millis()
         );
         let (journal_after, changes, watcher_reconcile_reason) = usn_reconciliation
             .join()
@@ -2435,7 +2786,7 @@ fn persist_and_finalize_ntfs_volume(
             eprintln!(
                 "[search-index] root={} stage=persisting event=complete records={} strategy=watcher-reconcile elapsed_ms={}",
                 root,
-                records.len(),
+                snapshot_records,
                 started.elapsed().as_millis()
             );
             return Ok(());
@@ -2445,7 +2796,7 @@ fn persist_and_finalize_ntfs_volume(
         eprintln!(
             "[search-index] root={} stage=persisting event=complete records={} elapsed_ms={}",
             root,
-            records.len(),
+            snapshot_records,
             started.elapsed().as_millis()
         );
         Ok(())
@@ -2467,7 +2818,7 @@ fn indexed_mft_entry(root: &str, entry: crate::ntfs::ResolvedMftEntry) -> Indexe
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn replace_ntfs_nodes(
     connection: &mut Connection,
     root: &str,
@@ -2482,7 +2833,7 @@ fn replace_ntfs_nodes(
     Ok(())
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn replace_ntfs_node_rows(
     connection: &mut Connection,
     root: &str,
@@ -2989,25 +3340,25 @@ impl std::fmt::Display for PersistenceUsnReplayStopped {
 impl std::error::Error for PersistenceUsnReplayStopped {}
 
 #[cfg(windows)]
-fn collect_persistence_usn_changes<F, R>(
-    known_directories: &HashSet<crate::ntfs::FileId>,
+fn collect_persistence_usn_changes<F, R, D>(
+    mut is_known_directory: D,
     max_records: usize,
     max_duration: Duration,
     read_batches: F,
 ) -> anyhow::Result<(Vec<MftRecord>, Option<&'static str>)>
 where
     F: FnOnce(&mut dyn FnMut(Vec<MftRecord>) -> anyhow::Result<()>) -> anyhow::Result<R>,
+    D: FnMut(crate::ntfs::FileId) -> anyhow::Result<bool>,
 {
     let started = std::time::Instant::now();
     let mut changes = Vec::new();
     let mut on_batch = |batch: Vec<MftRecord>| {
-        if batch
-            .iter()
-            .any(|change| change.is_directory() || known_directories.contains(&change.id))
-        {
-            return Err(anyhow::Error::new(PersistenceUsnReplayStopped(
-                "directory-change-during-persistence",
-            )));
+        for change in &batch {
+            if change.is_directory() || is_known_directory(change.id)? {
+                return Err(anyhow::Error::new(PersistenceUsnReplayStopped(
+                    "directory-change-during-persistence",
+                )));
+            }
         }
         if changes.len().saturating_add(batch.len()) > max_records
             || started.elapsed() >= max_duration
@@ -5462,9 +5813,9 @@ mod tests {
         let db = directory.join("search.sqlite3");
         initialize_database(&db).unwrap();
         let mut batches_requested = 0;
-        let known_directories = HashSet::new();
+        let known_directories = HashSet::<FileId>::new();
         let (changes, reason) = collect_persistence_usn_changes(
-            &known_directories,
+            |id| Ok(known_directories.contains(&id)),
             0,
             Duration::from_secs(30),
             |on_batch| -> anyhow::Result<()> {
@@ -5497,7 +5848,7 @@ mod tests {
         let directory_id = FileId::from_u64(10);
         let known_directories = HashSet::from([directory_id]);
         let (changes, reason) = collect_persistence_usn_changes(
-            &known_directories,
+            |id| Ok(known_directories.contains(&id)),
             MAX_USN_REPLAY_RECORDS,
             Duration::from_secs(30),
             |on_batch| -> anyhow::Result<()> {
@@ -6063,6 +6414,262 @@ mod tests {
         drop(connection);
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(windows)]
+    fn staged_mft_record(
+        id: u64,
+        parent_id: u64,
+        name: impl Into<String>,
+        attributes: u32,
+    ) -> MftRecord {
+        MftRecord {
+            id: crate::ntfs::FileId::from_u64(id),
+            parent_id: crate::ntfs::FileId::from_u64(parent_id),
+            name: name.into(),
+            attributes,
+            reason: 0,
+            usn: id as i64,
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mft_volume_stage_resolves_bounded_paths_and_copies_all_nodes() {
+        let directory = test_directory("mft-volume-stage-resolve");
+        let db = directory.join("search.sqlite3");
+        initialize_database(&db).unwrap();
+        let mut stage = MftVolumeStage::create(&db, 'C').unwrap();
+        let records = vec![
+            staged_mft_record(10, 5, "Logs", FILE_ATTRIBUTE_DIRECTORY),
+            staged_mft_record(11, 10, "Nested", FILE_ATTRIBUTE_DIRECTORY),
+            staged_mft_record(12, 5, "Link", FILE_ATTRIBUTE_DIRECTORY | 0x400),
+            staged_mft_record(13, 999, "Orphan", FILE_ATTRIBUTE_DIRECTORY),
+            staged_mft_record(14, 15, "CycleA", FILE_ATTRIBUTE_DIRECTORY),
+            staged_mft_record(15, 14, "CycleB", FILE_ATTRIBUTE_DIRECTORY),
+            staged_mft_record(20, 11, "日志🚀.log", 0),
+            staged_mft_record(21, 12, "behind-link.log", 0),
+            staged_mft_record(22, 13, "orphan.log", 0),
+            staged_mft_record(23, 14, "cycle.log", 0),
+        ];
+        for batch in records.chunks(3) {
+            stage.append_records(batch).unwrap();
+        }
+        let mut batches = Vec::new();
+        stage
+            .resolve_and_stage_files("C:\\", &[], |files| {
+                assert!(files.len() <= MFT_STAGE_ROW_BATCH);
+                batches.push(
+                    files
+                        .iter()
+                        .map(|file| file.path.clone())
+                        .collect::<Vec<_>>(),
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(stage.record_count, records.len() as u64);
+        assert_eq!(stage.searchable_files, 1);
+        assert_eq!(
+            batches,
+            vec![vec!["C:\\Logs\\Nested\\日志🚀.log".to_owned()]]
+        );
+
+        stage.close_writer().unwrap();
+        let mut connection = open_database(&db).unwrap();
+        copy_mft_stage_to_active(&mut connection, &stage, "C:\\", true).unwrap();
+        let file = connection
+            .query_row(
+                "SELECT path, parent FROM files WHERE root = 'C:\\'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(file.0, "C:\\Logs\\Nested\\日志🚀.log");
+        assert_eq!(file.1, "C:\\Logs\\Nested");
+        let node_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM ntfs_nodes WHERE root = 'C:\\'",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap();
+        assert_eq!(node_count, records.len() as u64);
+        drop(connection);
+        drop(stage);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mft_volume_stage_exclusions_do_not_end_rowid_pagination_early() {
+        let directory = test_directory("mft-volume-stage-exclusions");
+        let db = directory.join("search.sqlite3");
+        let mut stage = MftVolumeStage::create(&db, 'D').unwrap();
+        stage
+            .append_records(&[staged_mft_record(
+                10,
+                5,
+                "Excluded",
+                FILE_ATTRIBUTE_DIRECTORY,
+            )])
+            .unwrap();
+        let excluded = (0..MFT_STAGE_ROW_BATCH)
+            .map(|index| staged_mft_record(100 + index as u64, 10, format!("skip-{index}.log"), 0))
+            .collect::<Vec<_>>();
+        for batch in excluded.chunks(127) {
+            stage.append_records(batch).unwrap();
+        }
+        stage
+            .append_records(&[staged_mft_record(10_000, 5, "included.log", 0)])
+            .unwrap();
+
+        let mut paths = Vec::new();
+        stage
+            .resolve_and_stage_files("D:\\", &["D:\\Excluded".into()], |files| {
+                assert!(files.len() <= MFT_STAGE_ROW_BATCH);
+                paths.extend(files.iter().map(|file| file.path.clone()));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(paths, vec!["D:\\included.log"]);
+        assert_eq!(stage.searchable_files, 1);
+        drop(stage);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mft_volume_stages_use_independent_files_and_remove_sidecars_on_drop() {
+        let directory = test_directory("mft-volume-stage-cleanup");
+        let db = directory.join("search.sqlite3");
+        let first = MftVolumeStage::create(&db, 'C').unwrap();
+        let second = MftVolumeStage::create(&db, 'C').unwrap();
+        let first_path = first.path.clone();
+        let second_path = second.path.clone();
+        let first_wal = first_path.with_extension("sqlite3-wal");
+        let first_shm = first_path.with_extension("sqlite3-shm");
+        assert_ne!(first_path, second_path);
+        assert!(first_path.exists());
+        assert!(second_path.exists());
+
+        drop(first);
+        drop(second);
+
+        assert!(!first_path.exists());
+        assert!(!second_path.exists());
+        assert!(!first_wal.exists());
+        assert!(!first_shm.exists());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mft_volume_stage_copy_failure_rolls_back_and_restores_active_index() {
+        let directory = test_directory("mft-volume-stage-copy-rollback");
+        let db = directory.join("search.sqlite3");
+        initialize_database(&db).unwrap();
+        let mut stage = MftVolumeStage::create(&db, 'C').unwrap();
+        let staged_record = staged_mft_record(20, 5, "new.log", 0);
+        stage
+            .append_records(std::slice::from_ref(&staged_record))
+            .unwrap();
+        stage
+            .resolve_and_stage_files("C:\\", &[], |_| Ok(()))
+            .unwrap();
+        stage.close_writer().unwrap();
+
+        let mut connection = open_database(&db).unwrap();
+        write_files(
+            &mut connection,
+            &[IndexedFile {
+                path: "C:\\old.log".into(),
+                name: "old.log".into(),
+                root: "C:\\".into(),
+                size: 0,
+                modified_ms: None,
+                is_log: true,
+                is_archive: false,
+                file_id: Some(crate::ntfs::FileId::from_u64(30).as_bytes()),
+                parent_id: Some(crate::ntfs::FileId::from_u64(5).as_bytes()),
+            }],
+            true,
+        )
+        .unwrap();
+        replace_ntfs_nodes(
+            &mut connection,
+            "C:\\",
+            &[staged_mft_record(30, 5, "old.log", 0)],
+        )
+        .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER reject_mft_stage_files
+                   BEFORE INSERT ON main.files
+                   BEGIN
+                     SELECT RAISE(ABORT, 'forced stage copy failure');
+                   END;",
+            )
+            .unwrap();
+
+        let error = copy_mft_stage_to_active(&mut connection, &stage, "C:\\", true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("forced stage copy failure"));
+        assert_eq!(
+            connection
+                .query_row("SELECT path FROM files WHERE root = 'C:\\'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "C:\\old.log"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT name FROM ntfs_nodes WHERE root = 'C:\\'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "old.log"
+        );
+        let parent_index_exists = connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM sqlite_master
+                    WHERE type = 'index' AND name = 'ntfs_nodes_parent_idx'
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap();
+        assert!(parent_index_exists);
+        let attached_names = connection
+            .prepare("PRAGMA database_list")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(!attached_names.iter().any(|name| name == "mft_volume_stage"));
+
+        connection
+            .execute_batch("DROP TRIGGER reject_mft_stage_files")
+            .unwrap();
+        copy_mft_stage_to_active(&mut connection, &stage, "C:\\", true).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT path FROM files WHERE root = 'C:\\'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "C:\\new.log"
+        );
+        drop(connection);
+        drop(stage);
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
