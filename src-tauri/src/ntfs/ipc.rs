@@ -35,6 +35,12 @@ const HEADER_SIZE: usize = 12;
 const MAX_FRAME_BODY: usize = 8 * 1024 * 1024;
 const MAX_BATCH_RECORDS: usize = 131_072;
 const MAX_CONCURRENT_CLIENTS: usize = 4;
+// CreateNamedPipeW only uses this value as the namespace-wide instance ceiling; the
+// server still creates a single listener at a time and bounds active work separately.
+// Keeping the transport ceiling above the worker budget lets an extra client connect
+// long enough to receive the stable retryable busy response instead of killing accept.
+const MAX_PIPE_INSTANCES: u32 = 255;
+const BUSY_RESPONSE_CODE: u32 = 429;
 const PIPE_BUFFER_SIZE: u32 = 1024 * 1024;
 const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
 const ERROR_ACCESS_DENIED: i32 = 5;
@@ -285,7 +291,7 @@ fn reject_busy_client(pipe: OwnedPipe) {
     let _ = write_response(
         &mut file,
         &Response::Error {
-            code: 429,
+            code: BUSY_RESPONSE_CODE,
             message: "索引服务并发请求已达上限".into(),
         },
     );
@@ -935,7 +941,7 @@ fn create_server_pipe() -> anyhow::Result<OwnedPipe> {
             name.as_ptr(),
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-            4,
+            MAX_PIPE_INSTANCES,
             PIPE_BUFFER_SIZE,
             PIPE_BUFFER_SIZE,
             0,
@@ -1172,6 +1178,20 @@ mod tests {
         assert_eq!(active.load(Ordering::Acquire), MAX_CONCURRENT_CLIENTS);
         drop(guards);
         assert_eq!(active.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn pipe_accept_capacity_is_separate_from_business_capacity() {
+        assert_eq!(MAX_CONCURRENT_CLIENTS, 4);
+        assert!(MAX_PIPE_INSTANCES > MAX_CONCURRENT_CLIENTS as u32);
+
+        let busy = Response::Error {
+            code: BUSY_RESPONSE_CODE,
+            message: "索引服务并发请求已达上限".into(),
+        };
+        let mut bytes = Vec::new();
+        write_response(&mut bytes, &busy).unwrap();
+        assert_eq!(read_response(&mut Cursor::new(bytes)).unwrap(), busy);
     }
 
     #[test]
