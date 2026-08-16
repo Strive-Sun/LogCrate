@@ -261,7 +261,7 @@ LogCrate Index Service SHALL 将 named pipe 连接接纳与 MFT/USN 业务并发
 
 ### Requirement: 所有索引范围查询完成与持久化收敛门禁
 
-系统 SHALL 在每次启动恢复或重建开始时冻结带 generation 的 operation scope，并分别跟踪其中每个卷或范围的发现、查询索引发布与查询计数核对，以及 SQLite/USN 持久化、快照完成标记与事件交接。只有 scope 中所有范围的查询快照都成功发布并核对一致，全局查询状态才能进入 `ready`；任何 `pending`、`waitingToRetry`、`recovering`、`blocked`、`scanning` 或 `merging` 范围 MUST 阻止全局 `ready`，但独立的 `persisting` 不阻止查询 `ready`。不存在 `blocked` 时，只有 scope 中所有范围都完成持久化和事件交接，全局才能进入 `converged`；存在 `blocked` 时全局最终为 `attentionRequired`，只能单独标记其它卷已 `converged`。失败范围 SHALL 保存在恢复队列中，并在退避到期、应用重启、索引服务恢复或同一稳定身份卷重新上线时自动继续；系统 MUST NOT 通过静默忽略失败范围来宣称所有卷已完成。若全部可执行工作已停止且仅剩已证实的外部不可满足卷，系统 SHALL 进入稳定的 `attentionRequired` 而不是继续显示正在索引。
+系统 SHALL 在每次启动恢复或重建开始时冻结带 generation 的 operation scope，并分别跟踪其中每个卷或范围的发现、查询索引发布与查询计数核对，以及 SQLite/USN 持久化、快照完成标记与事件交接。只有 scope 中所有范围的查询快照都成功发布并核对一致，全局查询状态才能进入 `ready`；任何 `pending`、`waitingToRetry`、`recovering`、`blocked`、`scanning` 或 `merging` 范围 MUST 阻止全局 `ready`，但独立的 `persisting` 不阻止查询 `ready`。不存在 `blocked` 时，只有 scope 中所有范围都完成持久化和事件交接，全局才能进入 `converged`；存在 `blocked` 时全局最终为 `attentionRequired`，只能单独标记其它卷已 `converged`。失败范围 SHALL 保存在恢复队列中，并在退避到期、索引服务恢复、同一稳定身份卷重新上线，或用户/操作系统结束应用后的下一次自然启动时自动继续；搜索功能 MUST NOT 为触发恢复而主动关闭、重启或要求用户重启应用。系统 MUST NOT 通过静默忽略失败范围来宣称所有卷已完成。若全部可执行工作已停止且仅剩已证实的外部不可满足卷，系统 SHALL 进入稳定的 `attentionRequired` 而不是继续显示正在索引。
 
 #### Scenario: 所有卷成功后才能完成
 
@@ -278,9 +278,9 @@ LogCrate Index Service SHALL 将 named pipe 连接接纳与 MFT/USN 业务并发
 - **WHEN** 某个卷连续若干恢复轮失败，但之后索引服务、卷或依赖条件恢复
 - **THEN** 系统根据持久化恢复状态自动重新执行受影响阶段或重建该卷，成功核对后清除恢复记录并允许所有卷完成门禁通过
 
-#### Scenario: 应用在恢复期间重启
+#### Scenario: 应用后续自然启动继续恢复
 
-- **WHEN** 应用退出时 operation scope 中仍有 `recovering` 或 `blocked` 卷
+- **WHEN** 用户关闭应用、操作系统关机或进程被外部终止时，operation scope 中仍有 `recovering` 或 `blocked` 卷
 - **THEN** 下次启动恢复相同 scope、失败阶段、有效 active 快照和待恢复卷，不把未完成卷初始化为成功，也不要求用户手动再次点击重建
 
 #### Scenario: 卷暂时离线
@@ -339,7 +339,7 @@ LogCrate Index Service SHALL 将 named pipe 连接接纳与 MFT/USN 业务并发
 
 ### Requirement: 非外部阻塞故障的最终成功保证
 
-对于不属于明确物理介质/设备损坏、原卷不存在或已离线、访问被拒绝的错误，系统 SHALL 保留该卷的完成义务并自动恢复。只要卷持续存在、可读且权限满足，系统 MUST 通过自动修复索引服务/本地暂存或降级到兼容 provider，最终完成该卷的发现、查询索引发布与计数核对并达到 `ready`，随后完成持久化与事件交接并达到 `converged`。pipe 饱和、服务意外退出、启动竞态、协议不兼容、服务安装损坏、自动启动失败、暂时 IO/共享冲突、客户端断开、暂存损坏、应用重启和本轮重试预算耗尽 MUST NOT 成为放弃该卷、将其永久标记为 `blocked` 或要求用户手动重建的理由。
+对于不属于明确物理介质/设备损坏、原卷不存在或已离线、访问被拒绝的错误，系统 SHALL 保留该卷的完成义务并自动恢复。只要卷持续存在、可读且权限满足，系统 MUST 通过自动修复索引服务/本地暂存或降级到兼容 provider，最终完成该卷的发现、查询索引发布与计数核对并达到 `ready`，随后完成持久化与事件交接并达到 `converged`。pipe 饱和、服务意外退出、启动竞态、协议不兼容、服务安装损坏、自动启动失败、暂时 IO/共享冲突、客户端断开、暂存损坏、应用被外部结束后的再次启动和本轮重试预算耗尽 MUST NOT 成为放弃该卷、将其永久标记为 `blocked` 或要求用户手动重建的理由。索引、provider、服务或恢复故障 MUST NOT 主动关闭、重启或要求用户重启 LogCrate。
 
 #### Scenario: 索引服务意外退出
 
@@ -356,10 +356,15 @@ LogCrate Index Service SHALL 将 named pipe 连接接纳与 MFT/USN 业务并发
 - **WHEN** 快速索引服务协议与应用不匹配、程序缺失或无法启动，但卷存在、可读且当前进程对该卷拥有必要权限
 - **THEN** 系统在当前权限下自动修复/替换组件，或自动切换到兼容目录 provider 完成全卷索引；该卷最终达到 `ready` 和 `converged`，不进入永久 `blocked`
 
-#### Scenario: 暂存损坏或应用重启
+#### Scenario: 暂存损坏或应用后续自然启动
 
-- **WHEN** 未完成的按卷暂存损坏、generation 中断或应用在索引中退出
+- **WHEN** 未完成的按卷暂存损坏、generation 中断，或应用在索引期间被用户关闭、操作系统关机或外部终止
 - **THEN** 系统隔离无效暂存、保留 active 数据并在下次启动自动继续或重建该卷，最终通过完整性核对
+
+#### Scenario: 搜索恢复不得重启应用
+
+- **WHEN** 索引、provider、索引服务或恢复流程发生任意可恢复故障
+- **THEN** 系统在当前 LogCrate 进程内后台恢复或保存恢复义务等待下一次自然启动，绝不主动关闭、重启或要求用户重启应用，主窗口与非搜索功能保持可用
 
 #### Scenario: 连续暂时失败后成功
 
