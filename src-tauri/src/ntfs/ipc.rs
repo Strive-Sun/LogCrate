@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, sleep};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use widestring::U16CString;
 use windows_service::service::{ServiceAccess, ServiceState};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
@@ -43,9 +43,18 @@ const MAX_PIPE_INSTANCES: u32 = 255;
 const BUSY_RESPONSE_CODE: u32 = 429;
 const PIPE_BUFFER_SIZE: u32 = 1024 * 1024;
 const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
+const ERROR_FILE_NOT_FOUND: i32 = 2;
 const ERROR_ACCESS_DENIED: i32 = 5;
+const ERROR_BROKEN_PIPE: i32 = 109;
+const ERROR_SEM_TIMEOUT: i32 = 121;
+const ERROR_PIPE_BUSY: i32 = 231;
+const ERROR_NO_DATA: i32 = 232;
+const ERROR_PIPE_NOT_CONNECTED: i32 = 233;
 const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
 const ERROR_CANCELLED: i32 = 1223;
+const CLIENT_RETRY_ATTEMPTS: usize = 8;
+const CLIENT_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(25);
+const CLIENT_RETRY_MAX_DELAY: Duration = Duration::from_millis(1_000);
 const REPAIR_EXECUTABLE_NAME: &str = "logcrate_index_service.exe";
 const REPAIR_ARGUMENTS: &str = "--install";
 
@@ -92,6 +101,10 @@ pub enum Response {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceFailureCode {
     Missing,
+    Busy,
+    PipeMissing,
+    Starting,
+    Stopped,
     AccessDenied,
     StartFailed,
     NotReady,
@@ -105,6 +118,10 @@ impl ServiceFailureCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Missing => "missing",
+            Self::Busy => "busy",
+            Self::PipeMissing => "pipeMissing",
+            Self::Starting => "starting",
+            Self::Stopped => "stopped",
             Self::AccessDenied => "accessDenied",
             Self::StartFailed => "startFailed",
             Self::NotReady => "notReady",
@@ -112,6 +129,31 @@ impl ServiceFailureCode {
             Self::ElevationCancelled => "elevationCancelled",
             Self::RepairExecutableMissing => "repairExecutableMissing",
             Self::RepairFailed => "repairFailed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientRecoveryClass {
+    RetryWithinRound,
+    RetryNextRound,
+}
+
+impl ServiceFailureCode {
+    const fn recovery_class(self) -> ClientRecoveryClass {
+        match self {
+            Self::Busy | Self::PipeMissing | Self::Starting => {
+                ClientRecoveryClass::RetryWithinRound
+            }
+            Self::Missing
+            | Self::Stopped
+            | Self::AccessDenied
+            | Self::StartFailed
+            | Self::NotReady
+            | Self::ProtocolMismatch
+            | Self::ElevationCancelled
+            | Self::RepairExecutableMissing
+            | Self::RepairFailed => ClientRecoveryClass::RetryNextRound,
         }
     }
 }
@@ -211,6 +253,41 @@ fn connect_and_handshake() -> anyhow::Result<File> {
 }
 
 fn connect_and_handshake_diagnostic() -> Result<File, ServiceFailure> {
+    run_client_recovery_round(connect_and_handshake_once, sleep)
+}
+
+fn run_client_recovery_round<T, Attempt, Wait>(
+    mut attempt_connection: Attempt,
+    mut wait: Wait,
+) -> Result<T, ServiceFailure>
+where
+    Attempt: FnMut() -> Result<T, ServiceFailure>,
+    Wait: FnMut(Duration),
+{
+    let mut last_failure = None;
+    for attempt in 0..CLIENT_RETRY_ATTEMPTS {
+        match attempt_connection() {
+            Ok(value) => return Ok(value),
+            Err(failure)
+                if failure.code.recovery_class() == ClientRecoveryClass::RetryWithinRound =>
+            {
+                last_failure = Some(failure);
+                if let Some(delay) = client_retry_delay(attempt) {
+                    wait(delay);
+                }
+            }
+            Err(failure) => return Err(failure),
+        }
+    }
+    Err(last_failure.unwrap_or_else(|| {
+        ServiceFailure::new(
+            ServiceFailureCode::NotReady,
+            "索引服务客户端恢复轮未完成连接",
+        )
+    }))
+}
+
+fn connect_and_handshake_once() -> Result<File, ServiceFailure> {
     let mut pipe = connect()?;
     write_request(&mut pipe, &Request::Hello).map_err(handshake_failure)?;
     match read_response(&mut pipe).map_err(handshake_failure)? {
@@ -219,6 +296,9 @@ fn connect_and_handshake_diagnostic() -> Result<File, ServiceFailure> {
             ServiceFailureCode::ProtocolMismatch,
             format!("索引服务协议版本不兼容: {protocol}"),
         )),
+        Response::Error { code, message } if code == BUSY_RESPONSE_CODE => Err(
+            ServiceFailure::new(ServiceFailureCode::Busy, format!("索引服务繁忙: {message}")),
+        ),
         Response::Error { code, message } => Err(ServiceFailure::new(
             ServiceFailureCode::NotReady,
             format!("索引服务握手失败 {code}: {message}"),
@@ -418,26 +498,22 @@ fn write_service_error(pipe: &mut File, error: &anyhow::Error) -> anyhow::Result
 fn connect() -> Result<File, ServiceFailure> {
     match open_pipe() {
         Ok(pipe) => return Ok(pipe),
-        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
-            return Err(pipe_open_failure(error));
-        }
-        Err(_) => {}
+        Err(error) => match pipe_open_failure(error) {
+            failure if failure.code == ServiceFailureCode::PipeMissing => {}
+            failure => return Err(failure),
+        },
     }
-    start_installed_service()?;
-    let started = Instant::now();
-    // Older development services exposed one pipe instance. Waiting here keeps a second
-    // volume queued instead of incorrectly degrading it to a recursive folder scan; current
-    // services accept up to MAX_CONCURRENT_CLIENTS immediately.
-    while started.elapsed() < Duration::from_secs(60) {
-        match open_pipe() {
-            Ok(pipe) => return Ok(pipe),
-            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
-                return Err(pipe_open_failure(error));
-            }
-            Err(_) => sleep(Duration::from_millis(50)),
-        }
+    match start_installed_service()? {
+        ServiceState::Running => Err(ServiceFailure::new(
+            ServiceFailureCode::PipeMissing,
+            "LogCrate Index Service 正在运行，但 named pipe 尚不存在",
+        )),
+        ServiceState::StartPending | ServiceState::ContinuePending => Err(ServiceFailure::new(
+            ServiceFailureCode::Starting,
+            "LogCrate Index Service 正在启动",
+        )),
+        state => Err(service_state_failure(state)),
     }
-    open_pipe().map_err(pipe_open_failure)
 }
 
 fn open_pipe() -> io::Result<File> {
@@ -445,10 +521,13 @@ fn open_pipe() -> io::Result<File> {
 }
 
 fn pipe_open_failure(error: io::Error) -> ServiceFailure {
-    let code = if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) {
-        ServiceFailureCode::AccessDenied
-    } else {
-        ServiceFailureCode::NotReady
+    let code = match error.raw_os_error() {
+        Some(ERROR_ACCESS_DENIED) => ServiceFailureCode::AccessDenied,
+        Some(ERROR_PIPE_BUSY | ERROR_SEM_TIMEOUT) => ServiceFailureCode::Busy,
+        Some(
+            ERROR_FILE_NOT_FOUND | ERROR_BROKEN_PIPE | ERROR_NO_DATA | ERROR_PIPE_NOT_CONNECTED,
+        ) => ServiceFailureCode::PipeMissing,
+        _ => ServiceFailureCode::NotReady,
     };
     ServiceFailure::new(
         code,
@@ -456,7 +535,7 @@ fn pipe_open_failure(error: io::Error) -> ServiceFailure {
     )
 }
 
-fn start_installed_service() -> Result<(), ServiceFailure> {
+fn start_installed_service() -> Result<ServiceState, ServiceFailure> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(|error| classify_service_error("连接 Windows Service Control Manager", error))?;
     let service = manager
@@ -469,12 +548,44 @@ fn start_installed_service() -> Result<(), ServiceFailure> {
         .query_status()
         .map_err(|error| classify_service_error("查询 LogCrate Index Service 状态", error))?
         .current_state;
-    if !matches!(state, ServiceState::Running | ServiceState::StartPending) {
-        service
-            .start::<&str>(&[])
-            .map_err(|error| classify_service_error("启动 LogCrate Index Service", error))?;
+    match state {
+        ServiceState::Running | ServiceState::StartPending | ServiceState::ContinuePending => {
+            Ok(state)
+        }
+        ServiceState::Stopped => {
+            service
+                .start::<&str>(&[])
+                .map_err(|error| classify_service_error("启动 LogCrate Index Service", error))?;
+            Ok(ServiceState::StartPending)
+        }
+        state => Err(service_state_failure(state)),
     }
-    Ok(())
+}
+
+fn service_state_failure(state: ServiceState) -> ServiceFailure {
+    let code = if matches!(state, ServiceState::StopPending | ServiceState::Stopped) {
+        ServiceFailureCode::Stopped
+    } else {
+        ServiceFailureCode::StartFailed
+    };
+    ServiceFailure::new(
+        code,
+        format!("LogCrate Index Service 状态不可用: {state:?}"),
+    )
+}
+
+fn client_retry_delay(attempt: usize) -> Option<Duration> {
+    if attempt.saturating_add(1) >= CLIENT_RETRY_ATTEMPTS {
+        return None;
+    }
+    let multiplier = 1_u32
+        .checked_shl(attempt.min(31) as u32)
+        .unwrap_or(u32::MAX);
+    Some(
+        CLIENT_RETRY_INITIAL_DELAY
+            .saturating_mul(multiplier)
+            .min(CLIENT_RETRY_MAX_DELAY),
+    )
 }
 
 fn classify_service_error(stage: &str, error: windows_service::Error) -> ServiceFailure {
@@ -503,6 +614,15 @@ fn handshake_failure(error: anyhow::Error) -> ServiceFailure {
         .find_map(|cause| cause.downcast_ref::<ProtocolVersionMismatch>())
     {
         return ServiceFailure::new(ServiceFailureCode::ProtocolMismatch, mismatch.to_string());
+    }
+    if let Some(io_error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<io::Error>())
+    {
+        let failure = pipe_open_failure(io::Error::from_raw_os_error(
+            io_error.raw_os_error().unwrap_or(1),
+        ));
+        return ServiceFailure::new(failure.code, format!("索引服务 IPC 握手失败: {error:#}"));
     }
     ServiceFailure::new(
         ServiceFailureCode::NotReady,
@@ -997,6 +1117,7 @@ mod tests {
     use std::os::windows::io::AsRawHandle;
     use std::path::Path;
     use std::sync::{mpsc, Arc};
+    use std::time::Instant;
     use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 
     static TEST_PIPE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
@@ -1093,6 +1214,10 @@ mod tests {
             ServiceFailureCode::StartFailed
         );
         assert_eq!(ServiceFailureCode::Missing.as_str(), "missing");
+        assert_eq!(ServiceFailureCode::Busy.as_str(), "busy");
+        assert_eq!(ServiceFailureCode::PipeMissing.as_str(), "pipeMissing");
+        assert_eq!(ServiceFailureCode::Starting.as_str(), "starting");
+        assert_eq!(ServiceFailureCode::Stopped.as_str(), "stopped");
         assert_eq!(ServiceFailureCode::AccessDenied.as_str(), "accessDenied");
         assert_eq!(ServiceFailureCode::StartFailed.as_str(), "startFailed");
         assert_eq!(ServiceFailureCode::NotReady.as_str(), "notReady");
@@ -1109,6 +1234,120 @@ mod tests {
             "repairExecutableMissing"
         );
         assert_eq!(ServiceFailureCode::RepairFailed.as_str(), "repairFailed");
+
+        assert_eq!(
+            ServiceFailureCode::Busy.recovery_class(),
+            ClientRecoveryClass::RetryWithinRound
+        );
+        assert_eq!(
+            ServiceFailureCode::PipeMissing.recovery_class(),
+            ClientRecoveryClass::RetryWithinRound
+        );
+        assert_eq!(
+            ServiceFailureCode::Starting.recovery_class(),
+            ClientRecoveryClass::RetryWithinRound
+        );
+        assert_eq!(
+            ServiceFailureCode::ProtocolMismatch.recovery_class(),
+            ClientRecoveryClass::RetryNextRound
+        );
+        assert_eq!(
+            ServiceFailureCode::StartFailed.recovery_class(),
+            ClientRecoveryClass::RetryNextRound
+        );
+        assert_eq!(
+            ServiceFailureCode::AccessDenied.recovery_class(),
+            ClientRecoveryClass::RetryNextRound
+        );
+    }
+
+    #[test]
+    fn client_retry_backoff_is_bounded_and_categorized() {
+        let delays = (0..CLIENT_RETRY_ATTEMPTS)
+            .map(client_retry_delay)
+            .collect::<Vec<_>>();
+        assert_eq!(delays[0], Some(Duration::from_millis(25)));
+        assert_eq!(delays[1], Some(Duration::from_millis(50)));
+        assert_eq!(delays[6], Some(Duration::from_millis(1_000)));
+        assert_eq!(delays[7], None);
+        assert!(delays
+            .iter()
+            .flatten()
+            .all(|delay| *delay <= CLIENT_RETRY_MAX_DELAY));
+
+        assert_eq!(
+            service_state_failure(ServiceState::Stopped).code,
+            ServiceFailureCode::Stopped
+        );
+        assert_eq!(
+            service_state_failure(ServiceState::StopPending).code,
+            ServiceFailureCode::Stopped
+        );
+        assert_eq!(
+            service_state_failure(ServiceState::Paused).code,
+            ServiceFailureCode::StartFailed
+        );
+    }
+
+    #[test]
+    fn client_recovery_round_retries_only_transient_connection_states() {
+        let mut attempts = vec![
+            Err(ServiceFailure::new(ServiceFailureCode::Busy, "busy")),
+            Err(ServiceFailure::new(
+                ServiceFailureCode::Starting,
+                "starting",
+            )),
+            Err(ServiceFailure::new(
+                ServiceFailureCode::PipeMissing,
+                "pipe missing",
+            )),
+            Ok(7_u32),
+        ]
+        .into_iter();
+        let mut waits = Vec::new();
+        let value = run_client_recovery_round(
+            || attempts.next().expect("恢复轮进行了多余尝试"),
+            |delay| waits.push(delay),
+        )
+        .unwrap();
+        assert_eq!(value, 7);
+        assert_eq!(
+            waits,
+            vec![
+                Duration::from_millis(25),
+                Duration::from_millis(50),
+                Duration::from_millis(100)
+            ]
+        );
+
+        let mut immediate_attempts = 0;
+        let mismatch = run_client_recovery_round::<(), _, _>(
+            || {
+                immediate_attempts += 1;
+                Err(ServiceFailure::new(
+                    ServiceFailureCode::ProtocolMismatch,
+                    "mismatch",
+                ))
+            },
+            |_| panic!("协议不兼容不应在同一恢复轮睡眠重试"),
+        )
+        .unwrap_err();
+        assert_eq!(mismatch.code, ServiceFailureCode::ProtocolMismatch);
+        assert_eq!(immediate_attempts, 1);
+
+        let mut bounded_attempts = 0;
+        let mut bounded_waits = Vec::new();
+        let busy = run_client_recovery_round::<(), _, _>(
+            || {
+                bounded_attempts += 1;
+                Err(ServiceFailure::new(ServiceFailureCode::Busy, "busy"))
+            },
+            |delay| bounded_waits.push(delay),
+        )
+        .unwrap_err();
+        assert_eq!(busy.code, ServiceFailureCode::Busy);
+        assert_eq!(bounded_attempts, CLIENT_RETRY_ATTEMPTS);
+        assert_eq!(bounded_waits.len(), CLIENT_RETRY_ATTEMPTS - 1);
     }
 
     #[test]
@@ -1150,12 +1389,14 @@ mod tests {
         assert_eq!(mismatch.code, ServiceFailureCode::ProtocolMismatch);
 
         let unavailable = handshake_failure(anyhow!(io::Error::from_raw_os_error(2)));
-        assert_eq!(unavailable.code, ServiceFailureCode::NotReady);
+        assert_eq!(unavailable.code, ServiceFailureCode::PipeMissing);
 
         let pipe_denied = pipe_open_failure(io::Error::from_raw_os_error(ERROR_ACCESS_DENIED));
         assert_eq!(pipe_denied.code, ServiceFailureCode::AccessDenied);
-        let pipe_missing = pipe_open_failure(io::Error::from_raw_os_error(2));
-        assert_eq!(pipe_missing.code, ServiceFailureCode::NotReady);
+        let pipe_busy = pipe_open_failure(io::Error::from_raw_os_error(ERROR_PIPE_BUSY));
+        assert_eq!(pipe_busy.code, ServiceFailureCode::Busy);
+        let pipe_missing = pipe_open_failure(io::Error::from_raw_os_error(ERROR_FILE_NOT_FOUND));
+        assert_eq!(pipe_missing.code, ServiceFailureCode::PipeMissing);
     }
 
     #[test]
