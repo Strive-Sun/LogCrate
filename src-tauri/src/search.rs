@@ -715,8 +715,11 @@ impl FileSearchManager {
                             return;
                         }
                     } else {
-                        manager.schedule_persisted_recovery(app.clone(), generation);
-                        manager.schedule_blocked_volume_probe(app.clone(), generation);
+                        #[cfg(windows)]
+                        {
+                            manager.schedule_persisted_recovery(app.clone(), generation);
+                            manager.schedule_blocked_volume_probe(app.clone(), generation);
+                        }
                     }
                     manager.refresh_counts();
                     manager.emit_status(&app);
@@ -724,17 +727,22 @@ impl FileSearchManager {
                 Ok(_) => manager.stop_watcher(),
                 Err(error) => {
                     manager.stop_watcher();
-                    let has_recovery = open_database(&manager.db_path)
-                        .and_then(|connection| load_volume_recoveries(&connection))
-                        .is_ok_and(|entries| !entries.is_empty());
-                    if has_recovery {
-                        manager.status.lock().unwrap().phase = "scanning".into();
-                        manager.emit_status(&app);
-                        manager.schedule_persisted_recovery(app.clone(), generation);
-                        manager.schedule_blocked_volume_probe(app, generation);
-                    } else {
-                        manager.finish_with_error(&app, generation, error);
+                    #[cfg(windows)]
+                    {
+                        let has_recovery = open_database(&manager.db_path)
+                            .and_then(|connection| load_volume_recoveries(&connection))
+                            .is_ok_and(|entries| !entries.is_empty());
+                        if has_recovery {
+                            manager.status.lock().unwrap().phase = "scanning".into();
+                            manager.emit_status(&app);
+                            manager.schedule_persisted_recovery(app.clone(), generation);
+                            manager.schedule_blocked_volume_probe(app, generation);
+                        } else {
+                            manager.finish_with_error(&app, generation, error);
+                        }
                     }
+                    #[cfg(not(windows))]
+                    manager.finish_with_error(&app, generation, error);
                 }
             }
         });
