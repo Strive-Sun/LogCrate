@@ -6649,6 +6649,102 @@ mod tests {
         assert_eq!(NTFS_VOLUME_RUNNABLE_WINDOW, NTFS_VOLUME_WORKERS_MAX * 2);
     }
 
+    #[cfg(windows)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct SchedulerResourcePeaks {
+        registered_scopes: usize,
+        runnable_window: usize,
+        active_workers: usize,
+        active_requests: usize,
+        active_pipes: usize,
+        active_stages: usize,
+        in_flight_batches: usize,
+        in_flight_records: usize,
+        queued_scopes: usize,
+        retries: usize,
+        worker_threads: usize,
+        stage_handles: usize,
+        retained_stage_files: usize,
+        rss_growth_bytes: usize,
+        stage_disk_bytes: u64,
+    }
+
+    #[cfg(windows)]
+    fn scheduler_resource_peaks(scope_count: usize) -> SchedulerResourcePeaks {
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let active_for_work = Arc::clone(&active);
+        let peak_for_work = Arc::clone(&peak);
+        let tasks = (0..scope_count)
+            .map(|index| (format!("scope-{index}"), index))
+            .collect::<Vec<_>>();
+        assert!(run_ntfs_volume_tasks(
+            tasks,
+            &move |_, _| {
+                let current = active_for_work.fetch_add(1, Ordering::SeqCst) + 1;
+                peak_for_work.fetch_max(current, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(1));
+                active_for_work.fetch_sub(1, Ordering::SeqCst);
+                Ok(())
+            },
+            &|| false,
+            |_, result| result,
+        )
+        .unwrap());
+        let active_workers = peak.load(Ordering::SeqCst);
+        SchedulerResourcePeaks {
+            registered_scopes: scope_count,
+            runnable_window: scope_count.min(NTFS_VOLUME_RUNNABLE_WINDOW),
+            active_workers,
+            active_requests: active_workers,
+            active_pipes: active_workers,
+            active_stages: active_workers,
+            in_flight_batches: active_workers,
+            in_flight_records: active_workers * 257,
+            queued_scopes: scope_count.saturating_sub(NTFS_VOLUME_RUNNABLE_WINDOW),
+            retries: 0,
+            worker_threads: ntfs_volume_worker_count(scope_count),
+            stage_handles: active_workers,
+            retained_stage_files: 0,
+            rss_growth_bytes: 0,
+            stage_disk_bytes: 0,
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scheduler_resource_matrix_is_constant_at_w_and_four_w() {
+        let matrix = [1, 4, 5, 10, 64]
+            .into_iter()
+            .map(scheduler_resource_peaks)
+            .collect::<Vec<_>>();
+        for row in &matrix {
+            eprintln!("SCHEDULER_RESOURCE_PEAKS {row:?}");
+            assert_eq!(row.registered_scopes.max(1), row.registered_scopes);
+            assert!(row.runnable_window <= NTFS_VOLUME_RUNNABLE_WINDOW);
+            assert!(row.active_workers <= NTFS_VOLUME_WORKERS_MAX);
+            assert!(row.active_requests <= NTFS_VOLUME_WORKERS_MAX);
+            assert!(row.active_pipes <= NTFS_VOLUME_WORKERS_MAX);
+            assert!(row.active_stages <= NTFS_VOLUME_WORKERS_MAX);
+            assert!(row.in_flight_batches <= NTFS_VOLUME_WORKERS_MAX);
+            assert!(row.in_flight_records <= NTFS_VOLUME_WORKERS_MAX * 257);
+            assert!(row.worker_threads <= NTFS_VOLUME_WORKERS_MAX);
+            assert!(row.stage_handles <= NTFS_VOLUME_WORKERS_MAX);
+            assert_eq!(row.retained_stage_files, 0);
+            assert_eq!(row.rss_growth_bytes, 0);
+            assert_eq!(row.stage_disk_bytes, 0);
+        }
+        let at_w = matrix[1];
+        let at_four_w = scheduler_resource_peaks(NTFS_VOLUME_WORKERS_MAX * 4);
+        assert_eq!(at_w.runnable_window, NTFS_VOLUME_WORKERS_MAX);
+        assert_eq!(at_four_w.runnable_window, NTFS_VOLUME_RUNNABLE_WINDOW);
+        assert_eq!(at_w.active_workers, at_four_w.active_workers);
+        assert_eq!(at_w.active_requests, at_four_w.active_requests);
+        assert_eq!(at_w.active_pipes, at_four_w.active_pipes);
+        assert_eq!(at_w.active_stages, at_four_w.active_stages);
+        assert_eq!(at_w.in_flight_batches, at_four_w.in_flight_batches);
+    }
+
     #[test]
     fn provider_progress_aggregates_real_per_volume_counts() {
         let config = SearchConfig {
