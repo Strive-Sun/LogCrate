@@ -723,7 +723,7 @@ impl FileSearchManager {
                         .roots
                         .iter()
                         .filter_map(|root| {
-                            ntfs_volume_letter(root).map(|volume| (root.clone(), volume))
+                            ntfs_volume_identity(root).map(|volume| (root.clone(), volume))
                         })
                         .collect::<Vec<_>>();
                     let work = |root: String, volume| {
@@ -754,7 +754,7 @@ impl FileSearchManager {
                             prepare_ntfs_catch_up(
                                 &manager.db_path,
                                 &root,
-                                volume,
+                                volume.clone(),
                                 &config.exclusions,
                             )
                             .map(NtfsResumeJob::CatchUp)
@@ -1871,7 +1871,7 @@ fn scan_with_providers<S: SearchStatusSink>(
             if manager.is_cancelled(generation) {
                 return Ok(ScanOutcome::default());
             }
-            let Some(volume) = ntfs_volume_letter(root) else {
+            let Some(volume) = ntfs_volume_identity(root) else {
                 folder_roots.push(root.clone());
                 continue;
             };
@@ -2167,21 +2167,21 @@ struct MftVolumeStage {
     path: PathBuf,
     connection: Option<Connection>,
     generation: u64,
-    volume: char,
+    volume_id: String,
     record_count: u64,
     searchable_files: u64,
 }
 
 #[cfg(windows)]
 impl MftVolumeStage {
-    fn create(db_path: &Path, volume: char, generation: u64) -> anyhow::Result<Self> {
+    fn create(db_path: &Path, volume_id: &str, generation: u64) -> anyhow::Result<Self> {
         let directory = mft_stage_directory(db_path);
         fs::create_dir_all(&directory)?;
         let sequence = MFT_STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let path = directory.join(format!(
             "{}-{}-{}.sqlite3",
             std::process::id(),
-            volume.to_ascii_uppercase(),
+            stable_volume_stage_key(volume_id),
             sequence
         ));
         let connection = Connection::open(&path)?;
@@ -2228,17 +2228,13 @@ impl MftVolumeStage {
                singleton, schema_version, generation, volume, complete,
                record_count, searchable_files
              ) VALUES(1, ?1, ?2, ?3, 0, 0, 0)",
-            params![
-                MFT_STAGE_SCHEMA_VERSION,
-                generation.to_string(),
-                volume.to_ascii_uppercase().to_string(),
-            ],
+            params![MFT_STAGE_SCHEMA_VERSION, generation.to_string(), volume_id,],
         )?;
         Ok(Self {
             path,
             connection: Some(connection),
             generation,
-            volume: volume.to_ascii_uppercase(),
+            volume_id: volume_id.into(),
             record_count: 0,
             searchable_files: 0,
         })
@@ -2379,7 +2375,7 @@ impl MftVolumeStage {
                 self.record_count,
                 self.searchable_files,
                 self.generation.to_string(),
-                self.volume.to_string(),
+                self.volume_id,
             ],
         )?;
         if changed != 1 {
@@ -2462,6 +2458,15 @@ fn mft_stage_directory(db_path: &Path) -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!("file-search-mft-stage-v{MFT_STAGE_SCHEMA_VERSION}"))
+}
+
+#[cfg(windows)]
+fn stable_volume_stage_key(volume_id: &str) -> String {
+    volume_id
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .take(48)
+        .collect()
 }
 
 #[cfg(windows)]
@@ -2584,7 +2589,7 @@ fn copy_mft_stage_to_active(
         if metadata.0 != MFT_STAGE_SCHEMA_VERSION
             || metadata.1 != expected_generation.to_string()
             || stage.generation != expected_generation
-            || metadata.2 != stage.volume.to_string()
+            || metadata.2 != stage.volume_id
             || !metadata.3
             || metadata.4 != stage.record_count
             || metadata.5 != stage.searchable_files
@@ -2633,7 +2638,7 @@ fn copy_mft_stage_to_active(
 #[cfg(windows)]
 struct NtfsFinalizeJob {
     root: String,
-    volume: char,
+    volume: NtfsVolumeIdentity,
     exclusions: Vec<String>,
     journal_before: UsnJournalInfo,
     stage: MftVolumeStage,
@@ -2646,7 +2651,7 @@ fn enumerate_ntfs_volume_snapshot<S: SearchStatusSink>(
     generation: u64,
     config: &SearchConfig,
     root: &str,
-    volume: char,
+    volume: NtfsVolumeIdentity,
 ) -> anyhow::Result<NtfsFinalizeJob> {
     let volume_started = std::time::Instant::now();
     eprintln!("[search-index] root={root} stage=enumeratingMft event=start records=0");
@@ -2659,8 +2664,8 @@ fn enumerate_ntfs_volume_snapshot<S: SearchStatusSink>(
         "readingUsn",
         None,
     );
-    let journal_before = query_usn_via_service(volume)?;
-    let mut stage = MftVolumeStage::create(&manager.db_path, volume, generation)?;
+    let journal_before = query_usn_via_service(volume.letter)?;
+    let mut stage = MftVolumeStage::create(&manager.db_path, &volume.volume_id, generation)?;
     set_provider_stage(
         manager,
         app,
@@ -2670,7 +2675,7 @@ fn enumerate_ntfs_volume_snapshot<S: SearchStatusSink>(
         "enumeratingMft",
         None,
     );
-    let enumeration = enumerate_mft_via_service(volume, |batch| {
+    let enumeration = enumerate_mft_via_service(volume.letter, |batch| {
         if manager.is_cancelled(generation) {
             anyhow::bail!("MFT 枚举已取消");
         }
@@ -2680,7 +2685,7 @@ fn enumerate_ntfs_volume_snapshot<S: SearchStatusSink>(
     })?;
     eprintln!(
         "[search-index] root={root} volume={} stage=enumeratingMft event=complete records={} batches={} elapsed_ms={}",
-        volume.to_ascii_uppercase(),
+        volume.letter,
         enumeration.records,
         enumeration.batches,
         volume_started.elapsed().as_millis()
@@ -2750,15 +2755,24 @@ fn ntfs_volume_worker_count(task_count: usize) -> usize {
 }
 
 #[cfg(windows)]
-fn run_ntfs_volume_tasks<T, Work, Consume, Cancel>(
-    tasks: Vec<(String, char)>,
+struct NtfsSchedulerState<V> {
+    pending: VecDeque<(String, V)>,
+    next: usize,
+    tasks: Vec<(String, V)>,
+    stopping: bool,
+}
+
+#[cfg(windows)]
+fn run_ntfs_volume_tasks<T, V, Work, Consume, Cancel>(
+    tasks: Vec<(String, V)>,
     work: &Work,
     is_cancelled: &Cancel,
     mut consume: Consume,
 ) -> anyhow::Result<bool>
 where
     T: Send,
-    Work: Fn(String, char) -> anyhow::Result<T> + Sync,
+    V: Clone + Send,
+    Work: Fn(String, V) -> anyhow::Result<T> + Sync,
     Consume: FnMut(String, anyhow::Result<T>) -> anyhow::Result<()>,
     Cancel: Fn() -> bool + Sync,
 {
@@ -2768,14 +2782,8 @@ where
     }
     let worker_count = ntfs_volume_worker_count(task_count);
     let (sender, receiver) = sync_channel(NTFS_VOLUME_RUNNABLE_WINDOW);
-    struct SchedulerState {
-        pending: VecDeque<(String, char)>,
-        next: usize,
-        tasks: Vec<(String, char)>,
-        stopping: bool,
-    }
     let state = Arc::new((
-        Mutex::new(SchedulerState {
+        Mutex::new(NtfsSchedulerState {
             pending: VecDeque::with_capacity(NTFS_VOLUME_RUNNABLE_WINDOW),
             next: 0,
             tasks,
@@ -2882,7 +2890,7 @@ fn persist_and_finalize_ntfs_volume(
     );
     std::thread::scope(|scope| -> anyhow::Result<()> {
         let usn_reconciliation = scope.spawn(|| -> anyhow::Result<_> {
-            let journal_after = query_usn_via_service(volume)?;
+            let journal_after = query_usn_via_service(volume.letter)?;
             if journal_after.journal_id != journal_before.journal_id
                 || journal_before.next_usn < journal_after.first_usn
             {
@@ -2915,7 +2923,7 @@ fn persist_and_finalize_ntfs_volume(
                 PERSISTENCE_USN_REPLAY_MAX_DURATION,
                 |on_batch| {
                     read_usn_via_service(
-                        volume,
+                        volume.letter,
                         journal_before.next_usn,
                         journal_before.journal_id,
                         journal_after.next_usn,
@@ -2957,7 +2965,7 @@ fn persist_and_finalize_ntfs_volume(
             .join()
             .map_err(|_| anyhow::anyhow!("USN reconciliation worker panicked"))??;
         if let Some(reason) = watcher_reconcile_reason {
-            save_ntfs_volume_state(&connection, &root, volume, &journal_after, false)?;
+            save_ntfs_volume_state(&connection, &root, &volume, &journal_after, false)?;
             eprintln!(
                 "[search-index] root={} strategy=watcher-reconcile snapshot_complete=false reason={} elapsed_ms={}",
                 root,
@@ -2973,7 +2981,7 @@ fn persist_and_finalize_ntfs_volume(
             return Ok(());
         }
         apply_usn_changes(&mut connection, &root, &exclusions, changes)?;
-        save_ntfs_volume_state(&connection, &root, volume, &journal_after, true)?;
+        save_ntfs_volume_state(&connection, &root, &volume, &journal_after, true)?;
         eprintln!(
             "[search-index] root={} stage=persisting event=complete records={} elapsed_ms={}",
             root,
@@ -3302,29 +3310,27 @@ fn affected_file_ids(
 fn save_ntfs_volume_state(
     connection: &Connection,
     root: &str,
-    volume: char,
+    volume: &NtfsVolumeIdentity,
     journal: &UsnJournalInfo,
     snapshot_complete: bool,
 ) -> anyhow::Result<()> {
-    let identity = format!(
-        "{}:{}",
-        volume.to_ascii_uppercase(),
-        ntfs_volume_serial(root).unwrap_or(0)
-    );
     connection.execute(
-        "INSERT INTO search_volumes(
-           root, provider, volume_identity, journal_id, next_usn,
+        "INSERT INTO search_volume_scopes(
+           volume_id, root, provider, volume_serial, file_system, journal_id, next_usn,
            provider_version, schema_version, snapshot_complete
-         ) VALUES(?1, 'windowsNtfs', ?2, ?3, ?4, 1, ?5, ?6)
-         ON CONFLICT(root) DO UPDATE SET
-           provider=excluded.provider, volume_identity=excluded.volume_identity,
+         ) VALUES(?1, ?2, 'windowsNtfs', ?3, ?4, ?5, ?6, 1, ?7, ?8)
+         ON CONFLICT(volume_id) DO UPDATE SET
+           root=excluded.root, provider=excluded.provider,
+           volume_serial=excluded.volume_serial, file_system=excluded.file_system,
            journal_id=excluded.journal_id, next_usn=excluded.next_usn,
            provider_version=excluded.provider_version,
            schema_version=excluded.schema_version,
            snapshot_complete=excluded.snapshot_complete",
         params![
+            volume.volume_id,
             root,
-            identity,
+            volume.serial,
+            volume.file_system,
             journal.journal_id.to_le_bytes().as_slice(),
             journal.next_usn,
             SCHEMA_VERSION,
@@ -3338,6 +3344,9 @@ fn save_ntfs_volume_state(
 #[derive(Debug)]
 struct NtfsVolumeState {
     volume_identity: String,
+    root: String,
+    volume_serial: u32,
+    file_system: String,
     journal_id: u64,
     next_usn: i64,
     snapshot_complete: bool,
@@ -3346,29 +3355,32 @@ struct NtfsVolumeState {
 #[cfg(windows)]
 fn load_ntfs_volume_state(
     connection: &Connection,
-    root: &str,
+    volume_id: &str,
 ) -> anyhow::Result<Option<NtfsVolumeState>> {
     connection
         .query_row(
-            "SELECT volume_identity, journal_id, next_usn, snapshot_complete
-             FROM search_volumes
-             WHERE root = ?1 AND provider = 'windowsNtfs'
+            "SELECT volume_id, root, volume_serial, file_system, journal_id, next_usn, snapshot_complete
+             FROM search_volume_scopes
+             WHERE volume_id = ?1 AND provider = 'windowsNtfs'
                AND provider_version = 1 AND schema_version = ?2",
-            params![root, SCHEMA_VERSION],
+            params![volume_id, SCHEMA_VERSION],
             |row| {
-                let journal_id = row.get::<_, Vec<u8>>(1)?;
+                let journal_id = row.get::<_, Vec<u8>>(4)?;
                 let journal_id: [u8; 8] = journal_id.try_into().map_err(|_| {
                     rusqlite::Error::InvalidColumnType(
-                        1,
+                        4,
                         "journal_id".into(),
                         rusqlite::types::Type::Blob,
                     )
                 })?;
                 Ok(NtfsVolumeState {
                     volume_identity: row.get(0)?,
+                    root: row.get(1)?,
+                    volume_serial: row.get(2)?,
+                    file_system: row.get(3)?,
                     journal_id: u64::from_le_bytes(journal_id),
-                    next_usn: row.get(2)?,
-                    snapshot_complete: row.get(3)?,
+                    next_usn: row.get(5)?,
+                    snapshot_complete: row.get(6)?,
                 })
             },
         )
@@ -3379,7 +3391,7 @@ fn load_ntfs_volume_state(
 #[cfg(windows)]
 struct NtfsCatchUpJob {
     root: String,
-    volume: char,
+    volume: NtfsVolumeIdentity,
     exclusions: Vec<String>,
     journal: UsnJournalInfo,
     changes: Vec<MftRecord>,
@@ -3395,20 +3407,18 @@ enum NtfsResumeJob {
 fn prepare_ntfs_catch_up(
     db_path: &Path,
     root: &str,
-    volume: char,
+    volume: NtfsVolumeIdentity,
     exclusions: &[String],
 ) -> anyhow::Result<NtfsCatchUpJob> {
     let connection = open_database(db_path)?;
-    let state = load_ntfs_volume_state(&connection, root)?
+    let state = load_ntfs_volume_state(&connection, &volume.volume_id)?
         .filter(|state| state.snapshot_complete)
         .ok_or_else(|| anyhow::anyhow!("NTFS 快照未完成"))?;
-    let identity = format!(
-        "{}:{}",
-        volume.to_ascii_uppercase(),
-        ntfs_volume_serial(root).unwrap_or(0)
-    );
-    let journal = query_usn_via_service(volume)?;
-    if state.volume_identity != identity
+    let journal = query_usn_via_service(volume.letter)?;
+    if state.volume_identity != volume.volume_id
+        || !state.root.eq_ignore_ascii_case(root)
+        || state.volume_serial != volume.serial
+        || state.file_system != volume.file_system
         || state.journal_id != journal.journal_id
         || state.next_usn < journal.first_usn
         || state.next_usn > journal.next_usn
@@ -3417,7 +3427,7 @@ fn prepare_ntfs_catch_up(
     }
     let mut changes = Vec::new();
     read_usn_via_service(
-        volume,
+        volume.letter,
         state.next_usn,
         state.journal_id,
         journal.next_usn,
@@ -3569,7 +3579,7 @@ fn persistence_usn_range_exceeds_limit(start_usn: i64, target_usn: i64) -> bool 
 fn apply_ntfs_catch_up(db_path: &Path, job: NtfsCatchUpJob) -> anyhow::Result<()> {
     let mut connection = open_database(db_path)?;
     apply_usn_changes(&mut connection, &job.root, &job.exclusions, job.changes)?;
-    save_ntfs_volume_state(&connection, &job.root, job.volume, &job.journal, true)
+    save_ntfs_volume_state(&connection, &job.root, &job.volume, &job.journal, true)
 }
 
 fn scan_folder_roots<S: SearchStatusSink>(
@@ -3885,6 +3895,18 @@ fn initialize_database_with_query(
            schema_version INTEGER NOT NULL,
            snapshot_complete INTEGER NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS search_volume_scopes(
+           volume_id TEXT PRIMARY KEY NOT NULL,
+           root TEXT NOT NULL,
+           provider TEXT NOT NULL,
+           volume_serial INTEGER NOT NULL,
+           file_system TEXT NOT NULL,
+           journal_id BLOB,
+           next_usn INTEGER,
+           provider_version INTEGER NOT NULL,
+           schema_version INTEGER NOT NULL,
+           snapshot_complete INTEGER NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS search_index_changes(
            path TEXT PRIMARY KEY NOT NULL,
            operation INTEGER NOT NULL
@@ -3965,6 +3987,7 @@ fn recreate_index(connection: &Connection) -> anyhow::Result<()> {
     connection.execute("DELETE FROM files", [])?;
     connection.execute("DELETE FROM ntfs_nodes", [])?;
     connection.execute("DELETE FROM search_volumes", [])?;
+    connection.execute("DELETE FROM search_volume_scopes", [])?;
     connection.execute("DELETE FROM search_index_changes", [])?;
     connection.execute("DROP TABLE IF EXISTS files_fts", [])?;
     connection.execute_batch(CREATE_FTS_TABLE)?;
@@ -4039,6 +4062,7 @@ fn prepare_bulk_index(path: &Path, rebuild: bool) -> anyhow::Result<()> {
         connection.execute("DELETE FROM files", [])?;
         connection.execute("DELETE FROM ntfs_nodes", [])?;
         connection.execute("DELETE FROM search_volumes", [])?;
+        connection.execute("DELETE FROM search_volume_scopes", [])?;
     }
     Ok(())
 }
@@ -4550,20 +4574,40 @@ fn planned_provider(_root: &str) -> &'static str {
 
 #[cfg(windows)]
 fn ntfs_volume_letter(root: &str) -> Option<char> {
-    ntfs_volume_details(root).map(|(letter, _)| letter)
+    ntfs_volume_identity(root).map(|identity| identity.letter)
 }
 
 #[cfg(windows)]
-fn ntfs_volume_serial(root: &str) -> Option<u32> {
-    ntfs_volume_details(root).map(|(_, serial)| serial)
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NtfsVolumeIdentity {
+    letter: char,
+    volume_id: String,
+    serial: u32,
+    file_system: String,
 }
 
 #[cfg(windows)]
-fn ntfs_volume_details(root: &str) -> Option<(char, u32)> {
+fn normalize_volume_guid_path(path: &str) -> Option<String> {
+    let normalized = path.replace('/', "\\");
+    let trimmed = normalized.trim_end_matches('\\');
+    let prefix = "\\\\?\\Volume{";
+    if !trimmed.get(..prefix.len())?.eq_ignore_ascii_case(prefix) || !trimmed.ends_with('}') {
+        return None;
+    }
+    Some(format!("{}\\", trimmed.to_ascii_uppercase()))
+}
+
+#[cfg(windows)]
+fn ntfs_volume_identity(root: &str) -> Option<NtfsVolumeIdentity> {
     const DRIVE_FIXED: u32 = 3;
     #[link(name = "kernel32")]
     extern "system" {
         fn GetDriveTypeW(root_path_name: *const u16) -> u32;
+        fn GetVolumeNameForVolumeMountPointW(
+            volume_mount_point: *const u16,
+            volume_name: *mut u16,
+            buffer_length: u32,
+        ) -> i32;
         fn GetVolumeInformationW(
             root_path_name: *const u16,
             volume_name_buffer: *mut u16,
@@ -4590,6 +4634,24 @@ fn ntfs_volume_details(root: &str) -> Option<(char, u32)> {
     if unsafe { GetDriveTypeW(wide.as_ptr()) } != DRIVE_FIXED {
         return None;
     }
+    let mut volume_name = [0_u16; 64];
+    if unsafe {
+        GetVolumeNameForVolumeMountPointW(
+            wide.as_ptr(),
+            volume_name.as_mut_ptr(),
+            volume_name.len() as u32,
+        )
+    } == 0
+    {
+        return None;
+    }
+    let volume_name_length = volume_name
+        .iter()
+        .position(|word| *word == 0)
+        .unwrap_or(volume_name.len());
+    let volume_id = normalize_volume_guid_path(&String::from_utf16_lossy(
+        &volume_name[..volume_name_length],
+    ))?;
     let mut file_system = [0_u16; 32];
     let mut serial = 0_u32;
     let success = unsafe {
@@ -4611,9 +4673,15 @@ fn ntfs_volume_details(root: &str) -> Option<(char, u32)> {
         .iter()
         .position(|word| *word == 0)
         .unwrap_or(file_system.len());
-    String::from_utf16_lossy(&file_system[..length])
+    let file_system = String::from_utf16_lossy(&file_system[..length]).to_ascii_uppercase();
+    file_system
         .eq_ignore_ascii_case("NTFS")
-        .then_some((letter, serial))
+        .then_some(NtfsVolumeIdentity {
+            letter,
+            volume_id,
+            serial,
+            file_system,
+        })
 }
 
 #[cfg(windows)]
@@ -5440,6 +5508,75 @@ mod tests {
         assert_eq!(ntfs_volume_worker_count(0), 0);
         assert_eq!(ntfs_volume_worker_count(2), 2);
         assert_eq!(ntfs_volume_worker_count(10), NTFS_VOLUME_WORKERS_MAX);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn volume_guid_paths_are_normalized_without_drive_letters() {
+        assert_eq!(
+            normalize_volume_guid_path("\\\\?\\volume{01234567-89ab-cdef-0123-456789abcdef}\\"),
+            Some("\\\\?\\VOLUME{01234567-89AB-CDEF-0123-456789ABCDEF}\\".into())
+        );
+        assert!(normalize_volume_guid_path("D:\\").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stable_volume_state_survives_mount_changes_and_isolates_letter_reuse() {
+        let directory = test_directory("stable-volume-state");
+        let db = directory.join("search.sqlite3");
+        initialize_database(&db).unwrap();
+        let connection = open_database(&db).unwrap();
+        let first = NtfsVolumeIdentity {
+            letter: 'D',
+            volume_id: "\\\\?\\VOLUME{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}\\".into(),
+            serial: 11,
+            file_system: "NTFS".into(),
+        };
+        let replacement = NtfsVolumeIdentity {
+            letter: 'D',
+            volume_id: "\\\\?\\VOLUME{BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB}\\".into(),
+            serial: 22,
+            file_system: "NTFS".into(),
+        };
+        let journal = UsnJournalInfo {
+            journal_id: 7,
+            first_usn: 1,
+            next_usn: 9,
+            lowest_valid_usn: 1,
+        };
+
+        save_ntfs_volume_state(&connection, "D:\\", &first, &journal, true).unwrap();
+        save_ntfs_volume_state(&connection, "D:\\", &replacement, &journal, true).unwrap();
+        save_ntfs_volume_state(&connection, "E:\\", &first, &journal, true).unwrap();
+
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM search_volume_scopes", [], |row| row
+                    .get::<_, u64>(
+                    0
+                ),)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT root FROM search_volume_scopes WHERE volume_id = ?1",
+                    params![first.volume_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "E:\\"
+        );
+        assert!(
+            load_ntfs_volume_state(&connection, &first.volume_id)
+                .unwrap()
+                .unwrap()
+                .snapshot_complete
+        );
+        drop(connection);
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[cfg(windows)]
@@ -6673,7 +6810,7 @@ mod tests {
         )
         .unwrap();
         drop(active);
-        let mut stage = MftVolumeStage::create(&db, 'C', 7).unwrap();
+        let mut stage = MftVolumeStage::create(&db, "TEST-VOLUME-C", 7).unwrap();
         let records = vec![
             staged_mft_record(10, 5, "Logs", FILE_ATTRIBUTE_DIRECTORY),
             staged_mft_record(11, 10, "Nested", FILE_ATTRIBUTE_DIRECTORY),
@@ -6763,7 +6900,7 @@ mod tests {
     fn mft_volume_stage_exclusions_do_not_end_rowid_pagination_early() {
         let directory = test_directory("mft-volume-stage-exclusions");
         let db = directory.join("search.sqlite3");
-        let mut stage = MftVolumeStage::create(&db, 'D', 8).unwrap();
+        let mut stage = MftVolumeStage::create(&db, "TEST-VOLUME-D", 8).unwrap();
         stage
             .append_records(&[staged_mft_record(
                 10,
@@ -6802,8 +6939,8 @@ mod tests {
     fn mft_volume_stages_use_independent_files_and_remove_sidecars_on_drop() {
         let directory = test_directory("mft-volume-stage-cleanup");
         let db = directory.join("search.sqlite3");
-        let first = MftVolumeStage::create(&db, 'C', 9).unwrap();
-        let second = MftVolumeStage::create(&db, 'C', 9).unwrap();
+        let first = MftVolumeStage::create(&db, "TEST-VOLUME-C", 9).unwrap();
+        let second = MftVolumeStage::create(&db, "TEST-VOLUME-C", 9).unwrap();
         let first_path = first.path.clone();
         let second_path = second.path.clone();
         let first_wal = first_path.with_extension("sqlite3-wal");
@@ -6828,7 +6965,7 @@ mod tests {
         let directory = test_directory("mft-volume-stage-copy-rollback");
         let db = directory.join("search.sqlite3");
         initialize_database(&db).unwrap();
-        let mut stage = MftVolumeStage::create(&db, 'C', 10).unwrap();
+        let mut stage = MftVolumeStage::create(&db, "TEST-VOLUME-C", 10).unwrap();
         let staged_record = staged_mft_record(20, 5, "new.log", 0);
         stage
             .append_records(std::slice::from_ref(&staged_record))
@@ -6955,7 +7092,7 @@ mod tests {
         .unwrap();
         drop(connection);
 
-        let mut incomplete = MftVolumeStage::create(&db, 'C', 11).unwrap();
+        let mut incomplete = MftVolumeStage::create(&db, "TEST-VOLUME-C", 11).unwrap();
         incomplete
             .append_records(&[staged_mft_record(20, 5, "unfinished.log", 0)])
             .unwrap();
@@ -6993,7 +7130,9 @@ mod tests {
         let mut max_output_batch = 0_usize;
         let mut max_stage_files = 0_usize;
         for scope in 0..scope_count {
-            let mut stage = MftVolumeStage::create(&db, 'C', scope as u64 + 1).unwrap();
+            let mut stage =
+                MftVolumeStage::create(&db, &format!("TEST-VOLUME-{scope}"), scope as u64 + 1)
+                    .unwrap();
             for batch_index in 0..9_u64 {
                 let batch = (0..257_u64)
                     .map(|offset| {
