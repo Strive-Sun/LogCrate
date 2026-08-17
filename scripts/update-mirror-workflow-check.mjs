@@ -24,6 +24,11 @@ includes(
 includes('/pages/projects/logcrate-updates', 'Pages project preflight is missing');
 includes('releaseDraft: true', 'release assets must remain draft until the fallback transition');
 includes('max-parallel: 1', 'cross-platform draft uploads must be serialized');
+includes('gh release create "$RELEASE_TAG"', 'preflight must create one shared release draft');
+includes(
+  'releaseId: ${{ needs.preflight.outputs.release-id }}',
+  'matrix jobs must upload to the preflight draft id',
+);
 assert.ok(
   !workflow.includes('releaseDraft: false'),
   'matrix jobs must not publish the Release directly',

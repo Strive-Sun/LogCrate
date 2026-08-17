@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       pages-production-branch: ${{ steps.pages_project.outputs.production_branch }}
+      release-id: ${{ steps.create_release.outputs.release-id }}
     steps:
       - name: 校验发布 secrets
         env:
@@ -60,6 +61,37 @@ jobs:
             exit 1
           fi
           echo "production_branch=$production_branch" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 生成发行说明
+        id: release_notes
+        env:
+          GITHUB_REF_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: node scripts/release-notes.mjs --github-output
+
+      - name: 创建唯一 Release 草稿
+        id: create_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          RELEASE_BODY: ${{ steps.release_notes.outputs.body }}
+        shell: bash
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --draft \
+            --title "LogCrate $RELEASE_TAG" \
+            --notes "$RELEASE_BODY"
+          release_id="$(gh release view "$RELEASE_TAG" --json databaseId --jq '.databaseId')"
+          test -n "$release_id"
+          echo "release-id=$release_id" >> "$GITHUB_OUTPUT"
 
   release:
     name: 构建并发布(${{ matrix.os }})
@@ -128,6 +160,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          releaseId: ${{ needs.preflight.outputs.release-id }}
           tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           releaseName: LogCrate ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           releaseBody: ${{ steps.release_notes.outputs.body }}
