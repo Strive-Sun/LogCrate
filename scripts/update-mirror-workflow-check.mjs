@@ -23,6 +23,7 @@ includes(
 );
 includes('/pages/projects/logcrate-updates', 'Pages project preflight is missing');
 includes('releaseDraft: true', 'release assets must remain draft until the fallback transition');
+includes('max-parallel: 1', 'cross-platform draft uploads must be serialized');
 assert.ok(
   !workflow.includes('releaseDraft: false'),
   'matrix jobs must not publish the Release directly',

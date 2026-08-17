@@ -66,6 +66,9 @@ jobs:
     needs: preflight
     strategy:
       fail-fast: false
+      # tauri-action 会先查找再创建同 tag 的 draft；并行启动可能各自创建一个草稿，
+      # 使 Windows/macOS 资产和 latest.json 被拆到不同 Release。
+      max-parallel: 1
       matrix:
         include:
           - os: windows-latest
