@@ -6513,6 +6513,75 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn external_block_matrix_enters_attention_after_other_scopes_complete() {
+        let directory = test_directory("external-block-attention");
+        let manager = FileSearchManager::new(directory.clone());
+        let roots = vec!["C:\\".into(), "D:\\".into(), "E:\\".into(), "F:\\".into()];
+        manager.begin_operation_snapshot(80, &roots);
+        {
+            let mut status = manager.status.lock().unwrap();
+            status.providers = planned_provider_statuses(&roots);
+            status.providers[0].phase = "ready".into();
+            for provider in &mut status.providers[1..] {
+                provider.phase = "blocked".into();
+                provider.stage = "blocked".into();
+            }
+        }
+        let reasons = [
+            VolumeBlockedReason::MediaOrDeviceDamage,
+            VolumeBlockedReason::VolumeOffline,
+            VolumeBlockedReason::AccessDenied,
+        ];
+        let mut connection = open_database(&manager.db_path).unwrap();
+        for (index, reason) in reasons.into_iter().enumerate() {
+            let identity = NtfsVolumeIdentity {
+                letter: (b'D' + index as u8) as char,
+                volume_id: format!("blocked-{index}"),
+                serial: index as u32,
+                file_system: "NTFS".into(),
+            };
+            block_volume_recovery(
+                &connection,
+                &identity,
+                &roots[index + 1],
+                80,
+                reason.code(),
+                reason,
+                100,
+            )
+            .unwrap();
+        }
+        assert!(
+            claim_due_volume_recoveries(&mut connection, u64::MAX - 1, 4)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            manager.operation_gate_state(80).unwrap(),
+            OperationGateState::AttentionRequired
+        );
+        let sink = RecordingSearchStatusSink::default();
+        manager
+            .publish_incomplete_operation_phase(&sink, 80, OperationGateState::AttentionRequired)
+            .unwrap();
+        let status = sink.0.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(status.phase, "attentionRequired");
+        assert_ne!(status.phase, "scanning");
+        assert!(manager
+            .operation_snapshot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .query_ready_ms
+            .is_none());
+        drop(connection);
+        drop(manager);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn blocked_probe_only_checks_accessibility_before_waking_the_queue() {
         let directory = test_directory("blocked-volume-probe");
         let db = directory.join("search.sqlite3");
@@ -6744,8 +6813,14 @@ mod tests {
     fn scheduler_resource_peaks(scope_count: usize) -> SchedulerResourcePeaks {
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(ntfs_volume_worker_count(
+            scope_count,
+        )));
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let active_for_work = Arc::clone(&active);
         let peak_for_work = Arc::clone(&peak);
+        let barrier_for_work = Arc::clone(&barrier);
+        let started_for_work = Arc::clone(&started);
         let tasks = (0..scope_count)
             .map(|index| (format!("scope-{index}"), index))
             .collect::<Vec<_>>();
@@ -6754,6 +6829,11 @@ mod tests {
             &move |_, _| {
                 let current = active_for_work.fetch_add(1, Ordering::SeqCst) + 1;
                 peak_for_work.fetch_max(current, Ordering::SeqCst);
+                if started_for_work.fetch_add(1, Ordering::SeqCst)
+                    < ntfs_volume_worker_count(scope_count)
+                {
+                    barrier_for_work.wait();
+                }
                 std::thread::sleep(Duration::from_millis(1));
                 active_for_work.fetch_sub(1, Ordering::SeqCst);
                 Ok(())

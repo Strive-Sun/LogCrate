@@ -31,3 +31,14 @@ At `N=W`, active resources peak at four. At `N=4W`, the runnable window is eight
 | Process reopen | all per-volume obligations reload from SQLite and complete independently | recovery matrix |
 
 The combined process-reopen fixture persists four independent failures, reconstructs the manager, wakes the temporary-offline scope, claims all four with the W=4 budget, and clears only after successful completion. No application restart API is called; recovery is an indexing operation within the current process or the next natural application start.
+
+## 4.3 External unsatisfiable matrix
+
+The external-block fixture covers the only accepted terminal categories: media/device damage, stable volume offline/removal, and target-volume access denied. Three blocked scopes are persisted beside one completed scope. No blocked row is claimable by the active recovery scheduler, the completed scope remains available, and the operation resolves to `attentionRequired` rather than `scanning`, `ready`, or `converged`.
+
+Evidence:
+
+- `external_block_matrix_enters_attention_after_other_scopes_complete`
+- `blocked_classification_requires_explicit_volume_evidence`
+- `blocked_probe_only_checks_accessibility_before_waking_the_queue`
+- `operation_gate_distinguishes_recovery_attention_and_scope_changes`
