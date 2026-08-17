@@ -52,6 +52,8 @@ const NTFS_VOLUME_WORKERS_MAX: usize = 4;
 #[cfg(windows)]
 const NTFS_VOLUME_RUNNABLE_WINDOW: usize = NTFS_VOLUME_WORKERS_MAX * 2;
 #[cfg(windows)]
+const BLOCKED_VOLUME_PROBE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+#[cfg(windows)]
 const MFT_STAGE_SCHEMA_VERSION: u32 = 1;
 #[cfg(windows)]
 const MFT_STAGE_ROW_BATCH: usize = 2_048;
@@ -669,7 +671,8 @@ impl FileSearchManager {
                     if has_recovery {
                         manager.status.lock().unwrap().phase = "scanning".into();
                         manager.emit_status(&app);
-                        manager.schedule_persisted_recovery(app, generation);
+                        manager.schedule_persisted_recovery(app.clone(), generation);
+                        manager.schedule_blocked_volume_probe(app, generation);
                     } else {
                         manager.finish_with_error(&app, generation, error);
                     }
@@ -824,40 +827,50 @@ impl FileSearchManager {
                                         }
                                         Ok(None) => {}
                                         Err(fallback_error) => {
-                                            let combined = anyhow::anyhow!(
-                                                "{error}; 自动降级兼容 provider 失败: {fallback_error}"
+                                            eprintln!(
+                                                "[search-index] root={root} fallback-unavailable reason={fallback_error}"
                                             );
-                                            set_provider_status(
-                                                &manager,
-                                                &app,
-                                                &root,
-                                                "windowsNtfs",
-                                                "error",
-                                                Some(combined.to_string()),
-                                            );
-                                            return Err(combined);
                                         }
                                     }
                                 }
+                                let blocked_reason = diagnose_external_volume_block(&root);
                                 if let Some(identity) = ntfs_identities.get(&root) {
                                     let connection = open_database(&manager.db_path)?;
-                                    enqueue_volume_recovery(
-                                        &connection,
-                                        identity,
-                                        &root,
-                                        generation,
-                                        "resume",
-                                        &error.to_string(),
-                                        system_time_ms(SystemTime::now()).unwrap_or(0),
-                                    )?;
+                                    let now = system_time_ms(SystemTime::now()).unwrap_or(0);
+                                    if let Some(reason) = blocked_reason {
+                                        block_volume_recovery(
+                                            &connection,
+                                            identity,
+                                            &root,
+                                            generation,
+                                            &error.to_string(),
+                                            reason,
+                                            now,
+                                        )?;
+                                    } else {
+                                        enqueue_volume_recovery(
+                                            &connection,
+                                            identity,
+                                            &root,
+                                            generation,
+                                            "resume",
+                                            &error.to_string(),
+                                            now,
+                                        )?;
+                                    }
                                 }
+                                let phase = if blocked_reason.is_some() {
+                                    "blocked"
+                                } else {
+                                    "waitingToRetry"
+                                };
                                 set_provider_stage(
                                     &manager,
                                     &app,
                                     &root,
                                     "windowsNtfs",
-                                    "waitingToRetry",
-                                    "waitingToRetry",
+                                    phase,
+                                    phase,
                                     Some(error.to_string()),
                                 );
                                 return Err(error);
@@ -890,7 +903,8 @@ impl FileSearchManager {
                                 .is_ok_and(|entries| !entries.is_empty());
                             if has_recovery {
                                 manager.emit_status(&app);
-                                manager.schedule_persisted_recovery(app, generation);
+                                manager.schedule_persisted_recovery(app.clone(), generation);
+                                manager.schedule_blocked_volume_probe(app, generation);
                             } else {
                                 manager.finish_with_error(&app, generation, error);
                             }
@@ -1455,7 +1469,13 @@ impl FileSearchManager {
             let next_attempt_ms = open_database(&manager.db_path)
                 .and_then(|connection| load_volume_recoveries(&connection))
                 .ok()
-                .and_then(|entries| entries.into_iter().map(|entry| entry.next_attempt_ms).min());
+                .and_then(|entries| {
+                    entries
+                        .into_iter()
+                        .filter(|entry| entry.state == "waitingToRetry")
+                        .map(|entry| entry.next_attempt_ms)
+                        .min()
+                });
             let Some(next_attempt_ms) = next_attempt_ms else {
                 return;
             };
@@ -1479,6 +1499,43 @@ impl FileSearchManager {
                 return;
             }
             let _ = manager.start(app, true);
+        });
+    }
+
+    #[cfg(windows)]
+    fn schedule_blocked_volume_probe<S: SearchStatusSink>(
+        self: &Arc<Self>,
+        app: S,
+        generation: u64,
+    ) {
+        let has_blocked = open_database(&self.db_path)
+            .and_then(|connection| load_volume_recoveries(&connection))
+            .is_ok_and(|entries| entries.iter().any(|entry| entry.state == "blocked"));
+        if !has_blocked {
+            return;
+        }
+        let manager = Arc::clone(self);
+        std::thread::spawn(move || {
+            std::thread::sleep(BLOCKED_VOLUME_PROBE_INTERVAL);
+            if manager.is_cancelled(generation) || !manager.config.lock().unwrap().enabled {
+                return;
+            }
+            let woke = open_database(&manager.db_path)
+                .and_then(|connection| {
+                    let entries = load_volume_recoveries(&connection)?;
+                    let now = system_time_ms(SystemTime::now()).unwrap_or(0);
+                    let mut woke = false;
+                    for entry in entries {
+                        woke |= wake_blocked_volume_if_accessible(&connection, &entry, now)?;
+                    }
+                    Ok(woke)
+                })
+                .unwrap_or(false);
+            if woke {
+                manager.schedule_persisted_recovery(app, generation);
+            } else if !manager.is_cancelled(generation) {
+                manager.schedule_blocked_volume_probe(app, generation);
+            }
         });
     }
 
@@ -2061,41 +2118,64 @@ fn scan_with_providers<S: SearchStatusSink>(
                         finalize_jobs.push(job);
                     }
                     Err(error) if !manager.is_cancelled(generation) => {
-                        if let Some(reason) = compatible_provider_fallback_reason(&root, &error)? {
-                            eprintln!(
-                                "[search-index] root={root} strategy=folder-fallback reason={error}"
-                            );
-                            set_provider_stage(
-                                manager,
-                                app,
-                                &root,
-                                "folderScan",
-                                "fallback",
-                                "fallback",
-                                Some(reason),
-                            );
-                            fallback_roots.push(root);
-                            return Ok(());
+                        let blocked_reason = diagnose_external_volume_block(&root);
+                        if blocked_reason.is_none() {
+                            if let Some(reason) =
+                                compatible_provider_fallback_reason(&root, &error)?
+                            {
+                                eprintln!(
+                                    "[search-index] root={root} strategy=folder-fallback reason={error}"
+                                );
+                                set_provider_stage(
+                                    manager,
+                                    app,
+                                    &root,
+                                    "folderScan",
+                                    "fallback",
+                                    "fallback",
+                                    Some(reason),
+                                );
+                                fallback_roots.push(root);
+                                return Ok(());
+                            }
                         }
                         if let Some(identity) = ntfs_identities.get(&root) {
                             let connection = open_database(&manager.db_path)?;
-                            enqueue_volume_recovery(
-                                &connection,
-                                identity,
-                                &root,
-                                generation,
-                                "querySnapshot",
-                                &error.to_string(),
-                                system_time_ms(SystemTime::now()).unwrap_or(0),
-                            )?;
+                            let now = system_time_ms(SystemTime::now()).unwrap_or(0);
+                            if let Some(reason) = blocked_reason {
+                                block_volume_recovery(
+                                    &connection,
+                                    identity,
+                                    &root,
+                                    generation,
+                                    &error.to_string(),
+                                    reason,
+                                    now,
+                                )?;
+                            } else {
+                                enqueue_volume_recovery(
+                                    &connection,
+                                    identity,
+                                    &root,
+                                    generation,
+                                    "querySnapshot",
+                                    &error.to_string(),
+                                    now,
+                                )?;
+                            }
                         }
+                        let phase = if blocked_reason.is_some() {
+                            "blocked"
+                        } else {
+                            "waitingToRetry"
+                        };
                         set_provider_stage(
                             manager,
                             app,
                             &root,
                             "windowsNtfs",
-                            "waitingToRetry",
-                            "waitingToRetry",
+                            phase,
+                            phase,
                             Some(error.to_string()),
                         );
                         return Err(error);
@@ -3523,6 +3603,51 @@ struct VolumeRecoveryEntry {
 }
 
 #[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VolumeBlockedReason {
+    VolumeOffline,
+    AccessDenied,
+    MediaOrDeviceDamage,
+}
+
+#[cfg(windows)]
+impl VolumeBlockedReason {
+    fn code(self) -> &'static str {
+        match self {
+            Self::VolumeOffline => "volumeOffline",
+            Self::AccessDenied => "accessDenied",
+            Self::MediaOrDeviceDamage => "mediaOrDeviceDamage",
+        }
+    }
+}
+
+#[cfg(windows)]
+fn classify_volume_io_error(error: &std::io::Error) -> Option<VolumeBlockedReason> {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => Some(VolumeBlockedReason::VolumeOffline),
+        std::io::ErrorKind::PermissionDenied => Some(VolumeBlockedReason::AccessDenied),
+        _ => match error.raw_os_error() {
+            Some(2 | 3 | 21 | 55 | 1167) => Some(VolumeBlockedReason::VolumeOffline),
+            Some(5) => Some(VolumeBlockedReason::AccessDenied),
+            Some(23 | 1117 | 1392) => Some(VolumeBlockedReason::MediaOrDeviceDamage),
+            _ => None,
+        },
+    }
+}
+
+#[cfg(windows)]
+fn diagnose_external_volume_block(root: &str) -> Option<VolumeBlockedReason> {
+    match fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => match fs::read_dir(root) {
+            Ok(_) => None,
+            Err(error) => classify_volume_io_error(&error),
+        },
+        Ok(_) => Some(VolumeBlockedReason::VolumeOffline),
+        Err(error) => classify_volume_io_error(&error),
+    }
+}
+
+#[cfg(windows)]
 fn recovery_backoff_ms(attempt_count: u32) -> u64 {
     const BACKOFF_MS: [u64; 6] = [1_000, 5_000, 30_000, 120_000, 300_000, 900_000];
     BACKOFF_MS[(attempt_count.saturating_sub(1) as usize).min(BACKOFF_MS.len() - 1)]
@@ -3619,6 +3744,60 @@ fn enqueue_volume_recovery(
         last_error: error.into(),
         next_attempt_ms,
     })
+}
+
+#[cfg(windows)]
+fn block_volume_recovery(
+    connection: &Connection,
+    identity: &NtfsVolumeIdentity,
+    root: &str,
+    generation: u64,
+    error: &str,
+    reason: VolumeBlockedReason,
+    now_ms: u64,
+) -> anyhow::Result<VolumeRecoveryEntry> {
+    let mut entry = enqueue_volume_recovery(
+        connection,
+        identity,
+        root,
+        generation,
+        reason.code(),
+        error,
+        now_ms,
+    )?;
+    connection.execute(
+        "UPDATE search_recovery_queue
+            SET state = 'blocked', failure_stage = ?2, next_attempt_ms = ?3, updated_ms = ?4
+          WHERE volume_id = ?1",
+        params![
+            identity.volume_id,
+            reason.code(),
+            u64::MAX.to_string(),
+            now_ms.to_string()
+        ],
+    )?;
+    entry.state = "blocked".into();
+    entry.failure_stage = reason.code().into();
+    entry.next_attempt_ms = u64::MAX;
+    Ok(entry)
+}
+
+#[cfg(windows)]
+fn wake_blocked_volume_if_accessible(
+    connection: &Connection,
+    entry: &VolumeRecoveryEntry,
+    now_ms: u64,
+) -> anyhow::Result<bool> {
+    if entry.state != "blocked" || diagnose_external_volume_block(&entry.root).is_some() {
+        return Ok(false);
+    }
+    connection.execute(
+        "UPDATE search_recovery_queue
+            SET state = 'waitingToRetry', next_attempt_ms = ?2, updated_ms = ?2
+          WHERE volume_id = ?1 AND state = 'blocked'",
+        params![entry.volume_id, now_ms.to_string()],
+    )?;
+    Ok(true)
 }
 
 #[cfg(windows)]
@@ -6114,6 +6293,62 @@ mod tests {
             select_fair_recovery_window::<&str>(&[], &["retry-1", "retry-2", "retry-3"], 4);
         assert_eq!(recovery_only, vec!["retry-1", "retry-2", "retry-3"]);
         assert_eq!(recovery_backoff_ms(99), 900_000);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn blocked_classification_requires_explicit_volume_evidence() {
+        assert_eq!(
+            classify_volume_io_error(&std::io::Error::from_raw_os_error(5)),
+            Some(VolumeBlockedReason::AccessDenied)
+        );
+        assert_eq!(
+            classify_volume_io_error(&std::io::Error::from_raw_os_error(21)),
+            Some(VolumeBlockedReason::VolumeOffline)
+        );
+        assert_eq!(
+            classify_volume_io_error(&std::io::Error::from_raw_os_error(1117)),
+            Some(VolumeBlockedReason::MediaOrDeviceDamage)
+        );
+        assert_eq!(
+            classify_volume_io_error(&std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "temporary service timeout",
+            )),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn blocked_probe_only_checks_accessibility_before_waking_the_queue() {
+        let directory = test_directory("blocked-volume-probe");
+        let db = directory.join("search.sqlite3");
+        initialize_database(&db).unwrap();
+        let connection = open_database(&db).unwrap();
+        let identity = NtfsVolumeIdentity {
+            letter: 'D',
+            volume_id: "blocked-volume".into(),
+            serial: 1,
+            file_system: "NTFS".into(),
+        };
+        let entry = block_volume_recovery(
+            &connection,
+            &identity,
+            &directory.to_string_lossy(),
+            12,
+            "offline",
+            VolumeBlockedReason::VolumeOffline,
+            100,
+        )
+        .unwrap();
+        assert_eq!(entry.state, "blocked");
+        assert!(wake_blocked_volume_if_accessible(&connection, &entry, 200).unwrap());
+        let woke = load_volume_recoveries(&connection).unwrap().remove(0);
+        assert_eq!(woke.state, "waitingToRetry");
+        assert_eq!(woke.next_attempt_ms, 200);
+        drop(connection);
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[cfg(windows)]
