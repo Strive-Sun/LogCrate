@@ -2144,23 +2144,33 @@ mod tests {
 
         let created = fixture.write("arriving.log", b"part one");
         // FSEvents may coalesce delivery for longer than Windows under loaded CI runners.
-        let batch = change_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert!(batch.changes.iter().any(
-            |change| matches!(change, DirectoryChange::Upsert { node } if node.path == created.to_string_lossy())
-        ));
-        assert!(detect_rx.try_recv().is_err());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let batch = change_rx.recv_timeout(remaining).unwrap();
+            assert!(detect_rx.try_recv().is_err());
+            if batch.changes.iter().any(
+                |change| matches!(change, DirectoryChange::Upsert { node } if node.path == created.to_string_lossy())
+            ) {
+                break;
+            }
+        }
 
         std::fs::remove_file(&created).unwrap();
-        let batch = change_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert!(batch.changes.iter().any(|change| match change {
-            DirectoryChange::Remove { path } => path == &created.to_string_lossy(),
-            DirectoryChange::Rescan { nodes } => {
-                nodes
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let batch = change_rx.recv_timeout(remaining).unwrap();
+            if batch.changes.iter().any(|change| match change {
+                DirectoryChange::Remove { path } => path == &created.to_string_lossy(),
+                DirectoryChange::Rescan { nodes } => nodes
                     .iter()
-                    .all(|node| node.path != created.to_string_lossy())
+                    .all(|node| node.path != created.to_string_lossy()),
+                _ => false,
+            }) {
+                break;
             }
-            _ => false,
-        }));
+        }
         assert!(detect_rx.recv_timeout(Duration::from_secs(2)).is_err());
     }
 
