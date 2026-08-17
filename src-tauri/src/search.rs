@@ -663,7 +663,16 @@ impl FileSearchManager {
                 Ok(_) => manager.stop_watcher(),
                 Err(error) => {
                     manager.stop_watcher();
-                    manager.finish_with_error(&app, generation, error);
+                    let has_recovery = open_database(&manager.db_path)
+                        .and_then(|connection| load_volume_recoveries(&connection))
+                        .is_ok_and(|entries| !entries.is_empty());
+                    if has_recovery {
+                        manager.status.lock().unwrap().phase = "scanning".into();
+                        manager.emit_status(&app);
+                        manager.schedule_persisted_recovery(app, generation);
+                    } else {
+                        manager.finish_with_error(&app, generation, error);
+                    }
                 }
             }
         });
@@ -703,6 +712,7 @@ impl FileSearchManager {
                             ntfs_volume_identity(root).map(|volume| (root.clone(), volume))
                         })
                         .collect::<Vec<_>>();
+                    let ntfs_identities = ntfs_roots.iter().cloned().collect::<HashMap<_, _>>();
                     let work = |root: String, volume| {
                         set_provider_stage(
                             &manager,
@@ -829,12 +839,25 @@ impl FileSearchManager {
                                         }
                                     }
                                 }
-                                set_provider_status(
+                                if let Some(identity) = ntfs_identities.get(&root) {
+                                    let connection = open_database(&manager.db_path)?;
+                                    enqueue_volume_recovery(
+                                        &connection,
+                                        identity,
+                                        &root,
+                                        generation,
+                                        "resume",
+                                        &error.to_string(),
+                                        system_time_ms(SystemTime::now()).unwrap_or(0),
+                                    )?;
+                                }
+                                set_provider_stage(
                                     &manager,
                                     &app,
                                     &root,
                                     "windowsNtfs",
-                                    "error",
+                                    "waitingToRetry",
+                                    "waitingToRetry",
                                     Some(error.to_string()),
                                 );
                                 return Err(error);
@@ -862,7 +885,15 @@ impl FileSearchManager {
                     let completed = match resume_result {
                         Ok(completed) => completed,
                         Err(error) => {
-                            manager.finish_with_error(&app, generation, error);
+                            let has_recovery = open_database(&manager.db_path)
+                                .and_then(|connection| load_volume_recoveries(&connection))
+                                .is_ok_and(|entries| !entries.is_empty());
+                            if has_recovery {
+                                manager.emit_status(&app);
+                                manager.schedule_persisted_recovery(app, generation);
+                            } else {
+                                manager.finish_with_error(&app, generation, error);
+                            }
                             return;
                         }
                     };
@@ -1417,6 +1448,40 @@ impl FileSearchManager {
         self.cancel.load(Ordering::Relaxed) || self.generation.load(Ordering::Relaxed) != generation
     }
 
+    #[cfg(windows)]
+    fn schedule_persisted_recovery<S: SearchStatusSink>(self: &Arc<Self>, app: S, generation: u64) {
+        let manager = Arc::clone(self);
+        std::thread::spawn(move || {
+            let next_attempt_ms = open_database(&manager.db_path)
+                .and_then(|connection| load_volume_recoveries(&connection))
+                .ok()
+                .and_then(|entries| entries.into_iter().map(|entry| entry.next_attempt_ms).min());
+            let Some(next_attempt_ms) = next_attempt_ms else {
+                return;
+            };
+            let now = system_time_ms(SystemTime::now()).unwrap_or(0);
+            if next_attempt_ms > now {
+                std::thread::sleep(Duration::from_millis(next_attempt_ms - now));
+            }
+            if manager.is_cancelled(generation) || !manager.config.lock().unwrap().enabled {
+                return;
+            }
+            let claimed = open_database(&manager.db_path)
+                .and_then(|mut connection| {
+                    claim_due_volume_recoveries(
+                        &mut connection,
+                        system_time_ms(SystemTime::now()).unwrap_or(0),
+                        NTFS_VOLUME_WORKERS_MAX,
+                    )
+                })
+                .unwrap_or_default();
+            if claimed.is_empty() {
+                return;
+            }
+            let _ = manager.start(app, true);
+        });
+    }
+
     fn finish_with_error<S: SearchStatusSink>(
         self: &Arc<Self>,
         app: &S,
@@ -1953,6 +2018,7 @@ fn scan_with_providers<S: SearchStatusSink>(
             };
             ntfs_roots.push((root.clone(), volume));
         }
+        let ntfs_identities = ntfs_roots.iter().cloned().collect::<HashMap<_, _>>();
         let work = |root: String, volume| {
             set_provider_stage(
                 manager,
@@ -2011,12 +2077,25 @@ fn scan_with_providers<S: SearchStatusSink>(
                             fallback_roots.push(root);
                             return Ok(());
                         }
-                        set_provider_status(
+                        if let Some(identity) = ntfs_identities.get(&root) {
+                            let connection = open_database(&manager.db_path)?;
+                            enqueue_volume_recovery(
+                                &connection,
+                                identity,
+                                &root,
+                                generation,
+                                "querySnapshot",
+                                &error.to_string(),
+                                system_time_ms(SystemTime::now()).unwrap_or(0),
+                            )?;
+                        }
+                        set_provider_stage(
                             manager,
                             app,
                             &root,
                             "windowsNtfs",
-                            "error",
+                            "waitingToRetry",
+                            "waitingToRetry",
                             Some(error.to_string()),
                         );
                         return Err(error);
@@ -3058,6 +3137,7 @@ fn persist_and_finalize_ntfs_volume(
         }
         apply_usn_changes(&mut connection, &root, &exclusions, changes)?;
         save_ntfs_volume_state(&connection, &root, &volume, &journal_after, true)?;
+        complete_volume_recovery(&connection, &volume.volume_id)?;
         eprintln!(
             "[search-index] root={} stage=persisting event=complete records={} elapsed_ms={}",
             root,
@@ -3429,6 +3509,191 @@ struct NtfsVolumeState {
 }
 
 #[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VolumeRecoveryEntry {
+    volume_id: String,
+    root: String,
+    generation: u64,
+    state: String,
+    failure_stage: String,
+    attempt_count: u32,
+    first_error: String,
+    last_error: String,
+    next_attempt_ms: u64,
+}
+
+#[cfg(windows)]
+fn recovery_backoff_ms(attempt_count: u32) -> u64 {
+    const BACKOFF_MS: [u64; 6] = [1_000, 5_000, 30_000, 120_000, 300_000, 900_000];
+    BACKOFF_MS[(attempt_count.saturating_sub(1) as usize).min(BACKOFF_MS.len() - 1)]
+}
+
+#[cfg(windows)]
+fn select_fair_recovery_window<T: Clone>(
+    first_time: &[T],
+    due_recoveries: &[T],
+    worker_count: usize,
+) -> Vec<T> {
+    let capacity = worker_count.min(NTFS_VOLUME_WORKERS_MAX);
+    let recovery_limit = if first_time.is_empty() {
+        capacity
+    } else {
+        (capacity.saturating_add(1) / 2).max(1)
+    };
+    let mut selected = Vec::with_capacity(capacity);
+    let mut first = first_time.iter();
+    let mut recovery = due_recoveries.iter().take(recovery_limit);
+    while selected.len() < capacity {
+        if let Some(item) = first.next() {
+            selected.push(item.clone());
+        }
+        if selected.len() == capacity {
+            break;
+        }
+        if let Some(item) = recovery.next() {
+            selected.push(item.clone());
+        } else if let Some(item) = first.next() {
+            selected.push(item.clone());
+        } else {
+            break;
+        }
+    }
+    selected
+}
+
+#[cfg(windows)]
+fn enqueue_volume_recovery(
+    connection: &Connection,
+    identity: &NtfsVolumeIdentity,
+    root: &str,
+    generation: u64,
+    failure_stage: &str,
+    error: &str,
+    now_ms: u64,
+) -> anyhow::Result<VolumeRecoveryEntry> {
+    let previous = connection
+        .query_row(
+            "SELECT attempt_count, first_error FROM search_recovery_queue WHERE volume_id = ?1",
+            params![identity.volume_id],
+            |row| Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let attempt_count = previous
+        .as_ref()
+        .map(|(count, _)| count.saturating_add(1))
+        .unwrap_or(1);
+    let first_error = previous
+        .map(|(_, first_error)| first_error)
+        .unwrap_or_else(|| error.to_string());
+    let next_attempt_ms = now_ms.saturating_add(recovery_backoff_ms(attempt_count));
+    connection.execute(
+        "INSERT INTO search_recovery_queue(
+           volume_id, root, generation, state, failure_stage, attempt_count,
+           first_error, last_error, next_attempt_ms, updated_ms
+         ) VALUES(?1, ?2, ?3, 'waitingToRetry', ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(volume_id) DO UPDATE SET
+           root=excluded.root, generation=excluded.generation, state=excluded.state,
+           failure_stage=excluded.failure_stage, attempt_count=excluded.attempt_count,
+           first_error=excluded.first_error, last_error=excluded.last_error,
+           next_attempt_ms=excluded.next_attempt_ms, updated_ms=excluded.updated_ms",
+        params![
+            identity.volume_id,
+            root,
+            generation.to_string(),
+            failure_stage,
+            attempt_count,
+            first_error,
+            error,
+            next_attempt_ms.to_string(),
+            now_ms.to_string(),
+        ],
+    )?;
+    Ok(VolumeRecoveryEntry {
+        volume_id: identity.volume_id.clone(),
+        root: root.into(),
+        generation,
+        state: "waitingToRetry".into(),
+        failure_stage: failure_stage.into(),
+        attempt_count,
+        first_error,
+        last_error: error.into(),
+        next_attempt_ms,
+    })
+}
+
+#[cfg(windows)]
+fn load_volume_recoveries(connection: &Connection) -> anyhow::Result<Vec<VolumeRecoveryEntry>> {
+    let mut statement = connection.prepare(
+        "SELECT volume_id, root, generation, state, failure_stage, attempt_count,
+                first_error, last_error, next_attempt_ms
+           FROM search_recovery_queue
+          ORDER BY CAST(next_attempt_ms AS INTEGER), volume_id",
+    )?;
+    let entries = statement
+        .query_map([], |row| {
+            let generation = row
+                .get::<_, String>(2)?
+                .parse::<u64>()
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            let next_attempt_ms = row
+                .get::<_, String>(8)?
+                .parse::<u64>()
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            Ok(VolumeRecoveryEntry {
+                volume_id: row.get(0)?,
+                root: row.get(1)?,
+                generation,
+                state: row.get(3)?,
+                failure_stage: row.get(4)?,
+                attempt_count: row.get(5)?,
+                first_error: row.get(6)?,
+                last_error: row.get(7)?,
+                next_attempt_ms,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(entries)
+}
+
+#[cfg(windows)]
+fn claim_due_volume_recoveries(
+    connection: &mut Connection,
+    now_ms: u64,
+    limit: usize,
+) -> anyhow::Result<Vec<VolumeRecoveryEntry>> {
+    let due = load_volume_recoveries(connection)?
+        .into_iter()
+        .filter(|entry| entry.state == "waitingToRetry" && entry.next_attempt_ms <= now_ms)
+        .collect::<Vec<_>>();
+    let due = select_fair_recovery_window(&[], &due, limit);
+    let transaction = connection.transaction()?;
+    for entry in &due {
+        transaction.execute(
+            "UPDATE search_recovery_queue SET state = 'recovering', updated_ms = ?2
+              WHERE volume_id = ?1",
+            params![entry.volume_id, now_ms.to_string()],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(due
+        .into_iter()
+        .map(|mut entry| {
+            entry.state = "recovering".into();
+            entry
+        })
+        .collect())
+}
+
+#[cfg(windows)]
+fn complete_volume_recovery(connection: &Connection, volume_id: &str) -> anyhow::Result<()> {
+    connection.execute(
+        "DELETE FROM search_recovery_queue WHERE volume_id = ?1",
+        params![volume_id],
+    )?;
+    Ok(())
+}
+
+#[cfg(windows)]
 fn load_ntfs_volume_state(
     connection: &Connection,
     volume_id: &str,
@@ -3655,7 +3920,8 @@ fn persistence_usn_range_exceeds_limit(start_usn: i64, target_usn: i64) -> bool 
 fn apply_ntfs_catch_up(db_path: &Path, job: NtfsCatchUpJob) -> anyhow::Result<()> {
     let mut connection = open_database(db_path)?;
     apply_usn_changes(&mut connection, &job.root, &job.exclusions, job.changes)?;
-    save_ntfs_volume_state(&connection, &job.root, &job.volume, &job.journal, true)
+    save_ntfs_volume_state(&connection, &job.root, &job.volume, &job.journal, true)?;
+    complete_volume_recovery(&connection, &job.volume.volume_id)
 }
 
 fn scan_folder_roots<S: SearchStatusSink>(
@@ -3983,6 +4249,18 @@ fn initialize_database_with_query(
            schema_version INTEGER NOT NULL,
            snapshot_complete INTEGER NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS search_recovery_queue(
+           volume_id TEXT PRIMARY KEY NOT NULL,
+           root TEXT NOT NULL,
+           generation TEXT NOT NULL,
+           state TEXT NOT NULL,
+           failure_stage TEXT NOT NULL,
+           attempt_count INTEGER NOT NULL,
+           first_error TEXT NOT NULL,
+           last_error TEXT NOT NULL,
+           next_attempt_ms TEXT NOT NULL,
+           updated_ms TEXT NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS search_index_changes(
            path TEXT PRIMARY KEY NOT NULL,
            operation INTEGER NOT NULL
@@ -4064,6 +4342,7 @@ fn recreate_index(connection: &Connection) -> anyhow::Result<()> {
     connection.execute("DELETE FROM ntfs_nodes", [])?;
     connection.execute("DELETE FROM search_volumes", [])?;
     connection.execute("DELETE FROM search_volume_scopes", [])?;
+    connection.execute("DELETE FROM search_recovery_queue", [])?;
     connection.execute("DELETE FROM search_index_changes", [])?;
     connection.execute("DROP TABLE IF EXISTS files_fts", [])?;
     connection.execute_batch(CREATE_FTS_TABLE)?;
@@ -5741,6 +6020,100 @@ mod tests {
         );
         drop(connection);
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recovery_queue_persists_backoff_state_and_clears_only_the_completed_volume() {
+        let directory = test_directory("volume-recovery-queue");
+        let db = directory.join("search.sqlite3");
+        initialize_database(&db).unwrap();
+        let connection = open_database(&db).unwrap();
+        let first = NtfsVolumeIdentity {
+            letter: 'D',
+            volume_id: "volume-a".into(),
+            serial: 1,
+            file_system: "NTFS".into(),
+        };
+        let second = NtfsVolumeIdentity {
+            letter: 'E',
+            volume_id: "volume-b".into(),
+            serial: 2,
+            file_system: "NTFS".into(),
+        };
+        let initial = enqueue_volume_recovery(
+            &connection,
+            &first,
+            "D:\\",
+            9,
+            "enumeratingMft",
+            "busy",
+            1_000,
+        )
+        .unwrap();
+        let retried = enqueue_volume_recovery(
+            &connection,
+            &first,
+            "D:\\",
+            9,
+            "enumeratingMft",
+            "service stopped",
+            2_000,
+        )
+        .unwrap();
+        enqueue_volume_recovery(
+            &connection,
+            &second,
+            "E:\\",
+            9,
+            "connecting",
+            "pipe missing",
+            1_500,
+        )
+        .unwrap();
+
+        assert_eq!(initial.attempt_count, 1);
+        assert_eq!(retried.attempt_count, 2);
+        assert_eq!(retried.first_error, "busy");
+        assert_eq!(retried.last_error, "service stopped");
+        assert!(retried.next_attempt_ms > initial.next_attempt_ms);
+        assert_eq!(load_volume_recoveries(&connection).unwrap().len(), 2);
+        drop(connection);
+        let mut connection = open_database(&db).unwrap();
+        let claimed = claim_due_volume_recoveries(&mut connection, 10_000, 1).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].state, "recovering");
+        complete_volume_recovery(&connection, &first.volume_id).unwrap();
+        let remaining = load_volume_recoveries(&connection).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].volume_id, second.volume_id);
+        drop(connection);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recovery_fairness_reserves_workers_for_untried_scopes() {
+        let selected = select_fair_recovery_window(
+            &["new-1", "new-2", "new-3"],
+            &["retry-1", "retry-2", "retry-3"],
+            4,
+        );
+        assert_eq!(selected.len(), 4);
+        assert_eq!(
+            selected
+                .iter()
+                .filter(|item| item.starts_with("retry"))
+                .count(),
+            2
+        );
+        assert!(selected.contains(&"new-1"));
+        assert!(selected.contains(&"new-2"));
+
+        let recovery_only =
+            select_fair_recovery_window::<&str>(&[], &["retry-1", "retry-2", "retry-3"], 4);
+        assert_eq!(recovery_only, vec!["retry-1", "retry-2", "retry-3"]);
+        assert_eq!(recovery_backoff_ms(99), 900_000);
     }
 
     #[cfg(windows)]
