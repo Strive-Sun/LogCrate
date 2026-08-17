@@ -24,7 +24,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{
     sync_channel, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError,
 };
-use std::sync::{Arc, Condvar, Mutex};
+#[cfg(windows)]
+use std::sync::Condvar;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 
