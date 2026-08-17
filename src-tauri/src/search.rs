@@ -552,12 +552,6 @@ impl FileSearchManager {
                         manager.finish_with_error(&app, generation, error);
                         return;
                     }
-                    #[cfg(windows)]
-                    if let Err(error) = mark_query_snapshot_complete(&manager.db_path) {
-                        manager.stop_watcher();
-                        manager.finish_with_error(&app, generation, error);
-                        return;
-                    }
                     let has_deferred_persistence = outcome.has_deferred_persistence();
                     manager
                         .persistence_recovery
@@ -574,15 +568,31 @@ impl FileSearchManager {
                             None,
                         );
                     }
-                    if let Err(error) = manager.mark_operation_query_ready(generation) {
-                        manager.stop_watcher();
-                        manager.finish_with_error(&app, generation, error);
-                        return;
-                    }
-                    {
+                    let gate = match manager.operation_gate_state(generation) {
+                        Ok(gate) => gate,
+                        Err(error) => {
+                            manager.finish_with_error(&app, generation, error);
+                            return;
+                        }
+                    };
+                    if gate == OperationGateState::Ready {
+                        #[cfg(windows)]
+                        if let Err(error) = mark_query_snapshot_complete(&manager.db_path) {
+                            manager.finish_with_error(&app, generation, error);
+                            return;
+                        }
+                        if let Err(error) = manager.mark_operation_query_ready(generation) {
+                            manager.finish_with_error(&app, generation, error);
+                            return;
+                        }
                         let mut status = manager.status.lock().unwrap();
                         status.phase = "ready".into();
                         status.error = None;
+                    } else if let Err(error) =
+                        manager.publish_incomplete_operation_phase(&app, generation, gate)
+                    {
+                        manager.finish_with_error(&app, generation, error);
+                        return;
                     }
                     manager.corruption_recovery.store(false, Ordering::Release);
                     manager.emit_status(&app);
@@ -601,24 +611,55 @@ impl FileSearchManager {
                     #[cfg(windows)]
                     let mut persisted_ntfs_roots = Vec::new();
                     #[cfg(windows)]
+                    let mut persistence_failed = false;
+                    #[cfg(windows)]
                     for job in outcome.ntfs_finalize_jobs {
                         let root = job.root.clone();
+                        let identity = job.volume.clone();
                         if let Err(error) =
                             persist_and_finalize_ntfs_volume(&manager, generation, job, false)
                         {
-                            let _ = finish_ntfs_nodes_bulk(&manager.db_path);
+                            persistence_failed = true;
+                            let blocked_reason = diagnose_external_volume_block(&root);
+                            if let Ok(connection) = open_database(&manager.db_path) {
+                                let now = system_time_ms(SystemTime::now()).unwrap_or(0);
+                                if let Some(reason) = blocked_reason {
+                                    let _ = block_volume_recovery(
+                                        &connection,
+                                        &identity,
+                                        &root,
+                                        generation,
+                                        &error.to_string(),
+                                        reason,
+                                        now,
+                                    );
+                                } else {
+                                    let _ = enqueue_volume_recovery(
+                                        &connection,
+                                        &identity,
+                                        &root,
+                                        generation,
+                                        "persistence",
+                                        &error.to_string(),
+                                        now,
+                                    );
+                                }
+                            }
+                            let phase = if blocked_reason.is_some() {
+                                "blocked"
+                            } else {
+                                "waitingToRetry"
+                            };
                             set_provider_stage(
                                 &manager,
                                 &app,
                                 &root,
                                 "windowsNtfs",
-                                "error",
-                                "error",
+                                phase,
+                                phase,
                                 Some(error.to_string()),
                             );
-                            manager.stop_watcher();
-                            manager.finish_with_error(&app, generation, error);
-                            return;
+                            continue;
                         }
                         persisted_ntfs_roots.push(root);
                     }
@@ -632,17 +673,26 @@ impl FileSearchManager {
                     for root in persisted_ntfs_roots {
                         set_provider_status(&manager, &app, &root, "windowsNtfs", "ready", None);
                     }
+                    #[cfg(windows)]
+                    let persistence_complete = !persistence_failed;
+                    #[cfg(not(windows))]
+                    let persistence_complete = true;
                     if let Err(error) = finish_bulk_index(&manager.db_path) {
                         manager.stop_watcher();
                         manager.finish_with_error(&app, generation, error);
                         return;
                     }
-                    if let Err(error) = manager.mark_operation_persistence_complete(generation) {
-                        manager.stop_watcher();
-                        manager.finish_with_error(&app, generation, error);
-                        return;
+                    if gate == OperationGateState::Ready && persistence_complete {
+                        if let Err(error) = manager.mark_operation_persistence_complete(generation)
+                        {
+                            manager.stop_watcher();
+                            manager.finish_with_error(&app, generation, error);
+                            return;
+                        }
                     }
-                    manager.persistence_recovery.store(false, Ordering::Release);
+                    manager
+                        .persistence_recovery
+                        .store(!persistence_complete, Ordering::Release);
                     if manager.is_cancelled(generation) {
                         manager.stop_watcher();
                         return;
@@ -655,9 +705,14 @@ impl FileSearchManager {
                         receiver,
                         handoff_paths,
                     );
-                    if let Err(error) = manager.mark_operation_converged(generation) {
-                        manager.finish_with_error(&app, generation, error);
-                        return;
+                    if gate == OperationGateState::Ready && persistence_complete {
+                        if let Err(error) = manager.mark_operation_converged(generation) {
+                            manager.finish_with_error(&app, generation, error);
+                            return;
+                        }
+                    } else {
+                        manager.schedule_persisted_recovery(app.clone(), generation);
+                        manager.schedule_blocked_volume_probe(app.clone(), generation);
                     }
                     manager.refresh_counts();
                     manager.emit_status(&app);
@@ -873,7 +928,7 @@ impl FileSearchManager {
                                     phase,
                                     Some(error.to_string()),
                                 );
-                                return Err(error);
+                                return Ok(());
                             }
                             if !recover_persistence {
                                 manager.drain_query_index_changes()?;
@@ -941,15 +996,33 @@ impl FileSearchManager {
                             manager.finish_with_error(&app, generation, error);
                             return;
                         }
+                    }
+                    let gate = match manager.operation_gate_state(generation) {
+                        Ok(gate) => gate,
+                        Err(error) => {
+                            manager.finish_with_error(&app, generation, error);
+                            return;
+                        }
+                    };
+                    if gate == OperationGateState::Ready {
+                        if let Err(error) = manager.mark_operation_query_ready(generation) {
+                            manager.finish_with_error(&app, generation, error);
+                            return;
+                        }
+                        if let Err(error) = manager.mark_operation_persistence_complete(generation)
+                        {
+                            manager.finish_with_error(&app, generation, error);
+                            return;
+                        }
                         manager.persistence_recovery.store(false, Ordering::Release);
-                    }
-                    if let Err(error) = manager.mark_operation_query_ready(generation) {
-                        manager.finish_with_error(&app, generation, error);
-                        return;
-                    }
-                    if let Err(error) = manager.mark_operation_persistence_complete(generation) {
-                        manager.finish_with_error(&app, generation, error);
-                        return;
+                    } else {
+                        manager.persistence_recovery.store(true, Ordering::Release);
+                        if let Err(error) =
+                            manager.publish_incomplete_operation_phase(&app, generation, gate)
+                        {
+                            manager.finish_with_error(&app, generation, error);
+                            return;
+                        }
                     }
                     let handoff_paths = collect_event_paths_bounded(&receiver);
                     if manager.is_cancelled(generation) {
@@ -963,11 +1036,16 @@ impl FileSearchManager {
                         receiver,
                         handoff_paths,
                     );
-                    if let Err(error) = manager.mark_operation_converged(generation) {
-                        manager.finish_with_error(&app, generation, error);
-                        return;
+                    if gate == OperationGateState::Ready {
+                        if let Err(error) = manager.mark_operation_converged(generation) {
+                            manager.finish_with_error(&app, generation, error);
+                            return;
+                        }
+                        manager.status.lock().unwrap().phase = "ready".into();
+                    } else {
+                        manager.schedule_persisted_recovery(app.clone(), generation);
+                        manager.schedule_blocked_volume_probe(app.clone(), generation);
                     }
-                    manager.status.lock().unwrap().phase = "ready".into();
                     manager.refresh_counts();
                     manager.emit_status(&app);
                 });
@@ -1724,6 +1802,55 @@ impl FileSearchManager {
         }
     }
 
+    fn operation_gate_state(&self, generation: u64) -> anyhow::Result<OperationGateState> {
+        self.sync_operation_scopes();
+        let operation = self.operation_snapshot.lock().unwrap();
+        let snapshot = operation
+            .as_ref()
+            .filter(|snapshot| snapshot.generation == generation)
+            .ok_or_else(|| anyhow::anyhow!("index operation generation is no longer active"))?;
+        if !snapshot.scopes.is_empty() && snapshot.scopes.iter().all(|scope| scope.phase == "ready")
+        {
+            return Ok(OperationGateState::Ready);
+        }
+        let has_blocked = snapshot.scopes.iter().any(|scope| scope.phase == "blocked");
+        let non_blocked_complete = snapshot
+            .scopes
+            .iter()
+            .filter(|scope| scope.phase != "blocked")
+            .all(|scope| scope.phase == "ready");
+        if has_blocked && non_blocked_complete {
+            Ok(OperationGateState::AttentionRequired)
+        } else {
+            Ok(OperationGateState::Recovering)
+        }
+    }
+
+    fn publish_incomplete_operation_phase<S: SearchStatusSink>(
+        &self,
+        app: &S,
+        generation: u64,
+        gate: OperationGateState,
+    ) -> anyhow::Result<()> {
+        let phase = match gate {
+            OperationGateState::Ready => "ready",
+            OperationGateState::Recovering => "scanning",
+            OperationGateState::AttentionRequired => "attentionRequired",
+        };
+        self.status.lock().unwrap().phase = phase.into();
+        let mut operation = self.operation_snapshot.lock().unwrap();
+        let snapshot = operation
+            .as_mut()
+            .filter(|snapshot| snapshot.generation == generation)
+            .ok_or_else(|| anyhow::anyhow!("index operation generation is no longer active"))?;
+        snapshot.final_phase = phase.into();
+        snapshot.query_ready_ms = None;
+        snapshot.converged_ms = None;
+        drop(operation);
+        self.emit_status(app);
+        Ok(())
+    }
+
     #[cfg(all(test, windows))]
     fn operation_snapshot_for_report(&self) -> Option<IndexOperationSnapshot> {
         self.operation_snapshot.lock().unwrap().clone()
@@ -2017,6 +2144,13 @@ impl ScanOutcome {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperationGateState {
+    Ready,
+    Recovering,
+    AttentionRequired,
+}
+
 #[cfg(windows)]
 fn compatible_provider_fallback_reason(
     root: &str,
@@ -2178,7 +2312,7 @@ fn scan_with_providers<S: SearchStatusSink>(
                             phase,
                             Some(error.to_string()),
                         );
-                        return Err(error);
+                        return Ok(());
                     }
                     Err(_) => {}
                 }
@@ -5872,6 +6006,64 @@ mod tests {
             .unwrap()
             .query_ready_ms
             .is_none());
+        drop(manager);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn operation_gate_distinguishes_recovery_attention_and_scope_changes() {
+        let directory = test_directory("operation-attention-gate");
+        let manager = FileSearchManager::new(directory.clone());
+        let roots = vec!["C:\\".to_string(), "D:\\".to_string()];
+        manager.begin_operation_snapshot(51, &roots);
+        {
+            let mut status = manager.status.lock().unwrap();
+            status.providers = planned_provider_statuses(&roots);
+            status.providers[0].phase = "ready".into();
+            status.providers[1].phase = "waitingToRetry".into();
+        }
+        assert_eq!(
+            manager.operation_gate_state(51).unwrap(),
+            OperationGateState::Recovering
+        );
+        manager.status.lock().unwrap().providers[1].phase = "blocked".into();
+        assert_eq!(
+            manager.operation_gate_state(51).unwrap(),
+            OperationGateState::AttentionRequired
+        );
+        let sink = RecordingSearchStatusSink::default();
+        manager
+            .publish_incomplete_operation_phase(&sink, 51, OperationGateState::AttentionRequired)
+            .unwrap();
+        assert_eq!(manager.status.lock().unwrap().phase, "attentionRequired");
+        assert!(manager
+            .operation_snapshot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .converged_ms
+            .is_none());
+
+        manager.begin_operation_snapshot(52, &["C:\\".into()]);
+        manager.status.lock().unwrap().providers = vec![SearchProviderStatus {
+            root: "C:\\".into(),
+            provider: "folderScan".into(),
+            phase: "ready".into(),
+            stage: "ready".into(),
+            discovered_records: 1,
+            searchable_files: 1,
+            started_ms: None,
+            elapsed_ms: 0,
+            stage_started_ms: None,
+            stage_elapsed_ms: 0,
+            completed_ms: None,
+            fallback_reason: None,
+        }];
+        assert_eq!(
+            manager.operation_gate_state(52).unwrap(),
+            OperationGateState::Ready
+        );
         drop(manager);
         fs::remove_dir_all(directory).unwrap();
     }
