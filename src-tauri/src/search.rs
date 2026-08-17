@@ -6545,6 +6545,77 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn recovery_matrix_survives_process_reopen_and_clears_nonexternal_failures() {
+        let directory = test_directory("recovery-process-reopen");
+        let manager = FileSearchManager::new(directory.clone());
+        let root = directory.to_string_lossy().into_owned();
+        let failures = [
+            ("ipc", "pipe busy"),
+            ("service", "service exited"),
+            ("protocol", "protocol mismatch"),
+        ];
+        let connection = open_database(&manager.db_path).unwrap();
+        for (index, (volume_id, error)) in failures.iter().enumerate() {
+            let identity = NtfsVolumeIdentity {
+                letter: (b'D' + index as u8) as char,
+                volume_id: (*volume_id).into(),
+                serial: index as u32 + 1,
+                file_system: "NTFS".into(),
+            };
+            enqueue_volume_recovery(&connection, &identity, &root, 70, "injected", error, 100)
+                .unwrap();
+        }
+        let offline = NtfsVolumeIdentity {
+            letter: 'G',
+            volume_id: "temporarily-offline".into(),
+            serial: 4,
+            file_system: "NTFS".into(),
+        };
+        block_volume_recovery(
+            &connection,
+            &offline,
+            &root,
+            70,
+            "temporarily offline",
+            VolumeBlockedReason::VolumeOffline,
+            100,
+        )
+        .unwrap();
+        drop(connection);
+        drop(manager);
+
+        let reopened = FileSearchManager::new(directory.clone());
+        let mut connection = open_database(&reopened.db_path).unwrap();
+        let entries = load_volume_recoveries(&connection).unwrap();
+        assert_eq!(entries.len(), 4);
+        let blocked = entries
+            .iter()
+            .find(|entry| entry.volume_id == offline.volume_id)
+            .unwrap();
+        assert!(wake_blocked_volume_if_accessible(&connection, blocked, 1_000).unwrap());
+        let claimed = claim_due_volume_recoveries(&mut connection, 10_000, 4).unwrap();
+        assert_eq!(claimed.len(), 4);
+        for entry in claimed {
+            complete_volume_recovery(&connection, &entry.volume_id).unwrap();
+        }
+        assert!(load_volume_recoveries(&connection).unwrap().is_empty());
+
+        let software_failure = anyhow::Error::new(ServiceFailure {
+            code: crate::ntfs::ipc::ServiceFailureCode::ProtocolMismatch,
+            message: "injected protocol mismatch".into(),
+        });
+        assert!(
+            compatible_provider_fallback_reason(&root, &software_failure)
+                .unwrap()
+                .is_some()
+        );
+        drop(connection);
+        drop(reopened);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn volume_scheduler_consumes_results_in_completion_order_and_isolates_failures() {
         let consumed = Mutex::new(Vec::new());
         let completed = run_ntfs_volume_tasks(
