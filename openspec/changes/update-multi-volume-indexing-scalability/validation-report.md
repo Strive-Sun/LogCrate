@@ -42,3 +42,15 @@ Evidence:
 - `blocked_classification_requires_explicit_volume_evidence`
 - `blocked_probe_only_checks_accessibility_before_waking_the_queue`
 - `operation_gate_distinguishes_recovery_attention_and_scope_changes`
+
+## 4.4 Windows IPC capacity and recovery acceptance
+
+On Windows at `2026-08-17T13:12:25.7650270+08:00`, the real named-pipe fixture held all four business requests open, admitted an extra client far enough to return the v2 `429` busy envelope, released slots after both partial-frame and ordinary disconnects, accepted replacement clients, and stopped through the bounded wake path. The transport namespace remained available while business capacity was full, and no pipe instance remained after the requested stop.
+
+Evidence:
+
+- `real_pipe_saturation_reconnect_disconnect_and_stop_are_bounded`: 1 passed
+- `pipe_accept_capacity_is_separate_from_business_capacity`: 1 passed
+- `concurrent_client_storm_is_bounded`: 1 passed
+- Windows System log, provider `Service Control Manager`, acceptance window beginning at the timestamp above: 0 LogCrate service events and 0 abnormal-stop events (`7031`/`7034`)
+- Installed `LogCrateIndex` service after acceptance: `Running`, manual start
