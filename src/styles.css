@@ -812,6 +812,7 @@ button {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  background: var(--bg);
 }
 .file-search-virtual {
   position: relative;

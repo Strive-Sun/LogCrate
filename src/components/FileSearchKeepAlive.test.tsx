@@ -168,11 +168,13 @@ test('搜索页面隐藏后保留结果且再次显示不重复初始化或查�
   }
 });
 
-test('搜索保活层不会拦截顶栏切换入口且搜索面板保持可交互', () => {
+test('搜索保活层不会拦截顶栏切换入口且结果区域保持不透明可交互', () => {
   const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
   const keepAliveRule = css.match(/\.file-search-keep-alive\s*\{([^}]*)\}/)?.[1] ?? '';
   const panelRule = css.match(/\.file-search-panel\s*\{([^}]*)\}/)?.[1] ?? '';
+  const resultsRule = css.match(/\.file-search-results\s*\{([^}]*)\}/)?.[1] ?? '';
 
   assert.match(keepAliveRule, /pointer-events:\s*none;/);
   assert.match(panelRule, /pointer-events:\s*auto;/);
+  assert.match(resultsRule, /background:\s*var\(--bg\);/);
 });
