@@ -72,7 +72,7 @@ impl SearchIndex {
         let is_log_field = field("is_log")?;
         let is_archive_field = field("is_archive")?;
         let ext_field = field("ext")?;
-        let writer = index.writer_with_num_threads(2, 140_000_000)?;
+        let writer = index.writer_with_num_threads(4, 280_000_000)?;
         let reader = index
             .reader_builder()
             // Every write path calls `commit`, which reloads this reader synchronously.
@@ -124,7 +124,7 @@ impl SearchIndex {
             let worker_count = std::thread::available_parallelism()
                 .map(usize::from)
                 .unwrap_or(1)
-                .min(4);
+                .min(8);
             let chunk_size = entries.len().saturating_add(worker_count - 1) / worker_count;
             let writer = &self.writer;
             let name_field = self.name_field;

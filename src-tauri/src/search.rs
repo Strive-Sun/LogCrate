@@ -56,7 +56,7 @@ const BLOCKED_VOLUME_PROBE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 #[cfg(windows)]
 const MFT_STAGE_SCHEMA_VERSION: u32 = 1;
 #[cfg(windows)]
-const MFT_STAGE_ROW_BATCH: usize = 2_048;
+const MFT_STAGE_ROW_BATCH: usize = 32_768;
 #[cfg(windows)]
 static MFT_STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -843,21 +843,23 @@ impl FileSearchManager {
                                         "resolvingPaths",
                                         None,
                                     );
-                                    index_ntfs_volume_paths(&manager, &app, generation, snapshot)
-                                        .and_then(|job| {
-                                            set_provider_stage(
-                                                &manager,
-                                                &app,
-                                                &root,
-                                                "windowsNtfs",
-                                                "merging",
-                                                "persisting",
-                                                None,
-                                            );
-                                            persist_and_finalize_ntfs_volume(
-                                                &manager, generation, job, true,
-                                            )
-                                        })
+                                    index_ntfs_volume_paths(
+                                        &manager, &app, generation, snapshot, true,
+                                    )
+                                    .and_then(|job| {
+                                        set_provider_stage(
+                                            &manager,
+                                            &app,
+                                            &root,
+                                            "windowsNtfs",
+                                            "merging",
+                                            "persisting",
+                                            None,
+                                        );
+                                        persist_and_finalize_ntfs_volume(
+                                            &manager, generation, job, true,
+                                        )
+                                    })
                                 }
                                 Err(error) => Err(error),
                             };
@@ -2210,6 +2212,7 @@ fn scan_with_providers<S: SearchStatusSink>(
             ntfs_roots.push((root.clone(), volume));
         }
         let ntfs_identities = ntfs_roots.iter().cloned().collect::<HashMap<_, _>>();
+        let partial_snapshot_published = AtomicBool::new(false);
         let work = |root: String, volume| {
             set_provider_stage(
                 manager,
@@ -2221,13 +2224,7 @@ fn scan_with_providers<S: SearchStatusSink>(
                 None,
             );
             enumerate_ntfs_volume_snapshot(manager, app, generation, config, &root, volume)
-        };
-        let completed = run_ntfs_volume_tasks(
-            ntfs_roots,
-            &work,
-            &|| manager.is_cancelled(generation),
-            |root, snapshot| {
-                match snapshot.and_then(|snapshot| {
+                .and_then(|snapshot| {
                     set_provider_stage(
                         manager,
                         app,
@@ -2237,8 +2234,18 @@ fn scan_with_providers<S: SearchStatusSink>(
                         "resolvingPaths",
                         None,
                     );
-                    index_ntfs_volume_paths(manager, app, generation, snapshot)
-                }) {
+                    let publish_partial = partial_snapshot_published
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok();
+                    index_ntfs_volume_paths(manager, app, generation, snapshot, publish_partial)
+                })
+        };
+        let completed = run_ntfs_volume_tasks(
+            ntfs_roots,
+            &work,
+            &|| manager.is_cancelled(generation),
+            |root, snapshot| {
+                match snapshot {
                     Ok(job) => {
                         set_provider_stage(
                             manager,
@@ -2555,8 +2562,10 @@ impl MftVolumeStage {
         ));
         let connection = Connection::open(&path)?;
         connection.busy_timeout(Duration::from_secs(15))?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "journal_mode", "OFF")?;
         connection.pragma_update(None, "synchronous", "OFF")?;
+        connection.pragma_update(None, "temp_store", "MEMORY")?;
+        connection.pragma_update(None, "cache_size", -32_768_i64)?;
         connection.execute_batch(
             "CREATE TABLE mft_records(
                file_id BLOB PRIMARY KEY NOT NULL,
@@ -2566,7 +2575,6 @@ impl MftVolumeStage {
                reason INTEGER NOT NULL,
                usn INTEGER NOT NULL
              );
-             CREATE INDEX mft_records_parent_idx ON mft_records(parent_id);
              CREATE TABLE resolved_directories(
                file_id BLOB PRIMARY KEY NOT NULL,
                path TEXT NOT NULL
@@ -2647,15 +2655,47 @@ impl MftVolumeStage {
         &mut self,
         root: &str,
         exclusions: &[String],
+        on_batch: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(&[IndexedFile]) -> anyhow::Result<()>,
+    {
+        self.resolve_files(root, exclusions, true, on_batch)
+    }
+
+    fn stream_query_files<F>(
+        &mut self,
+        root: &str,
+        exclusions: &[String],
+        on_batch: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(&[IndexedFile]) -> anyhow::Result<()>,
+    {
+        self.resolve_files(root, exclusions, false, on_batch)
+    }
+
+    fn resolve_files<F>(
+        &mut self,
+        root: &str,
+        exclusions: &[String],
+        materialize_stage: bool,
         mut on_batch: F,
     ) -> anyhow::Result<()>
     where
         F: FnMut(&[IndexedFile]) -> anyhow::Result<()>,
     {
+        self.connection()?.execute(
+            "CREATE INDEX IF NOT EXISTS mft_records_parent_idx ON mft_records(parent_id)",
+            [],
+        )?;
         self.seed_resolved_roots(root)?;
         self.resolve_directory_layers()?;
-        self.connection()?
-            .execute("DELETE FROM resolved_files", [])?;
+        if materialize_stage {
+            self.connection()?
+                .execute("DELETE FROM resolved_files", [])?;
+            self.connection()?.execute_batch("BEGIN IMMEDIATE")?;
+        }
         let mut after_rowid = 0_i64;
         let mut searchable_files = 0_u64;
         loop {
@@ -2685,6 +2725,7 @@ impl MftVolumeStage {
                 },
             )?;
             let mut files = Vec::with_capacity(MFT_STAGE_ROW_BATCH);
+            let mut parents = Vec::with_capacity(MFT_STAGE_ROW_BATCH);
             let mut rows_seen = 0_usize;
             for row in rows {
                 let (rowid, id, parent_id, name, parent) = row?;
@@ -2694,31 +2735,35 @@ impl MftVolumeStage {
                 if is_excluded(Path::new(&path), exclusions) {
                     continue;
                 }
+                let is_log = is_log_name(&name);
+                let is_archive = is_archive_name(&name);
+                parents.push(parent);
                 files.push(IndexedFile {
                     path,
                     name,
                     root: root.into(),
                     size: 0,
                     modified_ms: None,
-                    is_log: false,
-                    is_archive: false,
+                    is_log,
+                    is_archive,
                     file_id: Some(mft_stage_id(&id)?),
                     parent_id: Some(mft_stage_id(&parent_id)?),
                 });
-                if let Some(file) = files.last_mut() {
-                    file.is_log = is_log_name(&file.name);
-                    file.is_archive = is_archive_name(&file.name);
-                }
             }
             drop(statement);
             if !files.is_empty() {
-                write_staged_files(connection, &files)?;
+                if materialize_stage {
+                    write_staged_files(connection, &files, &parents)?;
+                }
                 on_batch(&files)?;
                 searchable_files = searchable_files.saturating_add(files.len() as u64);
             }
             if rows_seen < MFT_STAGE_ROW_BATCH {
                 break;
             }
+        }
+        if materialize_stage {
+            self.connection()?.execute_batch("COMMIT")?;
         }
         self.searchable_files = searchable_files;
         Ok(())
@@ -2775,48 +2820,27 @@ impl MftVolumeStage {
 
     fn resolve_directory_layers(&self) -> anyhow::Result<()> {
         let connection = self.connection()?;
-        loop {
-            let directories = {
-                let mut statement = connection.prepare(
-                    "SELECT r.file_id, r.name, p.path
-                       FROM mft_records r
-                       JOIN resolved_directories p ON p.file_id = r.parent_id
-                       LEFT JOIN resolved_directories current ON current.file_id = r.file_id
-                      WHERE current.file_id IS NULL
-                        AND (r.attributes & ?1) != 0
-                        AND (r.attributes & ?2) = 0
-                      LIMIT ?3",
-                )?;
-                let rows = statement.query_map(
-                    params![
-                        FILE_ATTRIBUTE_DIRECTORY,
-                        0x400_u32,
-                        MFT_STAGE_ROW_BATCH as i64
-                    ],
-                    |row| {
-                        Ok((
-                            row.get::<_, Vec<u8>>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    },
-                )?;
-                rows.collect::<Result<Vec<_>, _>>()?
-            };
-            if directories.is_empty() {
-                break;
-            }
-            let transaction = connection.unchecked_transaction()?;
-            {
-                let mut insert = transaction.prepare_cached(
-                    "INSERT OR IGNORE INTO resolved_directories(file_id, path) VALUES(?1, ?2)",
-                )?;
-                for (id, name, parent) in directories {
-                    insert.execute(params![id, mft_stage_join_path(&parent, &name)])?;
-                }
-            }
-            transaction.commit()?;
-        }
+        connection.execute(
+            "WITH RECURSIVE directory_paths(file_id, path) AS (
+               SELECT file_id, path FROM resolved_directories
+               UNION
+               SELECT r.file_id,
+                      CASE
+                        WHEN substr(p.path, -1, 1) IN ('\\', '/')
+                          THEN p.path || r.name
+                        ELSE p.path || '\\' || r.name
+                      END
+                 FROM mft_records r
+                 JOIN directory_paths p ON p.file_id = r.parent_id
+                WHERE (r.attributes & ?1) != 0
+                  AND (r.attributes & ?2) = 0
+                  AND r.file_id != r.parent_id
+                  AND r.name != '.'
+             )
+             INSERT OR IGNORE INTO resolved_directories(file_id, path)
+             SELECT file_id, path FROM directory_paths",
+            params![FILE_ATTRIBUTE_DIRECTORY, 0x400_u32],
+        )?;
         Ok(())
     }
 }
@@ -2882,19 +2906,25 @@ fn mft_stage_id(bytes: &[u8]) -> anyhow::Result<[u8; 16]> {
 }
 
 #[cfg(windows)]
-fn write_staged_files(connection: &Connection, files: &[IndexedFile]) -> anyhow::Result<()> {
-    let transaction = connection.unchecked_transaction()?;
+fn write_staged_files(
+    connection: &Connection,
+    files: &[IndexedFile],
+    parents: &[String],
+) -> anyhow::Result<()> {
+    if files.len() != parents.len() {
+        anyhow::bail!("按卷 MFT 暂存父路径批次长度不一致");
+    }
     {
-        let mut insert = transaction.prepare_cached(
+        let mut insert = connection.prepare_cached(
             "INSERT OR REPLACE INTO resolved_files(
                path, name, parent, size, modified_ms, is_log, is_archive, file_id, parent_id
              ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )?;
-        for file in files {
+        for (file, parent) in files.iter().zip(parents) {
             insert.execute(params![
                 &file.path,
                 &file.name,
-                mft_stage_parent_path(&file.path),
+                parent,
                 file.size,
                 file.modified_ms,
                 file.is_log,
@@ -2904,16 +2934,7 @@ fn write_staged_files(connection: &Connection, files: &[IndexedFile]) -> anyhow:
             ])?;
         }
     }
-    transaction.commit()?;
     Ok(())
-}
-
-#[cfg(windows)]
-fn mft_stage_parent_path(path: &str) -> String {
-    Path::new(path)
-        .parent()
-        .map(|parent| parent.to_string_lossy().into_owned())
-        .unwrap_or_default()
 }
 
 #[cfg(windows)]
@@ -3077,22 +3098,28 @@ fn index_ntfs_volume_paths<S: SearchStatusSink>(
     app: &S,
     generation: u64,
     snapshot: NtfsFinalizeJob,
+    publish_partial: bool,
 ) -> anyhow::Result<NtfsFinalizeJob> {
     let started = std::time::Instant::now();
     let root = snapshot.root.clone();
     let mut merge_elapsed = Duration::ZERO;
     let mut searchable_files = 0_u64;
+    let mut partial_committed = false;
     eprintln!("[search-index] root={root} stage=resolvingPaths event=start records=0");
     eprintln!("[search-index] root={root} stage=merging event=start records=0");
     let mut snapshot = snapshot;
     snapshot
         .stage
-        .resolve_and_stage_files(&root, &snapshot.exclusions, |files| {
+        .stream_query_files(&root, &snapshot.exclusions, |files| {
             if manager.is_cancelled(generation) {
                 anyhow::bail!("MFT 路径重建已取消");
             }
             let merge_started = std::time::Instant::now();
             manager.index_files(files)?;
+            if publish_partial && !partial_committed {
+                manager.commit_query_index()?;
+                partial_committed = true;
+            }
             merge_elapsed = merge_elapsed.saturating_add(merge_started.elapsed());
             searchable_files = searchable_files.saturating_add(files.len() as u64);
             add_provider_progress(manager, app, &root, "resolvingPaths", 0, files.len() as u64);
@@ -3106,11 +3133,9 @@ fn index_ntfs_volume_paths<S: SearchStatusSink>(
         "[search-index] root={root} stage=resolvingPaths event=complete records={searchable_files} elapsed_ms={}",
         resolving_elapsed.as_millis()
     );
-    manager.commit_query_index()?;
     if manager.is_cancelled(generation) {
         anyhow::bail!("MFT 查询索引提交后 generation 已取消");
     }
-    snapshot.stage.mark_complete_and_close()?;
     eprintln!(
         "[search-index] root={root} stage=merging event=complete records={searchable_files} elapsed_ms={}",
         merge_elapsed.as_millis()
@@ -3247,16 +3272,18 @@ fn persist_and_finalize_ntfs_volume(
         volume,
         exclusions,
         journal_before,
-        stage,
+        mut stage,
     } = job;
     let snapshot_records = stage.record_count;
     let snapshot_files = stage.searchable_files;
-    let stage_path = stage.path.clone();
     let started = std::time::Instant::now();
     eprintln!(
         "[search-index] root={} stage=persisting event=start records={}",
         root, snapshot_records
     );
+    stage.resolve_and_stage_files(&root, &exclusions, |_| Ok(()))?;
+    stage.mark_complete_and_close()?;
+    let stage_path = stage.path.clone();
     std::thread::scope(|scope| -> anyhow::Result<()> {
         let usn_reconciliation = scope.spawn(|| -> anyhow::Result<_> {
             let journal_after = query_usn_via_service(volume.letter)?;
@@ -8462,7 +8489,7 @@ mod tests {
         let many = run_completed_stage_retention_matrix(64);
         assert_eq!(single, many);
         assert_eq!(many.0, 257);
-        assert_eq!(many.1, MFT_STAGE_ROW_BATCH);
+        assert_eq!(many.1, (9 * 257).min(MFT_STAGE_ROW_BATCH));
         assert!(many.2 <= 3);
     }
 

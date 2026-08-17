@@ -66,3 +66,25 @@ Evidence:
 - `stable_volume_state_survives_mount_changes_and_isolates_letter_reuse`
 - `volume_guid_paths_are_normalized_without_drive_letters`
 - MFT `stage_metadata.volume` and recovery/scoped-state assertions in the combined fixture
+
+## 4.6 Performance and final L3 gates
+
+The complete measurements, raw sample table, medians, environment, baseline comparison, directory-change recovery, and real WebView input evidence are recorded in `benchmark.md`.
+
+Performance acceptance:
+
+- Three real Release C:/D: application rebuilds: median scheduling 104 ms, D/C MFT enumeration 15.347/19.311 s, first searchable result 24.937 s, all-volume query ready 55.682 s, ready publication delay 37 ms, and converged 190.104 s.
+- Three real D: directory-change rebuilds: median enumeration 8.800 s and query ready 24.627 s; all proof-file queries matched.
+- Isolated Release Tauri/WebView2 while real C:/D: indexing remained `scanning`: 100 production input-to-next-frame samples, p95 16.7 ms. The isolated process, CDP listener, and acceptance data roots were removed afterward; the production application profile was not touched.
+- All samples retained per-scope `ready`, final operation `converged`, matching searchable counts, and representative C:/D: query results.
+
+Final L3 evidence on the final implementation diff:
+
+| Scope | Command or step | Result | Notes |
+|---|---|---|---|
+| Rust full test | `cargo test --manifest-path src-tauri/Cargo.toml` | 277 passed, 0 failed, 9 ignored | The ignored set contains the explicitly invoked real-device/performance entries and existing environment probes. |
+| Rust format/static/build | `cargo fmt --manifest-path src-tauri/Cargo.toml --all --check`; all-target Clippy with `-D warnings`; all-target check; index-service feature check | all passed | No warnings from Rust gates. |
+| Frontend | `npm test`; `npx tsc --noEmit`; `npm run lint`; `npm run format:check`; `npm run build` | 144 passed, 0 failed; all static/format/build gates passed | Existing React `act(...)` warnings remain test-runner noise with no failures and no 4.6 frontend changes. |
+| OpenSpec/diff | `openspec validate update-multi-volume-indexing-scalability --strict`; `git diff --check` | passed | Re-run after final report/task/state updates. |
+
+Task 4.6 introduced no application-close, application-restart, or user-restart path. Query publication, SQLite/USN materialization, and recovery remain background work in the current process or the next natural application start.
