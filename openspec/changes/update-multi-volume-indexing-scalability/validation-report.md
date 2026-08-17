@@ -73,16 +73,16 @@ The complete measurements, raw sample table, medians, environment, baseline comp
 
 Performance acceptance:
 
-- Three real Release C:/D: application rebuilds: median scheduling 104 ms, D/C MFT enumeration 15.347/19.311 s, first searchable result 24.937 s, all-volume query ready 55.682 s, ready publication delay 37 ms, and converged 190.104 s.
-- Three real D: directory-change rebuilds: median enumeration 8.800 s and query ready 24.627 s; all proof-file queries matched.
-- Isolated Release Tauri/WebView2 while real C:/D: indexing remained `scanning`: 100 production input-to-next-frame samples, p95 16.7 ms. The isolated process, CDP listener, and acceptance data roots were removed afterward; the production application profile was not touched.
+- Three real Release C:/D: application rebuilds: median scheduling 175 ms, D/C MFT enumeration 12.757/16.138 s, first searchable result 175 ms, all-volume query ready 47.824 s, ready publication delay 54 ms, and converged 166.793 s. Against the archived three-run implementation baseline, first searchable improved 98.7% and query ready improved 14.8%.
+- Three real D: directory-change rebuilds: median enumeration 7.084 s and query ready 23.406 s; all proof-file queries matched.
+- Isolated Release Tauri/WebView2 while real C:/D: indexing remained `scanning`: 100 production input-to-next-frame samples, p95 17.5 ms. The isolated process, CDP listener, and acceptance data roots were removed afterward; the production application profile was not touched.
 - All samples retained per-scope `ready`, final operation `converged`, matching searchable counts, and representative C:/D: query results.
 
 Final L3 evidence on the final implementation diff:
 
 | Scope | Command or step | Result | Notes |
 |---|---|---|---|
-| Rust full test | `cargo test --manifest-path src-tauri/Cargo.toml` | 277 passed, 0 failed, 9 ignored | The ignored set contains the explicitly invoked real-device/performance entries and existing environment probes. |
+| Rust full test | `cargo test --manifest-path src-tauri/Cargo.toml` | 281 passed, 0 failed, 9 ignored | The ignored set contains the explicitly invoked real-device/performance entries and existing environment probes. |
 | Rust format/static/build | `cargo fmt --manifest-path src-tauri/Cargo.toml --all --check`; all-target Clippy with `-D warnings`; all-target check; index-service feature check | all passed | No warnings from Rust gates. |
 | Frontend | `npm test`; `npx tsc --noEmit`; `npm run lint`; `npm run format:check`; `npm run build` | 144 passed, 0 failed; all static/format/build gates passed | Existing React `act(...)` warnings remain test-runner noise with no failures and no 4.6 frontend changes. |
 | OpenSpec/diff | `openspec validate update-multi-volume-indexing-scalability --strict`; `git diff --check` | passed | Re-run after final report/task/state updates. |

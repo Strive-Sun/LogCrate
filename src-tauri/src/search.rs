@@ -4,7 +4,7 @@ use crate::ntfs::resolve_mft_files_in_batches_retain;
 #[cfg(windows)]
 use crate::ntfs::{
     ipc::{enumerate_mft_via_service, query_usn_via_service, read_usn_via_service, ServiceFailure},
-    resolve_mft_files_in_batches, MftRecord, UsnJournalInfo, FILE_ATTRIBUTE_DIRECTORY,
+    resolve_mft_files_in_batches, FileId, MftRecord, UsnJournalInfo, FILE_ATTRIBUTE_DIRECTORY,
 };
 use crate::search_index::{SearchIndex, SearchIndexEntry};
 use crate::search_query_store::{
@@ -57,6 +57,10 @@ const BLOCKED_VOLUME_PROBE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const MFT_STAGE_SCHEMA_VERSION: u32 = 1;
 #[cfg(windows)]
 const MFT_STAGE_ROW_BATCH: usize = 32_768;
+#[cfg(windows)]
+const EARLY_QUERY_FILES_MAX: usize = 1_024;
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 #[cfg(windows)]
 static MFT_STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -783,9 +787,9 @@ impl FileSearchManager {
                         );
                         if recover_persistence {
                             enumerate_ntfs_volume_snapshot(
-                                &manager, &app, generation, &config, &root, volume,
+                                &manager, &app, generation, &config, &root, volume, None,
                             )
-                            .map(NtfsResumeJob::Rebuild)
+                            .map(|job| NtfsResumeJob::Rebuild(Box::new(job)))
                         } else {
                             set_provider_stage(
                                 &manager,
@@ -808,9 +812,9 @@ impl FileSearchManager {
                                     "[search-index] root={root} strategy=full-rebuild reason={error}"
                                 );
                                 enumerate_ntfs_volume_snapshot(
-                                    &manager, &app, generation, &config, &root, volume,
+                                    &manager, &app, generation, &config, &root, volume, None,
                                 )
-                                .map(NtfsResumeJob::Rebuild)
+                                .map(|job| NtfsResumeJob::Rebuild(Box::new(job)))
                             })
                         }
                     };
@@ -844,7 +848,7 @@ impl FileSearchManager {
                                         None,
                                     );
                                     index_ntfs_volume_paths(
-                                        &manager, &app, generation, snapshot, true,
+                                        &manager, &app, generation, *snapshot, true, None,
                                     )
                                     .and_then(|job| {
                                         set_provider_stage(
@@ -1207,6 +1211,41 @@ impl FileSearchManager {
         if bulk {
             let mut status = self.status.lock().unwrap();
             status.indexed_files = status.indexed_files.saturating_add(files.len() as u64);
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn publish_early_query_files(&self, files: &[IndexedFile]) -> anyhow::Result<()> {
+        let entries = files.iter().map(search_index_entry).collect::<Vec<_>>();
+        if self.query_index_staged.load(Ordering::Acquire) {
+            let mut index = self.staged_query_index.lock().unwrap();
+            let index = index
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("早期查询暂存索引不可用"))?;
+            index.add_batch(&entries)?;
+            index.commit()?;
+        } else {
+            let mut index = self.query_index.lock().unwrap();
+            let index = index
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("早期查询索引不可用"))?;
+            index.add_batch(&entries)?;
+            index.commit()?;
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn rollback_query_scope(&self, scope_key: &str) -> anyhow::Result<()> {
+        if self.query_index_staged.load(Ordering::Acquire) {
+            if let Some(index) = self.staged_query_index.lock().unwrap().as_mut() {
+                index.delete_scope(scope_key);
+                index.commit()?;
+            }
+        } else if let Some(index) = self.query_index.lock().unwrap().as_mut() {
+            index.delete_scope(scope_key);
+            index.commit()?;
         }
         Ok(())
     }
@@ -2223,22 +2262,38 @@ fn scan_with_providers<S: SearchStatusSink>(
                 "connecting",
                 None,
             );
-            enumerate_ntfs_volume_snapshot(manager, app, generation, config, &root, volume)
-                .and_then(|snapshot| {
-                    set_provider_stage(
-                        manager,
-                        app,
-                        &root,
-                        "windowsNtfs",
-                        "merging",
-                        "resolvingPaths",
-                        None,
-                    );
-                    let publish_partial = partial_snapshot_published
+            enumerate_ntfs_volume_snapshot(
+                manager,
+                app,
+                generation,
+                config,
+                &root,
+                volume,
+                Some(&partial_snapshot_published),
+            )
+            .and_then(|snapshot| {
+                set_provider_stage(
+                    manager,
+                    app,
+                    &root,
+                    "windowsNtfs",
+                    "merging",
+                    "resolvingPaths",
+                    None,
+                );
+                let publish_partial = snapshot.early_query_published
+                    || partial_snapshot_published
                         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                         .is_ok();
-                    index_ntfs_volume_paths(manager, app, generation, snapshot, publish_partial)
-                })
+                index_ntfs_volume_paths(
+                    manager,
+                    app,
+                    generation,
+                    snapshot,
+                    publish_partial,
+                    Some(&partial_snapshot_published),
+                )
+            })
         };
         let completed = run_ntfs_volume_tasks(
             ntfs_roots,
@@ -2562,6 +2617,7 @@ impl MftVolumeStage {
         ));
         let connection = Connection::open(&path)?;
         connection.busy_timeout(Duration::from_secs(15))?;
+        connection.pragma_update(None, "page_size", 32_768_i64)?;
         connection.pragma_update(None, "journal_mode", "OFF")?;
         connection.pragma_update(None, "synchronous", "OFF")?;
         connection.pragma_update(None, "temp_store", "MEMORY")?;
@@ -2660,19 +2716,20 @@ impl MftVolumeStage {
     where
         F: FnMut(&[IndexedFile]) -> anyhow::Result<()>,
     {
-        self.resolve_files(root, exclusions, true, on_batch)
+        self.resolve_files(root, exclusions, true, &HashSet::new(), on_batch)
     }
 
     fn stream_query_files<F>(
         &mut self,
         root: &str,
         exclusions: &[String],
+        early_query_file_ids: &HashSet<FileId>,
         on_batch: F,
     ) -> anyhow::Result<()>
     where
         F: FnMut(&[IndexedFile]) -> anyhow::Result<()>,
     {
-        self.resolve_files(root, exclusions, false, on_batch)
+        self.resolve_files(root, exclusions, false, early_query_file_ids, on_batch)
     }
 
     fn resolve_files<F>(
@@ -2680,13 +2737,16 @@ impl MftVolumeStage {
         root: &str,
         exclusions: &[String],
         materialize_stage: bool,
+        skipped_query_file_ids: &HashSet<FileId>,
         mut on_batch: F,
     ) -> anyhow::Result<()>
     where
         F: FnMut(&[IndexedFile]) -> anyhow::Result<()>,
     {
         self.connection()?.execute(
-            "CREATE INDEX IF NOT EXISTS mft_records_parent_idx ON mft_records(parent_id)",
+            "CREATE INDEX IF NOT EXISTS mft_records_directory_parent_idx
+               ON mft_records(parent_id)
+             WHERE (attributes & 16) != 0 AND (attributes & 1024) = 0",
             [],
         )?;
         self.seed_resolved_roots(root)?;
@@ -2697,7 +2757,7 @@ impl MftVolumeStage {
             self.connection()?.execute_batch("BEGIN IMMEDIATE")?;
         }
         let mut after_rowid = 0_i64;
-        let mut searchable_files = 0_u64;
+        let mut searchable_files = skipped_query_file_ids.len() as u64;
         loop {
             let connection = self.connection()?;
             let mut statement = connection.prepare(
@@ -2731,6 +2791,10 @@ impl MftVolumeStage {
                 let (rowid, id, parent_id, name, parent) = row?;
                 rows_seen += 1;
                 after_rowid = rowid;
+                let id = mft_stage_id(&id)?;
+                if skipped_query_file_ids.contains(&FileId::from_bytes(id)) {
+                    continue;
+                }
                 let path = mft_stage_join_path(&parent, &name);
                 if is_excluded(Path::new(&path), exclusions) {
                     continue;
@@ -2746,7 +2810,7 @@ impl MftVolumeStage {
                     modified_ms: None,
                     is_log,
                     is_archive,
-                    file_id: Some(mft_stage_id(&id)?),
+                    file_id: Some(id),
                     parent_id: Some(mft_stage_id(&parent_id)?),
                 });
             }
@@ -2832,14 +2896,14 @@ impl MftVolumeStage {
                       END
                  FROM mft_records r
                  JOIN directory_paths p ON p.file_id = r.parent_id
-                WHERE (r.attributes & ?1) != 0
-                  AND (r.attributes & ?2) = 0
+                WHERE (r.attributes & 16) != 0
+                  AND (r.attributes & 1024) = 0
                   AND r.file_id != r.parent_id
                   AND r.name != '.'
              )
              INSERT OR IGNORE INTO resolved_directories(file_id, path)
              SELECT file_id, path FROM directory_paths",
-            params![FILE_ATTRIBUTE_DIRECTORY, 0x400_u32],
+            [],
         )?;
         Ok(())
     }
@@ -3031,7 +3095,79 @@ struct NtfsFinalizeJob {
     volume: NtfsVolumeIdentity,
     exclusions: Vec<String>,
     journal_before: UsnJournalInfo,
+    early_query_file_ids: HashSet<FileId>,
+    early_query_published: bool,
     stage: MftVolumeStage,
+}
+
+#[cfg(windows)]
+fn append_early_query_candidates(
+    root: &str,
+    exclusions: &[String],
+    records: &[MftRecord],
+    candidate_ids: &mut HashSet<FileId>,
+    candidate_paths: &mut HashSet<String>,
+    candidates: &mut Vec<IndexedFile>,
+) {
+    if candidates.len() >= EARLY_QUERY_FILES_MAX {
+        return;
+    }
+    for record in records {
+        if candidates.len() >= EARLY_QUERY_FILES_MAX {
+            break;
+        }
+        let parent_bytes = record.parent_id.as_bytes();
+        let parent_record =
+            u64::from_le_bytes(parent_bytes[..8].try_into().unwrap()) & 0x0000_ffff_ffff_ffff;
+        if parent_record != 5
+            || record.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+            || record.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || record.name.is_empty()
+            || record.name == "."
+            || !candidate_ids.insert(record.id)
+        {
+            continue;
+        }
+        let path = mft_stage_join_path(root, &record.name);
+        let path_key = path.to_lowercase();
+        if is_excluded(Path::new(&path), exclusions) || !candidate_paths.insert(path_key) {
+            candidate_ids.remove(&record.id);
+            continue;
+        }
+        candidates.push(IndexedFile {
+            path,
+            name: record.name.clone(),
+            root: root.into(),
+            size: 0,
+            modified_ms: None,
+            is_log: is_log_name(&record.name),
+            is_archive: is_archive_name(&record.name),
+            file_id: Some(record.id.as_bytes()),
+            parent_id: Some(record.parent_id.as_bytes()),
+        });
+    }
+}
+
+#[cfg(windows)]
+fn try_publish_early_query_candidates(
+    manager: &FileSearchManager,
+    root: &str,
+    candidates: &[IndexedFile],
+    gate: &AtomicBool,
+) -> anyhow::Result<bool> {
+    if candidates.is_empty()
+        || gate
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return Ok(false);
+    }
+    if let Err(error) = manager.publish_early_query_files(candidates) {
+        gate.store(false, Ordering::Release);
+        let _ = manager.rollback_query_scope(root);
+        return Err(error);
+    }
+    Ok(true)
 }
 
 #[cfg(windows)]
@@ -3042,6 +3178,7 @@ fn enumerate_ntfs_volume_snapshot<S: SearchStatusSink>(
     config: &SearchConfig,
     root: &str,
     volume: NtfsVolumeIdentity,
+    early_publish_gate: Option<&AtomicBool>,
 ) -> anyhow::Result<NtfsFinalizeJob> {
     let volume_started = std::time::Instant::now();
     eprintln!("[search-index] root={root} stage=enumeratingMft event=start records=0");
@@ -3056,6 +3193,11 @@ fn enumerate_ntfs_volume_snapshot<S: SearchStatusSink>(
     );
     let journal_before = query_usn_via_service(volume.letter)?;
     let mut stage = MftVolumeStage::create(&manager.db_path, &volume.volume_id, generation)?;
+    let mut early_candidates = Vec::new();
+    let mut early_candidate_ids = HashSet::new();
+    let mut early_candidate_paths = HashSet::new();
+    let mut early_query_file_ids = HashSet::new();
+    let mut early_query_published = false;
     set_provider_stage(
         manager,
         app,
@@ -3071,8 +3213,45 @@ fn enumerate_ntfs_volume_snapshot<S: SearchStatusSink>(
         }
         add_provider_progress(manager, app, root, "enumeratingMft", batch.len() as u64, 0);
         stage.append_records(&batch)?;
+        if !early_query_published {
+            if let Some(gate) = early_publish_gate {
+                append_early_query_candidates(
+                    root,
+                    &config.exclusions,
+                    &batch,
+                    &mut early_candidate_ids,
+                    &mut early_candidate_paths,
+                    &mut early_candidates,
+                );
+                if try_publish_early_query_candidates(manager, root, &early_candidates, gate)? {
+                    early_query_file_ids.extend(early_candidate_ids.iter().copied());
+                    early_query_published = true;
+                    add_provider_progress(
+                        manager,
+                        app,
+                        root,
+                        "enumeratingMft",
+                        0,
+                        early_query_file_ids.len() as u64,
+                    );
+                }
+            }
+        }
         Ok(())
-    })?;
+    });
+    let enumeration = match enumeration {
+        Ok(enumeration) => enumeration,
+        Err(error) => {
+            if early_query_published {
+                manager.rollback_query_scope(root)?;
+                set_provider_searchable_files(manager, app, root, 0);
+                if let Some(gate) = early_publish_gate {
+                    gate.store(false, Ordering::Release);
+                }
+            }
+            return Err(error);
+        }
+    };
     eprintln!(
         "[search-index] root={root} volume={} stage=enumeratingMft event=complete records={} batches={} elapsed_ms={}",
         volume.letter,
@@ -3081,6 +3260,13 @@ fn enumerate_ntfs_volume_snapshot<S: SearchStatusSink>(
         volume_started.elapsed().as_millis()
     );
     if manager.is_cancelled(generation) {
+        if early_query_published {
+            manager.rollback_query_scope(root)?;
+            set_provider_searchable_files(manager, app, root, 0);
+            if let Some(gate) = early_publish_gate {
+                gate.store(false, Ordering::Release);
+            }
+        }
         anyhow::bail!("MFT enumeration was cancelled");
     }
     Ok(NtfsFinalizeJob {
@@ -3088,6 +3274,8 @@ fn enumerate_ntfs_volume_snapshot<S: SearchStatusSink>(
         volume,
         exclusions: config.exclusions.clone(),
         journal_before,
+        early_query_file_ids,
+        early_query_published,
         stage,
     })
 }
@@ -3099,18 +3287,21 @@ fn index_ntfs_volume_paths<S: SearchStatusSink>(
     generation: u64,
     snapshot: NtfsFinalizeJob,
     publish_partial: bool,
+    early_publish_gate: Option<&AtomicBool>,
 ) -> anyhow::Result<NtfsFinalizeJob> {
     let started = std::time::Instant::now();
     let root = snapshot.root.clone();
     let mut merge_elapsed = Duration::ZERO;
-    let mut searchable_files = 0_u64;
+    let mut searchable_files = snapshot.early_query_file_ids.len() as u64;
     let mut partial_committed = false;
     eprintln!("[search-index] root={root} stage=resolvingPaths event=start records=0");
     eprintln!("[search-index] root={root} stage=merging event=start records=0");
     let mut snapshot = snapshot;
-    snapshot
-        .stage
-        .stream_query_files(&root, &snapshot.exclusions, |files| {
+    let stream_result = snapshot.stage.stream_query_files(
+        &root,
+        &snapshot.exclusions,
+        &snapshot.early_query_file_ids,
+        |files| {
             if manager.is_cancelled(generation) {
                 anyhow::bail!("MFT 路径重建已取消");
             }
@@ -3124,8 +3315,26 @@ fn index_ntfs_volume_paths<S: SearchStatusSink>(
             searchable_files = searchable_files.saturating_add(files.len() as u64);
             add_provider_progress(manager, app, &root, "resolvingPaths", 0, files.len() as u64);
             Ok(())
-        })?;
+        },
+    );
+    if let Err(error) = stream_result {
+        manager.rollback_query_scope(&root)?;
+        set_provider_searchable_files(manager, app, &root, 0);
+        if snapshot.early_query_published || partial_committed {
+            if let Some(gate) = early_publish_gate {
+                gate.store(false, Ordering::Release);
+            }
+        }
+        return Err(error);
+    }
     if manager.is_cancelled(generation) {
+        manager.rollback_query_scope(&root)?;
+        set_provider_searchable_files(manager, app, &root, 0);
+        if snapshot.early_query_published || partial_committed {
+            if let Some(gate) = early_publish_gate {
+                gate.store(false, Ordering::Release);
+            }
+        }
         anyhow::bail!("MFT 路径重建已取消");
     }
     let resolving_elapsed = started.elapsed().saturating_sub(merge_elapsed);
@@ -3134,6 +3343,13 @@ fn index_ntfs_volume_paths<S: SearchStatusSink>(
         resolving_elapsed.as_millis()
     );
     if manager.is_cancelled(generation) {
+        manager.rollback_query_scope(&root)?;
+        set_provider_searchable_files(manager, app, &root, 0);
+        if snapshot.early_query_published || partial_committed {
+            if let Some(gate) = early_publish_gate {
+                gate.store(false, Ordering::Release);
+            }
+        }
         anyhow::bail!("MFT 查询索引提交后 generation 已取消");
     }
     eprintln!(
@@ -3272,6 +3488,8 @@ fn persist_and_finalize_ntfs_volume(
         volume,
         exclusions,
         journal_before,
+        early_query_file_ids: _,
+        early_query_published: _,
         mut stage,
     } = job;
     let snapshot_records = stage.record_count;
@@ -4081,7 +4299,7 @@ struct NtfsCatchUpJob {
 #[cfg(windows)]
 enum NtfsResumeJob {
     CatchUp(NtfsCatchUpJob),
-    Rebuild(NtfsFinalizeJob),
+    Rebuild(Box<NtfsFinalizeJob>),
 }
 
 #[cfg(windows)]
@@ -8104,6 +8322,227 @@ mod tests {
             reason: 0,
             usn: id as i64,
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn early_query_candidates_are_root_only_filtered_and_bounded() {
+        let mut records = vec![
+            staged_mft_record(6, 5, "directory", FILE_ATTRIBUTE_DIRECTORY),
+            staged_mft_record(7, 5, "reparse.log", FILE_ATTRIBUTE_REPARSE_POINT),
+            staged_mft_record(8, 6, "nested.log", 0),
+            staged_mft_record(9, 5, "excluded.log", 0),
+        ];
+        records.extend((0..EARLY_QUERY_FILES_MAX + 50).map(|offset| {
+            staged_mft_record(100 + offset as u64, 5, format!("root-{offset}.log"), 0)
+        }));
+        let mut ids = HashSet::new();
+        let mut paths = HashSet::new();
+        let mut candidates = Vec::new();
+        append_early_query_candidates(
+            "C:\\",
+            &["C:\\excluded.log".into()],
+            &records,
+            &mut ids,
+            &mut paths,
+            &mut candidates,
+        );
+
+        assert_eq!(candidates.len(), EARLY_QUERY_FILES_MAX);
+        assert_eq!(ids.len(), EARLY_QUERY_FILES_MAX);
+        assert_eq!(paths.len(), EARLY_QUERY_FILES_MAX);
+        assert!(candidates
+            .iter()
+            .all(|file| file.parent_id == Some(crate::ntfs::FileId::from_u64(5).as_bytes())));
+        assert!(candidates.iter().all(|file| file.name.starts_with("root-")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn early_query_publication_precedes_full_resolution_without_duplicates_and_rolls_back_scope() {
+        let directory = test_directory("early-query-publication");
+        let db = directory.join("search.sqlite3");
+        initialize_database(&db).unwrap();
+        let manager = FileSearchManager::new(directory.clone());
+        manager.begin_query_index_bulk().unwrap();
+        manager.query_index_ready.store(true, Ordering::Release);
+        manager.status.lock().unwrap().phase = "scanning".into();
+
+        let records = vec![
+            staged_mft_record(6, 5, "early-root.log", 0),
+            staged_mft_record(7, 5, "logs", FILE_ATTRIBUTE_DIRECTORY),
+            staged_mft_record(8, 7, "later-nested.log", 0),
+        ];
+        let mut ids = HashSet::new();
+        let mut paths = HashSet::new();
+        let mut early = Vec::new();
+        append_early_query_candidates("C:\\", &[], &records, &mut ids, &mut paths, &mut early);
+        assert_eq!(early.len(), 1);
+        manager.publish_early_query_files(&early).unwrap();
+        assert_eq!(
+            manager
+                .query_tantivy(&["early-root.log".into()], "", 0, 20)
+                .unwrap()
+                .unwrap()
+                .1,
+            1
+        );
+
+        let mut stage = MftVolumeStage::create(&db, "TEST-VOLUME-C", 17).unwrap();
+        stage.append_records(&records).unwrap();
+        let mut later = Vec::new();
+        stage
+            .stream_query_files("C:\\", &[], &ids, |files| {
+                later.extend_from_slice(files);
+                manager.index_files(files)
+            })
+            .unwrap();
+        manager.commit_query_index().unwrap();
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].path, "C:\\logs\\later-nested.log");
+        assert_eq!(stage.searchable_files, 2);
+        assert_eq!(
+            manager
+                .query_index
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .num_docs_for_scope("C:\\")
+                .unwrap(),
+            2
+        );
+
+        manager
+            .publish_early_query_files(&[IndexedFile {
+                path: "D:\\other.log".into(),
+                name: "other.log".into(),
+                root: "D:\\".into(),
+                size: 0,
+                modified_ms: None,
+                is_log: true,
+                is_archive: false,
+                file_id: None,
+                parent_id: None,
+            }])
+            .unwrap();
+        manager.rollback_query_scope("C:\\").unwrap();
+        {
+            let index = manager.query_index.lock().unwrap();
+            let index = index.as_ref().unwrap();
+            assert_eq!(index.num_docs_for_scope("C:\\").unwrap(), 0);
+            assert_eq!(index.num_docs_for_scope("D:\\").unwrap(), 1);
+        }
+
+        drop(stage);
+        drop(manager);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn early_query_publication_is_single_winner_across_volume_workers() {
+        let directory = test_directory("early-query-single-winner");
+        let manager = Arc::new(FileSearchManager::new(directory.clone()));
+        manager.begin_query_index_bulk().unwrap();
+        let gate = AtomicBool::new(false);
+        let winners = AtomicU64::new(0);
+        let barrier = std::sync::Barrier::new(NTFS_VOLUME_WORKERS_MAX);
+        std::thread::scope(|scope| {
+            for worker in 0..NTFS_VOLUME_WORKERS_MAX {
+                let manager = Arc::clone(&manager);
+                let barrier = &barrier;
+                let gate = &gate;
+                let winners = &winners;
+                scope.spawn(move || {
+                    let root = format!("{}:\\", char::from(b'C' + worker as u8));
+                    let candidates = [IndexedFile {
+                        path: format!("{root}candidate-{worker}.log"),
+                        name: format!("candidate-{worker}.log"),
+                        root: root.clone(),
+                        size: 0,
+                        modified_ms: None,
+                        is_log: true,
+                        is_archive: false,
+                        file_id: None,
+                        parent_id: None,
+                    }];
+                    barrier.wait();
+                    if try_publish_early_query_candidates(&manager, &root, &candidates, gate)
+                        .unwrap()
+                    {
+                        winners.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+
+        assert!(gate.load(Ordering::Acquire));
+        assert_eq!(winners.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            manager
+                .query_index
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .num_docs(),
+            1
+        );
+        drop(manager);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn early_query_rollback_preserves_active_snapshot_and_other_staged_scope() {
+        let directory = test_directory("early-query-staged-rollback");
+        let manager = FileSearchManager::new(directory.clone());
+        {
+            let mut active = manager.query_index.lock().unwrap();
+            let active = active.as_mut().unwrap();
+            active
+                .add_batch(&[SearchIndexEntry {
+                    path: "C:\\old-active.log".into(),
+                    name: "old-active.log".into(),
+                    scope_key: "C:\\".into(),
+                    is_log: true,
+                    is_archive: false,
+                }])
+                .unwrap();
+            active.commit().unwrap();
+        }
+        manager.begin_query_index_bulk().unwrap();
+        assert!(manager.query_index_staged.load(Ordering::Acquire));
+        for root in ["C:\\", "D:\\"] {
+            manager
+                .publish_early_query_files(&[IndexedFile {
+                    path: format!("{root}early.log"),
+                    name: "early.log".into(),
+                    root: root.into(),
+                    size: 0,
+                    modified_ms: None,
+                    is_log: true,
+                    is_archive: false,
+                    file_id: None,
+                    parent_id: None,
+                }])
+                .unwrap();
+        }
+        manager.rollback_query_scope("C:\\").unwrap();
+        {
+            let staged = manager.staged_query_index.lock().unwrap();
+            let staged = staged.as_ref().unwrap();
+            assert_eq!(staged.num_docs_for_scope("C:\\").unwrap(), 0);
+            assert_eq!(staged.num_docs_for_scope("D:\\").unwrap(), 1);
+        }
+        {
+            let active = manager.query_index.lock().unwrap();
+            let active = active.as_ref().unwrap();
+            assert_eq!(active.num_docs_for_scope("C:\\").unwrap(), 1);
+        }
+        drop(manager);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(windows)]
