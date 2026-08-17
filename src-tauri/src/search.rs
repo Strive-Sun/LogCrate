@@ -6353,16 +6353,77 @@ mod tests {
             serial: 22,
             file_system: "NTFS".into(),
         };
-        let journal = UsnJournalInfo {
+        let first_journal = UsnJournalInfo {
             journal_id: 7,
             first_usn: 1,
             next_usn: 9,
             lowest_valid_usn: 1,
         };
+        let replacement_journal = UsnJournalInfo {
+            journal_id: 17,
+            first_usn: 11,
+            next_usn: 19,
+            lowest_valid_usn: 11,
+        };
 
-        save_ntfs_volume_state(&connection, "D:\\", &first, &journal, true).unwrap();
-        save_ntfs_volume_state(&connection, "D:\\", &replacement, &journal, true).unwrap();
-        save_ntfs_volume_state(&connection, "E:\\", &first, &journal, true).unwrap();
+        save_ntfs_volume_state(&connection, "D:\\", &first, &first_journal, true).unwrap();
+        enqueue_volume_recovery(
+            &connection,
+            &first,
+            "D:\\",
+            41,
+            "enumeratingMft",
+            "temporary disconnect",
+            1_000,
+        )
+        .unwrap();
+        let first_stage = MftVolumeStage::create(&db, &first.volume_id, 41).unwrap();
+        let replacement_stage = MftVolumeStage::create(&db, &replacement.volume_id, 41).unwrap();
+        assert_ne!(first_stage.path, replacement_stage.path);
+        assert_eq!(
+            first_stage
+                .connection()
+                .unwrap()
+                .query_row(
+                    "SELECT volume FROM stage_metadata WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            first.volume_id
+        );
+        assert_eq!(
+            replacement_stage
+                .connection()
+                .unwrap()
+                .query_row(
+                    "SELECT volume FROM stage_metadata WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            replacement.volume_id
+        );
+
+        save_ntfs_volume_state(
+            &connection,
+            "D:\\",
+            &replacement,
+            &replacement_journal,
+            false,
+        )
+        .unwrap();
+        save_ntfs_volume_state(&connection, "E:\\", &first, &first_journal, true).unwrap();
+        enqueue_volume_recovery(
+            &connection,
+            &first,
+            "E:\\",
+            41,
+            "enumeratingMft",
+            "same volume remounted",
+            2_000,
+        )
+        .unwrap();
 
         assert_eq!(
             connection
@@ -6383,12 +6444,33 @@ mod tests {
                 .unwrap(),
             "E:\\"
         );
-        assert!(
-            load_ntfs_volume_state(&connection, &first.volume_id)
-                .unwrap()
-                .unwrap()
-                .snapshot_complete
-        );
+        let first_state = load_ntfs_volume_state(&connection, &first.volume_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_state.root, "E:\\");
+        assert_eq!(first_state.volume_serial, first.serial);
+        assert_eq!(first_state.journal_id, first_journal.journal_id);
+        assert_eq!(first_state.next_usn, first_journal.next_usn);
+        assert!(first_state.snapshot_complete);
+        let replacement_state = load_ntfs_volume_state(&connection, &replacement.volume_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(replacement_state.root, "D:\\");
+        assert_eq!(replacement_state.volume_serial, replacement.serial);
+        assert_eq!(replacement_state.journal_id, replacement_journal.journal_id);
+        assert_eq!(replacement_state.next_usn, replacement_journal.next_usn);
+        assert!(!replacement_state.snapshot_complete);
+
+        let recoveries = load_volume_recoveries(&connection).unwrap();
+        assert_eq!(recoveries.len(), 1);
+        assert_eq!(recoveries[0].volume_id, first.volume_id);
+        assert_eq!(recoveries[0].root, "E:\\");
+        assert_eq!(recoveries[0].generation, 41);
+        assert_eq!(recoveries[0].attempt_count, 2);
+        assert_eq!(recoveries[0].first_error, "temporary disconnect");
+        assert_eq!(recoveries[0].last_error, "same volume remounted");
+        drop(first_stage);
+        drop(replacement_stage);
         drop(connection);
         let _ = fs::remove_dir_all(directory);
     }

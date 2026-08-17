@@ -54,3 +54,15 @@ Evidence:
 - `concurrent_client_storm_is_bounded`: 1 passed
 - Windows System log, provider `Service Control Manager`, acceptance window beginning at the timestamp above: 0 LogCrate service events and 0 abnormal-stop events (`7031`/`7034`)
 - Installed `LogCrateIndex` service after acceptance: `Running`, manual start
+
+## 4.5 Stable-volume identity and drive-letter reuse matrix
+
+The stable-identity fixture now exercises both sides of drive-letter churn in one database. Volume A begins on `D:`, owns a generation-41 recovery obligation, an isolated MFT stage, USN journal 7/next-USN 9, and a completed snapshot. After the same Volume GUID remounts on `E:`, the same scope and recovery row move to `E:` while preserving generation, attempt history, USN position, and completion state.
+
+A different Volume GUID then occupies `D:` with its own serial, USN journal 17/next-USN 19, incomplete snapshot state, and separately tagged stage file. It does not inherit Volume A's recovery row, stage metadata, USN cursor, or completed flag. The database retains exactly two identities despite the mount changes.
+
+Evidence:
+
+- `stable_volume_state_survives_mount_changes_and_isolates_letter_reuse`
+- `volume_guid_paths_are_normalized_without_drive_letters`
+- MFT `stage_metadata.volume` and recovery/scoped-state assertions in the combined fixture
