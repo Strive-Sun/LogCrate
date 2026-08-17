@@ -13,7 +13,7 @@
 
 ## 3. 多卷协调与完成门禁
 
-- [ ] 3.1 将协调器改为 O(N) 轻量 scope 注册表、固定 `Q = 2W` runnable window 与 `W = 4` worker 池，实现分页补充、有界任务领取、完成即消费和按卷释放，保持共享 SQLite/Tantivy 单一协调写入。
+- [x] 3.1 将协调器改为 O(N) 轻量 scope 注册表、固定 `Q = 2W` runnable window 与 `W = 4` worker 池，实现分页补充、有界任务领取、完成即消费和按卷释放，保持共享 SQLite/Tantivy 单一协调写入。
 - [ ] 3.2 实现稳定 `volume_id`（规范化 Volume GUID path，卷序列号与文件系统类型校验）与盘符/挂载路径分离，将 scope、generation、暂存和 USN 恢复绑定到稳定身份，隔离盘符复用的不同卷。
 - [ ] 3.3 冻结带 generation 的 operation scope，逐卷跟踪发现、查询索引发布与查询计数核对，实现“所有范围查询成功 `ready`”门禁；后台持久化与事件交接另行达到 `converged`。
 - [ ] 3.4 实现绑定稳定 `volume_id` 的持久化按卷恢复队列、`waitingToRetry`/`recovering` 分类和确定性公平调度；存在首次任务时恢复任务最多占用 `max(1, floor(W / 2))` worker，并以服务状态变化、同一稳定身份卷重新上线、退避到期以及用户或操作系统结束应用后的下一次自然启动触发跨轮持续恢复；搜索功能不得主动关闭、重启或要求用户重启应用。

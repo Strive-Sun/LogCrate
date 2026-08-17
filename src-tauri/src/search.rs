@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{
     sync_channel, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 
@@ -49,6 +49,8 @@ const PERSISTENCE_USN_REPLAY_MAX_DURATION: Duration = Duration::from_secs(30);
 const PERSISTENCE_USN_REPLAY_MAX_RANGE: i64 = 0;
 #[cfg(windows)]
 const NTFS_VOLUME_WORKERS_MAX: usize = 4;
+#[cfg(windows)]
+const NTFS_VOLUME_RUNNABLE_WINDOW: usize = NTFS_VOLUME_WORKERS_MAX * 2;
 #[cfg(windows)]
 const MFT_STAGE_SCHEMA_VERSION: u32 = 1;
 #[cfg(windows)]
@@ -2764,37 +2766,93 @@ where
     if task_count == 0 {
         return Ok(true);
     }
-    let tasks = Arc::new(Mutex::new(VecDeque::from(tasks)));
     let worker_count = ntfs_volume_worker_count(task_count);
-    let (sender, receiver) = sync_channel(worker_count);
+    let (sender, receiver) = sync_channel(NTFS_VOLUME_RUNNABLE_WINDOW);
+    struct SchedulerState {
+        pending: VecDeque<(String, char)>,
+        next: usize,
+        tasks: Vec<(String, char)>,
+        stopping: bool,
+    }
+    let state = Arc::new((
+        Mutex::new(SchedulerState {
+            pending: VecDeque::with_capacity(NTFS_VOLUME_RUNNABLE_WINDOW),
+            next: 0,
+            tasks,
+            stopping: false,
+        }),
+        Condvar::new(),
+    ));
+    {
+        let (lock, _) = &*state;
+        let mut state = lock.lock().unwrap();
+        while state.pending.len() < NTFS_VOLUME_RUNNABLE_WINDOW {
+            let next = state.next;
+            let task = state.tasks.get(next).cloned();
+            let Some(task) = task else {
+                break;
+            };
+            state.next += 1;
+            state.pending.push_back(task);
+        }
+    }
     std::thread::scope(|scope| -> anyhow::Result<bool> {
         for _ in 0..worker_count {
-            let tasks = Arc::clone(&tasks);
+            let state = Arc::clone(&state);
             let sender = sender.clone();
             scope.spawn(move || loop {
-                if is_cancelled() {
-                    break;
-                }
-                let task = tasks.lock().unwrap().pop_front();
-                let Some((root, volume)) = task else {
-                    break;
+                let task = {
+                    let (lock, wake) = &*state;
+                    let mut state = lock.lock().unwrap();
+                    loop {
+                        if state.stopping {
+                            return;
+                        }
+                        if let Some(task) = state.pending.pop_front() {
+                            break task;
+                        }
+                        state = wake.wait(state).unwrap();
+                    }
                 };
+                let (root, volume) = task;
                 let result = work(root.clone(), volume);
                 if sender.send((root, result)).is_err() {
-                    break;
+                    return;
                 }
             });
         }
         drop(sender);
 
-        for _ in 0..task_count {
+        let mut consumed = 0;
+        while consumed < task_count {
             if is_cancelled() {
+                let (lock, wake) = &*state;
+                lock.lock().unwrap().stopping = true;
+                wake.notify_all();
                 return Ok(false);
             }
             let (root, result) = receiver.recv().map_err(|_| {
                 anyhow::anyhow!("NTFS volume worker stopped before reporting its result")
             })?;
-            consume(root, result)?;
+            if let Err(error) = consume(root, result) {
+                let (lock, wake) = &*state;
+                lock.lock().unwrap().stopping = true;
+                wake.notify_all();
+                return Err(error);
+            }
+            consumed += 1;
+            let (lock, wake) = &*state;
+            let mut state = lock.lock().unwrap();
+            let next = state.next;
+            let task = state.tasks.get(next).cloned();
+            if let Some(task) = task {
+                state.next += 1;
+                state.pending.push_back(task);
+                wake.notify_one();
+            } else if consumed == task_count {
+                state.stopping = true;
+                wake.notify_all();
+            }
         }
         Ok(true)
     })
@@ -5453,6 +5511,41 @@ mod tests {
 
         assert!(!completed);
         assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn volume_scheduler_keeps_large_scope_sets_bounded() {
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let consumed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tasks = (0..64)
+            .map(|index| (format!("volume-{index}"), 'V'))
+            .collect::<Vec<_>>();
+        let active_for_work = Arc::clone(&active);
+        let peak_for_work = Arc::clone(&peak);
+        let completed = run_ntfs_volume_tasks(
+            tasks,
+            &move |root, _| {
+                let current = active_for_work.fetch_add(1, Ordering::SeqCst) + 1;
+                peak_for_work.fetch_max(current, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(1));
+                active_for_work.fetch_sub(1, Ordering::SeqCst);
+                Ok(root)
+            },
+            &|| false,
+            |_, result| {
+                assert!(result.is_ok());
+                consumed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(completed);
+        assert_eq!(consumed.load(Ordering::SeqCst), 64);
+        assert!(peak.load(Ordering::SeqCst) <= NTFS_VOLUME_WORKERS_MAX);
+        assert_eq!(NTFS_VOLUME_RUNNABLE_WINDOW, NTFS_VOLUME_WORKERS_MAX * 2);
     }
 
     #[test]
