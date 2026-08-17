@@ -489,33 +489,6 @@ impl FileSearchManager {
         rebuild: bool,
     ) -> anyhow::Result<()> {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let now_ms = system_time_ms(SystemTime::now()).unwrap_or(0);
-        let scopes = self
-            .runtime_config()
-            .roots
-            .into_iter()
-            .map(|scope_key| IndexScopeSnapshot {
-                scope_key,
-                provider: "pending".into(),
-                phase: "pending".into(),
-                discovered_records: 0,
-                searchable_files: 0,
-                elapsed_ms: 0,
-                error: None,
-            })
-            .collect();
-        *self.operation_snapshot.lock().unwrap() = Some(IndexOperationSnapshot {
-            operation_id: format!("search-{generation}"),
-            generation,
-            started_ms: now_ms,
-            query_ready_ms: None,
-            persistence_completed_ms: None,
-            event_handoff_completed_ms: None,
-            converged_ms: None,
-            final_phase: "scanning".into(),
-            error: None,
-            scopes,
-        });
         self.cancel.store(false, Ordering::SeqCst);
         self.stop_watcher();
         {
@@ -536,6 +509,7 @@ impl FileSearchManager {
             status.providers = planned_provider_statuses(&config.roots);
             status.error = None;
         }
+        self.begin_operation_snapshot(generation, &self.config.lock().unwrap().roots);
         self.emit_status(&app);
         let config = self.runtime_config();
 
@@ -598,18 +572,17 @@ impl FileSearchManager {
                             None,
                         );
                     }
+                    if let Err(error) = manager.mark_operation_query_ready(generation) {
+                        manager.stop_watcher();
+                        manager.finish_with_error(&app, generation, error);
+                        return;
+                    }
                     {
                         let mut status = manager.status.lock().unwrap();
                         status.phase = "ready".into();
                         status.error = None;
                     }
                     manager.corruption_recovery.store(false, Ordering::Release);
-                    if let Some(snapshot) = manager.operation_snapshot.lock().unwrap().as_mut() {
-                        let now = system_time_ms(SystemTime::now()).unwrap_or(0);
-                        snapshot.query_ready_ms = Some(now);
-                        snapshot.final_phase = "ready".into();
-                        snapshot.converged_ms = Some(now);
-                    }
                     manager.emit_status(&app);
                     eprintln!(
                         "[search-index] generation={generation} query-ready elapsed_ms={}",
@@ -662,11 +635,10 @@ impl FileSearchManager {
                         manager.finish_with_error(&app, generation, error);
                         return;
                     }
-                    if let Some(snapshot) = manager.operation_snapshot.lock().unwrap().as_mut() {
-                        let now = system_time_ms(SystemTime::now()).unwrap_or(0);
-                        snapshot.persistence_completed_ms = Some(now);
-                        snapshot.event_handoff_completed_ms = Some(now);
-                        snapshot.converged_ms = Some(now);
+                    if let Err(error) = manager.mark_operation_persistence_complete(generation) {
+                        manager.stop_watcher();
+                        manager.finish_with_error(&app, generation, error);
+                        return;
                     }
                     manager.persistence_recovery.store(false, Ordering::Release);
                     if manager.is_cancelled(generation) {
@@ -681,6 +653,10 @@ impl FileSearchManager {
                         receiver,
                         handoff_paths,
                     );
+                    if let Err(error) = manager.mark_operation_converged(generation) {
+                        manager.finish_with_error(&app, generation, error);
+                        return;
+                    }
                     manager.refresh_counts();
                     manager.emit_status(&app);
                 }
@@ -706,6 +682,7 @@ impl FileSearchManager {
                 self.cancel.store(false, Ordering::SeqCst);
                 let recover_persistence = self.persistence_recovery.load(Ordering::Acquire);
                 self.status.lock().unwrap().phase = "scanning".into();
+                self.begin_operation_snapshot(generation, &config.roots);
                 let manager = Arc::clone(self);
                 std::thread::spawn(move || {
                     let _operation = manager
@@ -921,6 +898,14 @@ impl FileSearchManager {
                         }
                         manager.persistence_recovery.store(false, Ordering::Release);
                     }
+                    if let Err(error) = manager.mark_operation_query_ready(generation) {
+                        manager.finish_with_error(&app, generation, error);
+                        return;
+                    }
+                    if let Err(error) = manager.mark_operation_persistence_complete(generation) {
+                        manager.finish_with_error(&app, generation, error);
+                        return;
+                    }
                     let handoff_paths = collect_event_paths_bounded(&receiver);
                     if manager.is_cancelled(generation) {
                         manager.stop_watcher();
@@ -933,6 +918,10 @@ impl FileSearchManager {
                         receiver,
                         handoff_paths,
                     );
+                    if let Err(error) = manager.mark_operation_converged(generation) {
+                        manager.finish_with_error(&app, generation, error);
+                        return;
+                    }
                     manager.status.lock().unwrap().phase = "ready".into();
                     manager.refresh_counts();
                     manager.emit_status(&app);
@@ -1472,7 +1461,7 @@ impl FileSearchManager {
         drop(status);
         if let Some(snapshot) = self.operation_snapshot.lock().unwrap().as_mut() {
             snapshot.final_phase = "error".into();
-            snapshot.converged_ms = Some(system_time_ms(SystemTime::now()).unwrap_or(0));
+            snapshot.converged_ms = None;
             snapshot.error = Some(error_message);
         }
         self.emit_status(app);
@@ -1502,6 +1491,93 @@ impl FileSearchManager {
             status.clone()
         };
         app.emit_search_status(snapshot);
+    }
+
+    fn begin_operation_snapshot(&self, generation: u64, roots: &[String]) {
+        let scopes = roots
+            .iter()
+            .cloned()
+            .map(|scope_key| IndexScopeSnapshot {
+                scope_key,
+                provider: "pending".into(),
+                phase: "pending".into(),
+                discovered_records: 0,
+                searchable_files: 0,
+                elapsed_ms: 0,
+                error: None,
+            })
+            .collect();
+        *self.operation_snapshot.lock().unwrap() = Some(IndexOperationSnapshot {
+            operation_id: format!("search-{generation}"),
+            generation,
+            started_ms: system_time_ms(SystemTime::now()).unwrap_or(0),
+            query_ready_ms: None,
+            persistence_completed_ms: None,
+            event_handoff_completed_ms: None,
+            converged_ms: None,
+            final_phase: "scanning".into(),
+            error: None,
+            scopes,
+        });
+    }
+
+    fn mark_operation_query_ready(&self, generation: u64) -> anyhow::Result<()> {
+        self.sync_operation_scopes();
+        let mut operation = self.operation_snapshot.lock().unwrap();
+        let snapshot = operation
+            .as_mut()
+            .filter(|snapshot| snapshot.generation == generation)
+            .ok_or_else(|| anyhow::anyhow!("index operation generation is no longer active"))?;
+        if snapshot.scopes.is_empty() || snapshot.scopes.iter().any(|scope| scope.phase != "ready")
+        {
+            anyhow::bail!("not all index operation scopes published a query snapshot");
+        }
+        let index = self.query_index.lock().unwrap();
+        let index = index
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("query index is unavailable at ready gate"))?;
+        for scope in &snapshot.scopes {
+            let actual = index.num_docs_for_scope(&scope.scope_key)?;
+            if actual != scope.searchable_files {
+                anyhow::bail!(
+                    "query-index scope count mismatch scope={} expected={} actual={}",
+                    scope.scope_key,
+                    scope.searchable_files,
+                    actual
+                );
+            }
+        }
+        let now = system_time_ms(SystemTime::now()).unwrap_or(0);
+        snapshot.query_ready_ms = Some(now);
+        snapshot.final_phase = "ready".into();
+        snapshot.converged_ms = None;
+        Ok(())
+    }
+
+    fn mark_operation_persistence_complete(&self, generation: u64) -> anyhow::Result<()> {
+        let mut operation = self.operation_snapshot.lock().unwrap();
+        let snapshot = operation
+            .as_mut()
+            .filter(|snapshot| snapshot.generation == generation)
+            .ok_or_else(|| anyhow::anyhow!("index operation generation is no longer active"))?;
+        snapshot.persistence_completed_ms = Some(system_time_ms(SystemTime::now()).unwrap_or(0));
+        Ok(())
+    }
+
+    fn mark_operation_converged(&self, generation: u64) -> anyhow::Result<()> {
+        let mut operation = self.operation_snapshot.lock().unwrap();
+        let snapshot = operation
+            .as_mut()
+            .filter(|snapshot| snapshot.generation == generation)
+            .ok_or_else(|| anyhow::anyhow!("index operation generation is no longer active"))?;
+        if snapshot.query_ready_ms.is_none() || snapshot.persistence_completed_ms.is_none() {
+            anyhow::bail!("index operation cannot converge before ready and persistence");
+        }
+        let now = system_time_ms(SystemTime::now()).unwrap_or(0);
+        snapshot.event_handoff_completed_ms = Some(now);
+        snapshot.converged_ms = Some(now);
+        snapshot.final_phase = "converged".into();
+        Ok(())
     }
 
     fn sync_operation_scopes(&self) {
@@ -5250,6 +5326,94 @@ mod tests {
         assert!(diagnostic.contains("staging=false"));
         assert!(diagnostic.contains("previous=false"));
         assert!(diagnostic.contains("concurrent_queries=0"));
+        drop(manager);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn operation_ready_and_converged_gates_require_all_scope_counts_and_handoff() {
+        let directory = test_directory("operation-completion-gates");
+        let manager = FileSearchManager::new(directory.clone());
+        let roots = vec!["C:\\".to_string(), "D:\\".to_string()];
+        manager.begin_operation_snapshot(41, &roots);
+        {
+            let mut status = manager.status.lock().unwrap();
+            status.providers = planned_provider_statuses(&roots);
+            for provider in &mut status.providers {
+                provider.provider = "folderScan".into();
+                provider.phase = "ready".into();
+                provider.stage = "ready".into();
+                provider.searchable_files = 1;
+            }
+        }
+        manager
+            .query_index
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .add_batch(&[
+                SearchIndexEntry {
+                    path: "C:\\one.log".into(),
+                    name: "one.log".into(),
+                    scope_key: "C:\\".into(),
+                    is_log: true,
+                    is_archive: false,
+                },
+                SearchIndexEntry {
+                    path: "D:\\two.log".into(),
+                    name: "two.log".into(),
+                    scope_key: "D:\\".into(),
+                    is_log: true,
+                    is_archive: false,
+                },
+            ])
+            .unwrap();
+        manager.commit_query_index().unwrap();
+
+        manager.mark_operation_query_ready(41).unwrap();
+        {
+            let snapshot = manager.operation_snapshot.lock().unwrap().clone().unwrap();
+            assert!(snapshot.query_ready_ms.is_some());
+            assert!(snapshot.converged_ms.is_none());
+            assert_eq!(snapshot.final_phase, "ready");
+        }
+        assert!(manager.mark_operation_converged(41).is_err());
+        manager.mark_operation_persistence_complete(41).unwrap();
+        manager.mark_operation_converged(41).unwrap();
+        let snapshot = manager.operation_snapshot.lock().unwrap().clone().unwrap();
+        assert!(snapshot.event_handoff_completed_ms.is_some());
+        assert!(snapshot.converged_ms.is_some());
+        assert_eq!(snapshot.final_phase, "converged");
+
+        drop(manager);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn operation_ready_gate_rejects_scope_count_mismatch() {
+        let directory = test_directory("operation-ready-count-mismatch");
+        let manager = FileSearchManager::new(directory.clone());
+        manager.begin_operation_snapshot(42, &["C:\\".into()]);
+        {
+            let mut status = manager.status.lock().unwrap();
+            status.providers = planned_provider_statuses(&["C:\\".into()]);
+            status.providers[0].phase = "ready".into();
+            status.providers[0].searchable_files = 1;
+        }
+        let error = manager
+            .mark_operation_query_ready(42)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("scope count mismatch"));
+        assert!(manager
+            .operation_snapshot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .query_ready_ms
+            .is_none());
         drop(manager);
         fs::remove_dir_all(directory).unwrap();
     }
