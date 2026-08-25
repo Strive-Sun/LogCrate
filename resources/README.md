@@ -7,8 +7,10 @@
 
 重新生成应用图标时，以 `icons/app/logcrate.svg` 为唯一母版，并将输出目录指定为 `resources/icons/app`，不要重新创建 `src-tauri/icons`。
 
-README 主界面截图约定：
+README 截图约定：
 
 - `screenshots/logcrate-hero-light.png`：浅色主题。
 - `screenshots/logcrate-hero-dark.png`：深色主题。
-- 两张图片必须保持相同尺寸，单张不超过 1 MiB，且不得包含真实用户名、绝对路径、IP 或敏感日志。
+- `screenshots/logcrate-ai-analysis.png`：真实程序运行的 AI 分析工作区演示。
+- `screenshots/logcrate-level-filter.png`：真实程序运行的日志级别筛选演示。
+- 两张主界面图片必须保持相同尺寸；全部截图单张不超过 1 MiB，且不得包含真实用户名、绝对路径、外部 IP 或敏感日志。

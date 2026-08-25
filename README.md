@@ -104,6 +104,32 @@ flowchart LR
 
 > LogCrate is currently a **read-only viewer**. It can rename or delete files on disk, but it cannot edit log content or create, modify, or repack archives.
 
+## Feature snapshots
+
+### Analyze selected evidence
+
+<p align="center">
+  <img
+    src="resources/screenshots/logcrate-ai-analysis.png"
+    alt="LogCrate AI analysis workspace showing selected fictional logs and a locally generated demo response"
+    width="1200"
+  >
+  <br>
+  <sub>Captured from a real LogCrate run. The logs and response are fictional; this documentation run used a local loopback OpenAI-compatible endpoint and no external service.</sub>
+</p>
+
+### Filter by log level
+
+<p align="center">
+  <img
+    src="resources/screenshots/logcrate-level-filter.png"
+    alt="LogCrate level filter selecting ERROR and WARNING from fictional demo logs"
+    width="1200"
+  >
+  <br>
+  <sub>The real field filter selected ERROR and WARNING, reducing 420 fictional demo entries to 140 matching rows.</sub>
+</p>
+
 ## Get started in 5 minutes
 
 ### 1. Install

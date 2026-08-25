@@ -104,6 +104,32 @@ flowchart LR
 
 > LogCrate 当前是**只读查看器**。可以重命名或删除磁盘文件，但不能编辑日志正文，也不会创建、修改或重新打包归档。
 
+## 功能截图
+
+### 分析选中的日志证据
+
+<p align="center">
+  <img
+    src="resources/screenshots/logcrate-ai-analysis.png"
+    alt="LogCrate AI 日志分析工作区，展示选中的虚构日志与本地生成的演示回复"
+    width="1200"
+  >
+  <br>
+  <sub>截图来自 LogCrate 真实运行。本次文档演示只使用本机回环地址上的 OpenAI 兼容端点，日志与回复均为虚构内容，未连接外部服务。</sub>
+</p>
+
+### 按日志级别筛选
+
+<p align="center">
+  <img
+    src="resources/screenshots/logcrate-level-filter.png"
+    alt="LogCrate 日志级别筛选，选中虚构演示日志中的 ERROR 与 WARNING"
+    width="1200"
+  >
+  <br>
+  <sub>软件实际选择 ERROR 与 WARNING，把 420 条虚构演示日志筛选为 140 条匹配结果。</sub>
+</p>
+
 ## 5 分钟上手
 
 ### 1. 安装
