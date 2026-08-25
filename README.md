@@ -69,32 +69,36 @@ flowchart LR
 - **Discover logs as they arrive** — recursively watch directories and notify even when new logs land deep inside unopened subfolders.
 - **Read archives directly** — browse ZIP, 7z, RAR, TAR and compressed streams like folders without creating a scattered manual extraction directory.
 - **Expand nested archives lazily** — recognize archive entries inside another archive and read the next layer only when you expand it.
+- **Preview DOCX reports** — read paragraphs, headings, lists, tables, and embedded PNG/JPEG images in a dedicated virtualized document view.
 - **Open large logs** — build line indexes in the background and load only the visible range instead of putting a multi-gigabyte file into memory.
 - **Find files and important lines quickly** — search local file names and paths, use `Ctrl+F` inside a log, or filter recognized time, level, discrete, and text fields.
+- **Analyze selected evidence when you choose** — connect an OpenAI-compatible provider, confirm exactly what will be sent, and continue the investigation in an encrypted local conversation history.
 - **Keep investigation context** — each tab retains its own scroll position, encoding, and loaded content.
 - **Resume where you stopped** — restore tabs and layouts after restart, and react safely when a source changes or disappears.
-- **Local-first processing** — logs stay on your machine; no cloud upload service is required.
+- **Local-first processing** — watching, previewing, indexing, and search stay on your machine; only explicitly confirmed AI context is sent to your selected provider.
 
 ## Highlights
 
-| Capability                       | What it does                                                                                                               |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Live directory monitoring        | Reflects external create, delete, rename, and modify operations; discovers new logs at any directory depth                 |
-| Archives without manual extraction | Reads ZIP, 7z, RAR4/RAR5, TAR, tar.gz/bz2/xz/zst and single-file compressed streams directly                              |
-| Plain log viewing                | Reads `.log`, `.txt`, `.out`, `.err`, `.trace`, `.json`, `.csv`, and other recognized text files                           |
-| Drag and start                   | Dropping one file watches its parent; dropping a folder watches that folder; dropping a text log also opens and locates it |
-| Multi-file tabs                  | Deduplicates repeated opens, moves overflow into a More menu, and preserves per-file reading state                         |
-| Virtual scrolling for large logs | Uses line-offset indexing, windowed reads, and bounded caches so memory usage does not scale with the full file            |
-| Encoding support                 | Detects UTF-8, GBK / GB18030, UTF-16LE / UTF-16BE, with manual override                                                    |
-| In-log find and highlighting     | Uses `Ctrl+F` for forward/reverse, whole-word, case-sensitive, wrapping navigation and visible match highlighting           |
-| Adaptive field filtering         | Recognizes common log layouts and filters time ranges, levels, discrete values, and text with editable, reusable layouts   |
-| Local file search                | Optionally indexes file names and paths across local volumes, supports fast queries, log preview, and adding result folders |
-| Workspace restoration            | Restores tabs, active file, ordering, encoding and saved field layouts, while handling changed or missing sources safely    |
-| New-log notifications            | Shows an unread badge, locates individual arrivals, and supports marking everything as read                                |
-| Suffix filtering                 | Controls which file extensions appear and trigger notifications, with an option to show everything                         |
-| Signed automatic updates         | Supports startup/manual checks, progress, signature verification and install; Windows prefers the Pages mirror with GitHub fallback |
-| Desktop behavior                 | Includes three UI templates, light/dark themes, single-instance restore, close-to-tray, auto-hiding scrollbars, and a resizable directory pane |
-| UI languages                     | Follows the system by default and switches instantly between English and Simplified Chinese in Settings                    |
+| Capability                         | What it does                                                                                                                                                                    |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Live directory monitoring          | Reflects external create, delete, rename, and modify operations; discovers new logs at any directory depth                                                                      |
+| Archives without manual extraction | Reads ZIP, 7z, RAR4/RAR5, TAR, tar.gz/bz2/xz/zst and single-file compressed streams directly                                                                                    |
+| Plain log viewing                  | Reads `.log`, `.txt`, `.out`, `.err`, `.trace`, `.json`, `.csv`, and other recognized text files                                                                                |
+| Simplified DOCX preview            | Shows semantic paragraphs, headings, numbered/bulleted lists, merged tables, PNG/JPEG images, and document text search                                                          |
+| Drag and start                     | Dropping one file watches its parent; dropping a folder watches that folder; dropping a text log or DOCX also opens and locates it                                              |
+| Multi-file tabs                    | Deduplicates repeated opens, moves overflow into a More menu, and preserves per-file reading state                                                                              |
+| Virtual scrolling for large logs   | Uses line-offset indexing, windowed reads, and bounded caches so memory usage does not scale with the full file                                                                 |
+| Encoding support                   | Detects UTF-8, GBK / GB18030, UTF-16LE / UTF-16BE, with manual override                                                                                                         |
+| In-log find and highlighting       | Uses `Ctrl+F` for forward/reverse, whole-word, case-sensitive, wrapping navigation and visible match highlighting                                                               |
+| Adaptive field filtering           | Recognizes common log layouts and filters time ranges, levels, discrete values, and text with editable, reusable layouts                                                        |
+| Local file search                  | Persistently indexes file names and paths across local volumes, with bounded multi-volume scheduling, recovery, and log preview                                                 |
+| AI-assisted log analysis           | Sends only confirmed selections, snippets, or bounded text attachments to a configured compatible provider; supports streaming replies, follow-ups, and encrypted local history |
+| Workspace restoration              | Restores tabs, active file, ordering, encoding and saved field layouts, while handling changed or missing sources safely                                                        |
+| New-item notifications             | Shows an unread badge for matching logs, archives, and DOCX reports; locates arrivals and supports marking everything as read                                                   |
+| Suffix filtering                   | Controls which file extensions appear and trigger notifications, with an option to show everything                                                                              |
+| Signed automatic updates           | Supports startup/manual checks, progress, signature verification and install; Windows prefers the Pages mirror with GitHub fallback                                             |
+| Desktop behavior                   | Includes four UI templates, light/dark themes, single-instance restore, close-to-tray, auto-hiding scrollbars, and a resizable directory pane                                   |
+| UI languages                       | Follows the system by default and switches instantly between English and Simplified Chinese in Settings                                                                         |
 
 > LogCrate is currently a **read-only viewer**. It can rename or delete files on disk, but it cannot edit log content or create, modify, or repack archives.
 
@@ -120,21 +124,21 @@ On first launch, click **“+ Add watched folder”** at the bottom of the left 
 
 LogCrate persists watched folders and restores them on the next launch. Watch roots are normalized by parent-child coverage, so a child is not watched twice after its parent has been added.
 
-### 3. Open a log
+### 3. Open a log or DOCX report
 
 Start reading in any of these ways:
 
-1. Click a plain log file in the directory tree.
+1. Click a plain log file or DOCX document in the directory tree.
 2. Expand an archive, then expand nested archives as needed and click a log entry.
-3. Drag a log, archive, or folder from the file manager into LogCrate.
+3. Drag a log, DOCX document, archive, or folder from the file manager into LogCrate.
 
-When you drop a text log, LogCrate adds its parent folder, expands the tree, locates the file, and opens it. Dropping an archive or another file adds its containing folder to monitoring. Dropping a folder watches that folder itself.
+When you drop a text log or valid `.docx`, LogCrate adds its parent folder, expands the tree, locates the file, and opens the matching viewer. Dropping an archive or another file adds its containing folder to monitoring. Dropping a folder watches that folder itself.
 
 > One dropped path is handled at a time today. Multi-file drag and drop is on the roadmap.
 
 ### 4. View multiple files
 
-Click more logs to create tabs:
+Click more logs or documents to create tabs:
 
 - opening the same file again activates its existing tab instead of creating a duplicate;
 - tabs that no longer fit move into the **More** menu;
@@ -142,50 +146,61 @@ Click more logs to create tabs:
 - hovering a tab name shows the full absolute path;
 - clicking `×` releases that tab's viewing session.
 
-The backend keeps a bounded number of active sessions. An older tab may become dormant; clicking it transparently rebuilds its index and restores the selected encoding.
+The backend keeps a bounded number of active log sessions. An older log tab may become dormant; clicking it transparently rebuilds its index and restores the selected encoding.
 
 ### 5. Find and filter log content
 
 - Press `Ctrl+F` in the active log to search forward or backward, match whole words, respect case, and optionally wrap at the end.
+- In a DOCX preview, `Ctrl+F` searches paragraph, list, table-cell, and image-alt text with the same direction, whole-word, case, and wrap options.
 - For recognized layouts, use the field bar to filter by minute-precision time range, level/discrete values, or text content.
 - Choose **matching rows only** or **highlight matches**; optionally keep unparsed rows visible.
 - Drag field boundaries or rename, split, merge, and retype fields. Confirmed layouts are restored for the same source later.
 
-### 6. Fix encoding and filter files
+### 6. Analyze selected logs (optional)
+
+Configure an OpenAI-compatible **Chat Completions** or **Responses** provider in Settings. The API key is stored in Windows Credential Manager or macOS Keychain; non-local plain HTTP endpoints are rejected unless you explicitly authorize that provider.
+
+Select log text, right-click **AI analysis**, review the provider and context, then confirm the send. The right-side workspace supports streaming responses, follow-up questions, snippets collected from other tabs, and up to five bounded text/log attachments. Successful conversations are encrypted locally and can be restored, deleted individually, or cleared.
+
+> This is the only workflow that sends log content off the device. Nothing is sent until you explicitly confirm or send it, and enforced limits apply to the selections, snippets, questions, and attachments you chose.
+
+### 7. Fix encoding and filter files
 
 - **Garbled text** — use the encoding selector at the bottom-left of the content pane to choose UTF-8, GBK, GB18030, or UTF-16.
 - **Too many files** — use the suffix filter beside “Watched folders” to keep only the extensions you care about.
 - **Need another file temporarily** — enable “Show all”; a currently open file remains visible even if it no longer matches the filter.
 
-### 7. Search local files (optional)
+### 8. Search local files
 
-Enable **Search local files** in Settings and restart LogCrate. The Search entry can then query indexed file names and paths across available volumes. Double-click a log result to open it, or add its containing folder to monitoring from the context menu.
+Use the top **Search** entry while file search is enabled to query indexed file names and paths across available volumes. Double-click a log result to open it, or add its containing folder to monitoring from the context menu. The Settings switch changes the search lifecycle on the next LogCrate launch.
 
-On Windows, LogCrate uses a bounded index service for fast MFT/USN discovery and incremental recovery. Search is disabled by default and its index runtime is not initialized when the feature is off.
+On Windows, LogCrate uses a bounded index service for fast MFT/USN discovery and incremental recovery. Work is limited to four active workers and an eight-item runnable window, so additional volumes queue without multiplying heavy resources. Explicitly disabling search prevents its index runtime from starting on the next launch.
 
-### 8. Handle newly arrived logs
+### 9. Handle newly arrived logs
 
-When a new supported archive or matching log appears under a watched folder, the bell in the top-right shows an unread count. Clicking a notification expands the directory chain and locates the target. “Mark all as read” clears notifications only; it never deletes files.
+When a new supported archive, matching log, or matching DOCX appears under a watched folder, the bell in the top-right shows an unread count. Clicking a notification expands the directory chain and locates the target. “Mark all as read” clears notifications only; it never deletes files.
 
 ## Common tasks
 
-| I want to…                             | Action                                  | Result                                                                |
-| -------------------------------------- | --------------------------------------- | --------------------------------------------------------------------- |
-| Watch another folder                   | Click “+ Add watched folder”            | Saves the folder and starts recursive monitoring immediately          |
-| Inspect a local log quickly            | Drop one log into the window            | Adds its parent, locates the file, and opens it                       |
-| Watch a whole folder                   | Drop the folder into the window         | Adds that folder as a watch root                                      |
-| Read a log inside an archive           | Expand each required layer and click a log | Lazily opens nested archives without manual extraction             |
-| Distinguish same-named files           | Hover a tab                             | Shows the absolute disk path and archive entry path                   |
-| Change text encoding                   | Use the encoding menu below the content | Rebuilds the line index in the background                             |
-| Find text in the active log            | Press `Ctrl+F`                          | Navigates and highlights matching keyword fragments                   |
-| Filter structured fields               | Use controls above the log content      | Filters or highlights rows by time, level, discrete value, or text    |
-| Search local file names and paths       | Enable Search in Settings, restart, then use the top Search entry | Queries the local metadata index without uploading content |
-| Locate a path in the file manager      | Right-click a file or folder            | Opens the system file manager at that path                            |
-| Stop watching but keep files           | Right-click a watch root → Remove watch | Removes monitoring without changing disk content                      |
-| Delete a file or directory             | Right-click → Delete, then confirm      | Moves it to the system recycle bin instead of permanently deleting it |
-| Keep LogCrate running in the background | Click the window close button          | Hides to the tray while monitoring continues                          |
-| Exit completely                         | Tray menu → Exit LogCrate              | Stops monitoring and terminates the process                           |
-| Check for a new release                | Settings → Check for updates            | Downloads, verifies, and installs an official release                 |
+| I want to…                              | Action                                     | Result                                                                         |
+| --------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------ |
+| Watch another folder                    | Click “+ Add watched folder”               | Saves the folder and starts recursive monitoring immediately                   |
+| Inspect a local log quickly             | Drop one log into the window               | Adds its parent, locates the file, and opens it                                |
+| Watch a whole folder                    | Drop the folder into the window            | Adds that folder as a watch root                                               |
+| Read a log inside an archive            | Expand each required layer and click a log | Lazily opens nested archives without manual extraction                         |
+| Preview a DOCX report                   | Click or drop a valid `.docx`              | Opens a searchable, virtualized view of its text, tables, and supported images |
+| Distinguish same-named files            | Hover a tab                                | Shows the absolute disk path and archive entry path                            |
+| Change text encoding                    | Use the encoding menu below the content    | Rebuilds the line index in the background                                      |
+| Find text in the active log             | Press `Ctrl+F`                             | Navigates and highlights matching keyword fragments                            |
+| Filter structured fields                | Use controls above the log content         | Filters or highlights rows by time, level, discrete value, or text             |
+| Analyze selected log evidence           | Select text → right-click → AI analysis    | Confirms and sends bounded context to your configured provider                 |
+| Search local file names and paths       | Use the top Search entry while enabled     | Queries the local metadata index without uploading file contents               |
+| Locate a path in the file manager       | Right-click a file or folder               | Opens the system file manager at that path                                     |
+| Stop watching but keep files            | Right-click a watch root → Remove watch    | Removes monitoring without changing disk content                               |
+| Delete a file or directory              | Right-click → Delete, then confirm         | Moves it to the system recycle bin instead of permanently deleting it          |
+| Keep LogCrate running in the background | Click the window close button              | Hides to the tray while monitoring continues                                   |
+| Exit completely                         | Tray menu → Exit LogCrate                  | Stops monitoring and terminates the process                                    |
+| Check for a new release                 | Settings → Check for updates               | Downloads, verifies, and installs an official release                          |
 
 ## Support matrix
 
@@ -196,19 +211,23 @@ When a new supported archive or matching log appears under a watched folder, the
 - **Single-file streams** — gzip, bzip2, xz, and zstd synthesize one directly readable log entry.
 - **Nested archives** — any supported format can contain another; each next layer is read only after you explicitly expand it (maximum depth: 5).
 - **Text** — common log extensions plus files recognized as text through content sampling.
+- **Documents** — `.docx` simplified preview for paragraphs, headings, lists, merged tables, PNG/JPEG images, and text search; legacy `.doc` is not supported.
 - **Encodings** — UTF-8, GBK, GB18030, UTF-16LE, and UTF-16BE.
 - **Interface languages** — English and Simplified Chinese, with a persisted system/manual preference.
 - **Log layouts** — bracketed application logs, Chromium/CEF-style logs, and Android logcat can be recognized automatically; other layouts fall back to an editable body field.
-- **Local search** — optional persistent file-name/path indexing, with fast Windows NTFS MFT/USN discovery and cross-platform fallback providers.
+- **Local search** — persistent file-name/path indexing with bounded multi-volume scheduling, fast Windows NTFS MFT/USN discovery, recovery, and cross-platform fallback providers.
+- **AI providers** — configurable OpenAI-compatible Chat Completions and Responses endpoints, including explicitly authorized private HTTP endpoints.
 
 ### Current boundaries
 
-- Read-only preview; source files are never edited. A cached snapshot may be exported after its source is deleted.
+- Read-only preview; source files are never edited. A cached log snapshot may be exported after its source is deleted. Individual decoded log streams are limited to 2 GiB.
 - One path per drag-and-drop operation.
 - No archive creation, modification, entry deletion, or repacking.
 - Password-protected and multi-volume 7z/RAR archives are detected but not opened yet.
 - WIM disk-image containers are not supported. WIM support requires separate native-dependency and cross-platform packaging work.
-- Local file search is opt-in and applies after restart; file contents remain local and are not uploaded.
+- DOCX is a semantic preview rather than a Word layout engine: complex typography, exact pagination, charts, formulas, comments, tracked changes, headers/footers, embedded objects, macros, and non-PNG/JPEG images are not reproduced.
+- File-search setting changes apply on the next launch. The index stores local file metadata, not file contents, and does not upload it.
+- AI analysis is optional and is the only feature that may send log content to another service. Only explicitly confirmed selections, snippets, questions, and bounded text/log attachments go to the selected provider; compatibility and data handling also depend on that provider.
 - Windows automatic updates prefer the Cloudflare Pages mirror for the signed NSIS package and fall back to GitHub; MSI and macOS packages remain on GitHub.
 
 ## Roadmap
@@ -234,21 +253,22 @@ The roadmap describes direction, not a promised version or delivery date. Issues
 - [ ] **Search indexes for huge logs** — accelerate repeated queries without loading the complete file into memory.
 - [ ] **Export investigation snippets** — export the smallest useful range by selected lines or time window for issues and team sharing.
 - [ ] **Reusable rule sets** — save combinations of levels, keywords, colors, and suffixes, then switch between projects quickly.
-- [ ] **AI-assisted log analysis** — summarize explicitly selected log ranges, identify abnormal patterns, and suggest likely causes and investigation steps, with configurable local or remote models and clear redaction controls before any content is sent.
 
 ## How it works
 
-LogCrate is built with Tauri 2. The frontend owns interaction and virtualized lists; the Rust backend owns file watching, archive access, encoding detection, line/field indexing, and local file search.
+LogCrate is built with Tauri 2. The frontend owns interaction and virtualized lists; the Rust backend owns file watching, archive and DOCX access, encoding detection, line/field indexing, local file search, and bounded AI-provider communication.
 
-| Layer              | Responsibility                                                                                         |
-| ------------------ | ------------------------------------------------------------------------------------------------------ |
-| React + TypeScript | Directory tree, notifications, tabs, settings, field filters, search UI, and the virtualized log view   |
-| Tauri IPC          | Commands and progress events between the UI and local Rust capabilities                                |
-| Rust watcher       | Recursive directory monitoring, event coalescing, file stability checks, and configuration persistence |
-| ArchiveReader      | Bounded streaming access for ZIP, 7z, RAR, TAR, compressed streams, nested archives, and plain text     |
-| SessionManager     | Encoding detection, line/field indexes, windowed filtering, bounded-session LRU, and temporary-resource cleanup |
-| SearchManager      | Persistent SQLite/Tantivy metadata index, bounded multi-volume scheduling, queries, and recovery       |
-| Windows index service | Privileged MFT/USN discovery through a bounded local IPC protocol; repairable from Settings         |
+| Layer                 | Responsibility                                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| React + TypeScript    | Directory tree, notifications, tabs, settings, field filters, search/AI UI, and virtualized log/DOCX views         |
+| Tauri IPC             | Commands and progress events between the UI and local Rust capabilities                                            |
+| Rust watcher          | Recursive directory monitoring, event coalescing, file stability checks, and configuration persistence             |
+| ArchiveReader         | Bounded streaming access for ZIP, 7z, RAR, TAR, compressed streams, nested archives, plain text, and DOCX packages |
+| SessionManager        | Encoding detection, line/field indexes, windowed filtering, bounded-session LRU, and temporary-resource cleanup    |
+| DocxSessionManager    | Semantic document blocks, paged text/table delivery, lazy image reads, and bounded preview caches                  |
+| SearchManager         | Persistent SQLite/Tantivy metadata index, bounded multi-volume scheduling, queries, and recovery                   |
+| Windows index service | Privileged MFT/USN discovery through a bounded local IPC protocol; repairable from Settings                        |
+| AI backend            | Provider validation, bounded streaming requests, platform-keychain secrets, and AES-256-GCM conversation history   |
 
 Read the [technical design](docs/technical-design.md) for implementation detail and [CHANGELOG.md](CHANGELOG.md) for version history.
 
@@ -306,7 +326,10 @@ logcrate/
 │   └── util/             # Pure state helpers and frontend unit tests
 ├── src-tauri/            # Rust + Tauri backend
 │   └── src/
-│       ├── archive/      # Archive registry, format readers, nested streams, and plain text
+│       ├── archive/      # Archive registry, format readers, nested streams, plain text, and DOCX parsing
+│       ├── docx_session.rs # Virtualized DOCX session and image access
+│       ├── ai.rs         # Compatible-provider requests, limits, streaming, and prompts
+│       ├── ai_history.rs # Encrypted local AI conversation history
 │       ├── index.rs      # Line/field indexes, encodings, filters, caches, and session lifecycle
 │       ├── search.rs     # Local search orchestration, persistence, recovery, and platform providers
 │       ├── search_index.rs # Tantivy query index and snapshot switching
