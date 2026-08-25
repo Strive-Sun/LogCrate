@@ -43,10 +43,12 @@
     >
     <img
       src="resources/screenshots/logcrate-hero-light.png"
-      alt="LogCrate 主界面预览，展示监控目录、展开的 ZIP、日志选项卡和日志正文"
+      alt="LogCrate 主界面预览，展示虚构演示目录、展开的归档、日志选项卡、结构化日志正文、AI 入口和字段筛选控件"
       width="1200"
     >
   </picture>
+  <br>
+  <sub>上图中的路径、文件名和日志内容均为虚构演示数据。</sub>
 </p>
 
 ---

@@ -43,10 +43,12 @@
     >
     <img
       src="resources/screenshots/logcrate-hero-light.png"
-      alt="LogCrate application preview with a watched folder, expanded ZIP, log tabs, and log content"
+      alt="LogCrate application preview with fictional demo folders, an expanded archive, log tabs, structured log content, the AI entry, and field-filter controls"
       width="1200"
     >
   </picture>
+  <br>
+  <sub>All paths, file names, and log entries shown above are fictional demo data.</sub>
 </p>
 
 ---
