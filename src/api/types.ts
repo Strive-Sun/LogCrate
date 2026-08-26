@@ -310,6 +310,11 @@ export interface DroppedFileInfo {
   alreadyMonitored: boolean;
 }
 
+export interface OpenFileRequest {
+  id: number;
+  path: string;
+}
+
 export interface FileSearchConfig {
   version: number;
   enabled: boolean;

@@ -36,8 +36,10 @@ use index::{
 };
 use log_fields::{LayoutAnalysis, SamplingPhase};
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::io::SeekFrom;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::Notify;
@@ -62,6 +64,64 @@ use tauri::{
 };
 
 const MAIN_WINDOW_LABEL: &str = "main";
+const MAX_EXTERNAL_OPEN_PATH_LENGTH: usize = 32_768;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenFileRequest {
+    id: u64,
+    path: String,
+}
+
+#[derive(Clone, Default)]
+struct OpenFileRequestQueue {
+    next_id: Arc<AtomicU64>,
+    requests: Arc<Mutex<VecDeque<OpenFileRequest>>>,
+}
+
+impl OpenFileRequestQueue {
+    fn enqueue(&self, path: String) -> Option<OpenFileRequest> {
+        let mut requests = self
+            .requests
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if requests.iter().any(|request| request.path == path) {
+            return None;
+        }
+        let request = OpenFileRequest {
+            id: self.next_id.fetch_add(1, Ordering::Relaxed),
+            path,
+        };
+        requests.push_back(request.clone());
+        Some(request)
+    }
+
+    fn drain(&self) -> Vec<OpenFileRequest> {
+        let mut requests = self
+            .requests
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        requests.drain(..).collect()
+    }
+}
+
+fn external_open_file_path<I>(args: I) -> Option<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut args = args.into_iter();
+    let raw = args.next()?;
+    if args.next().is_some() || raw.starts_with('-') || raw.len() > MAX_EXTERNAL_OPEN_PATH_LENGTH {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() || !path.is_file() {
+        return None;
+    }
+    std::fs::canonicalize(path)
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+}
 
 pub fn record_process_start() {
     startup_trace::record_process_start();
@@ -714,6 +774,11 @@ async fn inspect_dropped_file(
         .watch
         .inspect_dropped_file(&path)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn take_open_file_requests(state: State<'_, OpenFileRequestQueue>) -> Vec<OpenFileRequest> {
+    state.drain()
 }
 
 #[cfg(desktop)]
@@ -1580,15 +1645,27 @@ pub fn run() {
     let startup_trace = StartupTrace::default();
     startup_trace.mark("builder-start");
     let setup_trace = startup_trace.clone();
+    let open_file_requests = OpenFileRequestQueue::default();
+    if let Some(path) = external_open_file_path(std::env::args().skip(1)) {
+        let _ = open_file_requests.enqueue(path);
+    }
+    let instance_open_file_requests = open_file_requests.clone();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            #[cfg(desktop)]
-            if second_instance_action() == LifecycleAction::ShowMainWindow {
-                show_main_window(app);
-            }
-        }))
+        .plugin(tauri_plugin_single_instance::init(
+            move |app, args, _cwd| {
+                if let Some(path) = external_open_file_path(args) {
+                    if let Some(request) = instance_open_file_requests.enqueue(path) {
+                        let _ = app.emit("open-file-request", request);
+                    }
+                }
+                #[cfg(desktop)]
+                if second_instance_action() == LifecycleAction::ShowMainWindow {
+                    show_main_window(app);
+                }
+            },
+        ))
         .on_window_event(|window, event| {
             if close_action(window.label()) == LifecycleAction::HideMainWindow {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -1599,6 +1676,7 @@ pub fn run() {
         })
         .setup(move |app| {
             setup_trace.mark("setup-enter");
+            app.manage(open_file_requests.clone());
             app.manage(setup_trace.clone());
             let startup_handoff = StartupHandoff::default();
             app.manage(startup_handoff.clone());
@@ -1782,6 +1860,7 @@ pub fn run() {
             macos_file_access_capabilities,
             open_macos_full_disk_access_settings,
             inspect_dropped_file,
+            take_open_file_requests,
             file_search_status,
             file_search_config,
             file_search_feature_state,
@@ -1859,6 +1938,43 @@ pub fn run() {
 mod lifecycle_tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn external_open_file_path_accepts_one_existing_absolute_file_only() {
+        let path =
+            std::env::temp_dir().join(format!("logcrate-open-request-{}.txt", std::process::id()));
+        std::fs::write(&path, b"log").unwrap();
+
+        let accepted = external_open_file_path(vec![path.to_string_lossy().into_owned()]);
+        assert_eq!(
+            accepted,
+            Some(
+                std::fs::canonicalize(&path)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into()
+            )
+        );
+        assert!(external_open_file_path(vec![
+            path.to_string_lossy().into_owned(),
+            "second.txt".to_string(),
+        ])
+        .is_none());
+        assert!(external_open_file_path(vec!["--relaunch".to_string()]).is_none());
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn open_file_request_queue_deduplicates_and_drains_requests() {
+        let queue = OpenFileRequestQueue::default();
+        let first = queue.enqueue("C:\\Logs\\one.log".to_string()).unwrap();
+        assert!(queue.enqueue("C:\\Logs\\one.log".to_string()).is_none());
+        let second = queue.enqueue("C:\\Logs\\two.log".to_string()).unwrap();
+        assert_ne!(first.id, second.id);
+        assert_eq!(queue.drain(), vec![first, second]);
+        assert!(queue.drain().is_empty());
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct FakeWindowState {

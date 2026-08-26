@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window';
+import { listen } from '@tauri-apps/api/event';
 import { api, isTauri } from './api';
 import { whenStartupInteractive } from './startup';
 import type {
@@ -11,6 +12,7 @@ import type {
   FileSearchResult,
   MacOsFileAccessCapabilities,
   NewLogItem,
+  OpenFileRequest,
   OpenSessionResult,
   OpenDocxSessionResult,
   TreeNode,
@@ -43,7 +45,7 @@ import {
   removedDirectoryNodes,
   sameFilePath,
 } from './util/directoryTree';
-import { planFileDrop, singleDroppedPath } from './util/fileDrop';
+import { isExternalOpenableFile, planFileDrop, singleDroppedPath } from './util/fileDrop';
 import { nextSearchOpen, searchRestartNoticeKey } from './util/searchFeature';
 import { installAutoHideScrollbars } from './util/autoHideScrollbars';
 import {
@@ -130,6 +132,7 @@ export function App() {
         'mock.selectDirectory': 'mock.selectDirectory',
         'mock.dropUnsupported': 'mock.dropUnsupported',
         'mock.fileManager': 'mock.fileManager',
+        'external.unsupported': 'error.externalOpenUnsupported',
       } as const;
       return message in known
         ? t(known[message as keyof typeof known])
@@ -1023,7 +1026,7 @@ export function App() {
   );
 
   const handleDroppedPaths = useCallback(
-    async (paths: readonly string[]) => {
+    async (paths: readonly string[], options?: { external?: boolean }) => {
       if (dropBusy.current) {
         alert(t('error.dropBusy'));
         return;
@@ -1037,6 +1040,9 @@ export function App() {
       try {
         const path = singleDroppedPath(paths);
         const info: DroppedFileInfo = await api.inspectDroppedFile(path);
+        if (options?.external && !isExternalOpenableFile(info)) {
+          throw new Error('external.unsupported');
+        }
         const plan = planFileDrop(info);
 
         // 日志查看与监控添加互不依赖，检查通过后立即启动现有打开流程。
@@ -1081,6 +1087,43 @@ export function App() {
         else unlisten = stop;
       })
       .catch((error) => alert(t('error.dropUnavailable', { error: localizedError(error) })));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [handleDroppedPaths, localizedError, t]);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const consumed = new Set<number>();
+
+    const consume = (request: OpenFileRequest) => {
+      if (disposed || consumed.has(request.id)) return;
+      consumed.add(request.id);
+      void handleDroppedPaths([request.path], { external: true });
+    };
+
+    void (async () => {
+      const stop = await listen<OpenFileRequest>('open-file-request', (event) => {
+        consume(event.payload);
+      });
+      if (disposed) {
+        stop();
+        return;
+      }
+      unlisten = stop;
+      try {
+        const pending = await api.takeOpenFileRequests();
+        pending.forEach(consume);
+      } catch (error) {
+        alert(t('error.openRequestUnavailable', { error: localizedError(error) }));
+      }
+    })().catch((error) => {
+      if (!disposed) alert(t('error.openRequestUnavailable', { error: localizedError(error) }));
+    });
+
     return () => {
       disposed = true;
       unlisten?.();

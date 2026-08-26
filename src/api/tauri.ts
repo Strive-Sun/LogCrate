@@ -46,6 +46,7 @@ import type {
   MacOsFileAccessCapabilities,
   MacOsSystemSettingsResult,
   NewLogItem,
+  OpenFileRequest,
   OpenSessionResult,
   SnapshotExportResult,
   TreeNode,
@@ -653,6 +654,10 @@ export const tauriApi = {
 
   async inspectDroppedFile(path: string): Promise<DroppedFileInfo> {
     return invoke<DroppedFileInfo>('inspect_dropped_file', { path });
+  },
+
+  async takeOpenFileRequests(): Promise<OpenFileRequest[]> {
+    return invoke<OpenFileRequest[]>('take_open_file_requests');
   },
 
   fileSearchStatus(): Promise<FileSearchStatus> {

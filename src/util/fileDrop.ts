@@ -20,3 +20,7 @@ export function planFileDrop(info: DroppedFileInfo): FileDropPlan {
     locateInTree: info.kind === 'archive' || info.kind === 'document' || info.isLog,
   };
 }
+
+export function isExternalOpenableFile(info: DroppedFileInfo): boolean {
+  return info.kind === 'file' && info.isLog;
+}

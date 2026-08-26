@@ -36,6 +36,7 @@ import type {
   MacOsFileAccessCapabilities,
   MacOsSystemSettingsResult,
   NewLogItem,
+  OpenFileRequest,
   OpenSessionResult,
   TreeNode,
 } from './types';
@@ -891,6 +892,10 @@ export const mockApi = {
 
   async inspectDroppedFile(_path: string): Promise<DroppedFileInfo> {
     throw new Error('mock.dropUnsupported');
+  },
+
+  async takeOpenFileRequests(): Promise<OpenFileRequest[]> {
+    return [];
   },
 
   async fileSearchStatus(): Promise<FileSearchStatus> {

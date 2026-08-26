@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { planFileDrop, singleDroppedPath } from './fileDrop';
+import { isExternalOpenableFile, planFileDrop, singleDroppedPath } from './fileDrop';
 
 test('singleDroppedPath accepts exactly one path and rejects a batch as a whole', () => {
   assert.equal(singleDroppedPath(['D:\\logs\\server.log']), 'D:\\logs\\server.log');
@@ -112,5 +112,41 @@ test('arbitrary files add their parent without opening and folders add themselve
       watchPathToAdd: 'D:\\downloads\\logs',
       locateInTree: false,
     },
+  );
+});
+
+test('external open requests accept only recognized plain text files', () => {
+  assert.equal(
+    isExternalOpenableFile({
+      path: 'D:\\logs\\server.log',
+      name: 'server.log',
+      kind: 'file',
+      watchPath: 'D:\\logs',
+      isLog: true,
+      alreadyMonitored: false,
+    }),
+    true,
+  );
+  assert.equal(
+    isExternalOpenableFile({
+      path: 'D:\\downloads\\image.png',
+      name: 'image.png',
+      kind: 'file',
+      watchPath: 'D:\\downloads',
+      isLog: false,
+      alreadyMonitored: false,
+    }),
+    false,
+  );
+  assert.equal(
+    isExternalOpenableFile({
+      path: 'D:\\downloads\\logs.zip',
+      name: 'logs.zip',
+      kind: 'archive',
+      watchPath: 'D:\\downloads',
+      isLog: false,
+      alreadyMonitored: false,
+    }),
+    false,
   );
 });
