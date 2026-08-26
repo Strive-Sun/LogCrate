@@ -7,15 +7,38 @@ const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
 
-const [nsis, wix, tauriConfigText, windowsConfigText, cargoManifest] = await Promise.all([
+const [nsis, wix, shellWix, tauriConfigText, windowsConfigText, cargoManifest] = await Promise.all([
   read('src-tauri/windows/nsis-hooks.nsh'),
   read('src-tauri/windows/index-service.wxs'),
+  read('src-tauri/windows/shell-context-menu.wxs'),
   read('src-tauri/tauri.conf.json'),
   read('src-tauri/tauri.windows.conf.json'),
   read('src-tauri/Cargo.toml'),
 ]);
 const tauriConfig = JSON.parse(tauriConfigText);
 const windowsConfig = JSON.parse(windowsConfigText);
+const shellExtensions = [
+  '.log',
+  '.txt',
+  '.out',
+  '.err',
+  '.trace',
+  '.json',
+  '.ndjson',
+  '.csv',
+  '.tsv',
+  '.xml',
+  '.yaml',
+  '.yml',
+  '.ini',
+  '.cfg',
+  '.conf',
+  '.properties',
+  '.env',
+  '.md',
+  '.sql',
+  '.toml',
+];
 
 function macroBody(source, name) {
   const match = source.match(new RegExp(`!macro ${name}\\r?\\n([\\s\\S]*?)!macroend`));
@@ -90,6 +113,40 @@ assert(
 );
 
 assert(
+  nsis.includes('!insertmacro RegisterLogCrateShellMenu'),
+  'NSIS must register the shell menu after installation',
+);
+assert(
+  nsis.includes('!insertmacro UnregisterLogCrateShellMenu'),
+  'NSIS must remove the shell menu during uninstall',
+);
+for (const extension of shellExtensions) {
+  assert(
+    nsis.includes(`RegisterLogCrateShellMenuForExtension "${extension}"`) &&
+      nsis.includes(`UnregisterLogCrateShellMenuForExtension "${extension}"`),
+    `NSIS shell menu extension ${extension} must be registered and removed`,
+  );
+  assert(
+    shellWix.includes(`SystemFileAssociations\\${extension}\\shell\\LogCrateAnalyze`),
+    `WiX shell menu extension ${extension} must be registered`,
+  );
+}
+assert(
+  nsis.includes(
+    'WriteRegStr HKCR "SystemFileAssociations\\${extension}\\shell\\LogCrateAnalyze\\command" "" \'"$INSTDIR\\logcrate.exe" "%1"\'',
+  ),
+  'NSIS shell menu must quote the executable and selected path',
+);
+assert(
+  shellWix.includes('Value="&quot;[INSTALLFOLDER]logcrate.exe&quot; &quot;%1&quot;"'),
+  'WiX shell menu must quote the executable and selected path',
+);
+assert(
+  shellWix.includes('ForceDeleteOnUninstall="yes"'),
+  'WiX shell menu keys must be removed with the component',
+);
+
+assert(
   /Id="InstallLogCrateIndexService"[\s\S]*?Execute="deferred"[\s\S]*?Impersonate="no"[\s\S]*?Return="check"/.test(
     wix,
   ),
@@ -115,6 +172,14 @@ assert(
 assert(
   tauriConfig.bundle.windows.wix.fragmentPaths.includes('./windows/index-service.wxs'),
   'Tauri must include the MSI service custom action fragment',
+);
+assert(
+  tauriConfig.bundle.windows.wix.fragmentPaths.includes('./windows/shell-context-menu.wxs'),
+  'Tauri must include the MSI shell context-menu fragment',
+);
+assert(
+  tauriConfig.bundle.windows.wix.componentRefs.includes('LogCrateShellContextMenu'),
+  'Tauri must reference the MSI shell context-menu component',
 );
 assert(
   windowsConfig.build.features.includes('windows-index-service'),

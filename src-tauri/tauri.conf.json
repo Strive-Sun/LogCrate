@@ -41,7 +41,8 @@
         "installerHooks": "./windows/nsis-hooks.nsh"
       },
       "wix": {
-        "fragmentPaths": ["./windows/index-service.wxs"]
+        "fragmentPaths": ["./windows/index-service.wxs", "./windows/shell-context-menu.wxs"],
+        "componentRefs": ["LogCrateShellContextMenu"]
       }
     }
   },

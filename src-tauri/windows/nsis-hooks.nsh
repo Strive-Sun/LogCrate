@@ -1,3 +1,59 @@
+!macro RegisterLogCrateShellMenu
+  !insertmacro RegisterLogCrateShellMenuForExtension ".log"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".txt"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".out"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".err"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".trace"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".json"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".ndjson"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".csv"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".tsv"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".xml"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".yaml"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".yml"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".ini"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".cfg"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".conf"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".properties"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".env"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".md"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".sql"
+  !insertmacro RegisterLogCrateShellMenuForExtension ".toml"
+!macroend
+
+!macro RegisterLogCrateShellMenuForExtension extension
+  WriteRegStr HKCR "SystemFileAssociations\${extension}\shell\LogCrateAnalyze" "" "以 LogCrate 分析"
+  WriteRegStr HKCR "SystemFileAssociations\${extension}\shell\LogCrateAnalyze" "Icon" "$INSTDIR\logcrate.exe"
+  WriteRegStr HKCR "SystemFileAssociations\${extension}\shell\LogCrateAnalyze\command" "" '"$INSTDIR\logcrate.exe" "%1"'
+!macroend
+
+!macro UnregisterLogCrateShellMenu
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".log"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".txt"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".out"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".err"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".trace"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".json"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".ndjson"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".csv"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".tsv"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".xml"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".yaml"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".yml"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".ini"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".cfg"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".conf"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".properties"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".env"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".md"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".sql"
+  !insertmacro UnregisterLogCrateShellMenuForExtension ".toml"
+!macroend
+
+!macro UnregisterLogCrateShellMenuForExtension extension
+  DeleteRegKey HKCR "SystemFileAssociations\${extension}\shell\LogCrateAnalyze"
+!macroend
+
 !macro NSIS_HOOK_PREINSTALL
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
@@ -24,6 +80,7 @@
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  !insertmacro RegisterLogCrateShellMenu
   nsExec::ExecToLog '"$INSTDIR\logcrate_index_service.exe" --install'
   Pop $0
   ${If} $0 == "error"
@@ -38,6 +95,7 @@
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
+  !insertmacro UnregisterLogCrateShellMenu
   nsExec::ExecToLog '"$INSTDIR\logcrate_index_service.exe" --uninstall'
   Pop $0
   DetailPrint "LogCrate Index Service uninstall returned $0"
