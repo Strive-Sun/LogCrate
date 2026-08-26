@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [1.0.35] - 2026-08-26
+
+### Added
+
+- Added the Windows Explorer context-menu entry for analyzing supported text files with LogCrate.
+
+### Fixed
+
+- Fixed forwarding of external file-open requests to an existing LogCrate instance without duplicate or invalid requests.
+
+### Engineering
+
+- Added automated coverage for the Windows context-menu registration, single-instance forwarding, and installer checks.
+
 尚未发布的变更先记录在此；发布时移动到对应版本章节。
 
 ## [1.0.34] - 2026-08-17
