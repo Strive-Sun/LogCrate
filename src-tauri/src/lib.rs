@@ -1655,7 +1655,11 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_single_instance::init(
             move |app, args, _cwd| {
-                if let Some(path) = external_open_file_path(args) {
+                // tauri-plugin-single-instance forwards the complete argv vector,
+                // including the executable path. The initial process skips argv[0]
+                // before calling the parser, so keep the same contract here for
+                // files sent to an already-running instance.
+                if let Some(path) = external_open_file_path(args.into_iter().skip(1)) {
                     if let Some(request) = instance_open_file_requests.enqueue(path) {
                         let _ = app.emit("open-file-request", request);
                     }
@@ -1954,6 +1958,14 @@ mod lifecycle_tests {
                     .to_string_lossy()
                     .into()
             )
+        );
+        let forwarded_argv = vec![
+            "LogCrate.exe".to_string(),
+            path.to_string_lossy().into_owned(),
+        ];
+        assert_eq!(
+            external_open_file_path(forwarded_argv.into_iter().skip(1)),
+            accepted
         );
         assert!(external_open_file_path(vec![
             path.to_string_lossy().into_owned(),
