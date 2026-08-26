@@ -19,5 +19,5 @@
 
 ## 3. 双平台真机验收
 
-- [ ] 3.1 在 Windows Tauri/WebView 使用脱敏日志和真实兼容端点验证 Credential Manager、Responses 首字/增量/完成与断流超时、Chat Completions、初始分析/连续追问、日志选区暂存/移除/立即分析、附件选择与拒绝、IME/箭头发送、加密历史重启恢复，以及普通/边缘/最大化窗口的展开与恢复
-- [ ] 3.2 在 macOS Tauri/WebView 使用脱敏日志和真实兼容端点验证 Keychain、Responses 首字/增量/完成与断流超时、Chat Completions、初始分析/连续追问、日志选区暂存/移除/立即分析、附件选择与拒绝、IME/箭头发送、加密历史重启恢复，以及普通/边缘/最大化窗口的展开与恢复
+- [x] 3.1 在 Windows Tauri/WebView 使用脱敏日志和真实兼容端点验证 Credential Manager、Responses 首字/增量/完成与断流超时、Chat Completions、初始分析/连续追问、日志选区暂存/移除/立即分析、附件选择与拒绝、IME/箭头发送、加密历史重启恢复，以及普通/边缘/最大化窗口的展开与恢复
+- [x] 3.2 在 macOS Tauri/WebView 使用脱敏日志和真实兼容端点验证 Keychain、Responses 首字/增量/完成与断流超时、Chat Completions、初始分析/连续追问、日志选区暂存/移除/立即分析、附件选择与拒绝、IME/箭头发送、加密历史重启恢复，以及普通/边缘/最大化窗口的展开与恢复
