@@ -7,14 +7,16 @@ const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
 
-const [nsis, wix, shellWix, tauriConfigText, windowsConfigText, cargoManifest] = await Promise.all([
-  read('src-tauri/windows/nsis-hooks.nsh'),
-  read('src-tauri/windows/index-service.wxs'),
-  read('src-tauri/windows/shell-context-menu.wxs'),
-  read('src-tauri/tauri.conf.json'),
-  read('src-tauri/tauri.windows.conf.json'),
-  read('src-tauri/Cargo.toml'),
-]);
+const [nsis, wix, shellWix, localeWxl, tauriConfigText, windowsConfigText, cargoManifest] =
+  await Promise.all([
+    read('src-tauri/windows/nsis-hooks.nsh'),
+    read('src-tauri/windows/index-service.wxs'),
+    read('src-tauri/windows/shell-context-menu.wxs'),
+    read('src-tauri/windows/locale-en-us.wxl'),
+    read('src-tauri/tauri.conf.json'),
+    read('src-tauri/tauri.windows.conf.json'),
+    read('src-tauri/Cargo.toml'),
+  ]);
 const tauriConfig = JSON.parse(tauriConfigText);
 const windowsConfig = JSON.parse(windowsConfigText);
 const shellExtensions = [
@@ -138,12 +140,20 @@ assert(
   'NSIS shell menu must quote the executable and selected path',
 );
 assert(
-  shellWix.includes('Value="&quot;[INSTALLFOLDER]logcrate.exe&quot; &quot;%1&quot;"'),
+  shellWix.includes('Value="&quot;[INSTALLDIR]logcrate.exe&quot; &quot;%1&quot;"'),
   'WiX shell menu must quote the executable and selected path',
 );
 assert(
   shellWix.includes('ForceDeleteOnUninstall="yes"'),
   'WiX shell menu keys must be removed with the component',
+);
+assert(
+  shellWix.includes('<DirectoryRef Id="INSTALLDIR">'),
+  'WiX shell menu component must be attached to the Tauri install directory',
+);
+assert(
+  !shellWix.includes('INSTALLFOLDER'),
+  'WiX shell menu must use the generated INSTALLDIR directory id',
 );
 
 assert(
@@ -153,7 +163,7 @@ assert(
   'MSI service installation must remain elevated, deferred, and rollback on failure',
 );
 assert(
-  wix.includes('ExeCommand="&quot;[INSTALLFOLDER]logcrate_index_service.exe&quot; --install"'),
+  wix.includes('ExeCommand="&quot;[INSTALLDIR]logcrate_index_service.exe&quot; --install"'),
   'MSI must execute the installed index service with the fixed --install argument',
 );
 assert(
@@ -180,6 +190,15 @@ assert(
 assert(
   tauriConfig.bundle.windows.wix.componentRefs.includes('LogCrateShellContextMenu'),
   'Tauri must reference the MSI shell context-menu component',
+);
+assert(
+  tauriConfig.bundle.windows.wix.language?.['en-US']?.localePath === './windows/locale-en-us.wxl',
+  'WiX must use the Chinese-compatible locale for shell menu text',
+);
+assert(
+  localeWxl.includes('Codepage="936"') &&
+    localeWxl.includes('<String Id="TauriCodepage">936</String>'),
+  'WiX locale must use code page 936 for Chinese shell menu text',
 );
 assert(
   windowsConfig.build.features.includes('windows-index-service'),

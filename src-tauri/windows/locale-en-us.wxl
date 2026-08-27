@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="en-us" Codepage="936" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+  <String Id="TauriLanguage">1033</String>
+  <String Id="TauriCodepage">936</String>
+  <String Id="LaunchApp">Launch LogCrate</String>
+  <String Id="DowngradeErrorMessage">A newer version of LogCrate is already installed.</String>
+  <String Id="PathEnvVarFeature">Add the install location of the LogCrate executable to the PATH system environment variable. This allows the LogCrate executable to be called from any location.</String>
+  <String Id="InstallAppFeature">Installs LogCrate.</String>
+</WixLocalization>

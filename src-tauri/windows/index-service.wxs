@@ -3,15 +3,15 @@
   <Fragment>
     <CustomAction
       Id="InstallLogCrateIndexService"
-      Directory="INSTALLFOLDER"
-      ExeCommand="&quot;[INSTALLFOLDER]logcrate_index_service.exe&quot; --install"
+      Directory="INSTALLDIR"
+      ExeCommand="&quot;[INSTALLDIR]logcrate_index_service.exe&quot; --install"
       Execute="deferred"
       Impersonate="no"
       Return="check" />
     <CustomAction
       Id="UninstallLogCrateIndexService"
-      Directory="INSTALLFOLDER"
-      ExeCommand="&quot;[INSTALLFOLDER]logcrate_index_service.exe&quot; --uninstall"
+      Directory="INSTALLDIR"
+      ExeCommand="&quot;[INSTALLDIR]logcrate_index_service.exe&quot; --uninstall"
       Execute="deferred"
       Impersonate="no"
       Return="ignore" />

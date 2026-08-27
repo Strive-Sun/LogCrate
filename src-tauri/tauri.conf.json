@@ -42,7 +42,12 @@
       },
       "wix": {
         "fragmentPaths": ["./windows/index-service.wxs", "./windows/shell-context-menu.wxs"],
-        "componentRefs": ["LogCrateShellContextMenu"]
+        "componentRefs": ["LogCrateShellContextMenu"],
+        "language": {
+          "en-US": {
+            "localePath": "./windows/locale-en-us.wxl"
+          }
+        }
       }
     }
   },
