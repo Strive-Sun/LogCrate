@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [1.0.36] - 2026-08-27
+
+### Fixed
+
+- Fixed Windows MSI packaging for the Explorer context-menu integration by correcting WiX directory references and Chinese installer code-page handling.
+
 ## [1.0.35] - 2026-08-26
 
 ### Added
