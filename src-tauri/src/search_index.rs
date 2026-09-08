@@ -22,7 +22,6 @@ use zhconv::{zhconv, Variant};
 
 const INCREMENTAL_COMMIT_INTERVAL: Duration = Duration::from_secs(2);
 const COMMIT_DOCUMENTS: usize = 100_000;
-const MAX_QUERY_CANDIDATES: usize = 10_000;
 const TRUE_BYTES: &[u8] = b"1";
 const FALSE_BYTES: &[u8] = b"0";
 
@@ -323,12 +322,12 @@ impl SearchIndex {
             ));
         }
         let query = BooleanQuery::new(subqueries);
-        let requested = usize::try_from(offset)
-            .unwrap_or(usize::MAX)
-            .saturating_add(limit as usize)
-            .clamp(limit as usize + 1, MAX_QUERY_CANDIDATES);
         let searcher = self.reader.searcher();
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(requested))?;
+        let total = searcher.search(&query, &Count)? as u64;
+        let top_docs = searcher.search(
+            &query,
+            &TopDocs::with_limit(limit as usize).and_offset(offset as usize),
+        )?;
         let mut entries = Vec::with_capacity(top_docs.len());
         for (_, address) in top_docs {
             let document: TantivyDocument = searcher.doc(address)?;
@@ -375,15 +374,7 @@ impl SearchIndex {
             };
             (rank, name, entry.path.to_lowercase())
         });
-        let start = offset as usize;
-        let end = start.saturating_add(limit as usize).min(entries.len());
-        let has_more = entries.len() > end || requested == MAX_QUERY_CANDIDATES;
-        let items = if start < entries.len() {
-            entries[start..end].to_vec()
-        } else {
-            Vec::new()
-        };
-        Ok((items, (end + usize::from(has_more)) as u64))
+        Ok((entries, total))
     }
 
     pub fn num_docs(&self) -> u64 {
@@ -705,6 +696,42 @@ mod tests {
         let (items, total) = index.search(&["same".into()], "", 0, 20).unwrap();
         assert_eq!(total, 1);
         assert_eq!(items[0].path, "D:\\logs\\same.log");
+        drop(index);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn search_reports_exact_totals_and_disjoint_pages_beyond_two_pages() {
+        let directory = test_dir();
+        let mut index = SearchIndex::open(&directory).unwrap();
+        let entries = (0..650)
+            .map(|number| SearchIndexEntry {
+                path: format!("D:\\logs\\shared-{number:04}.log"),
+                name: format!("shared-{number:04}.log"),
+                scope_key: "D:\\".into(),
+                is_log: number % 2 == 0,
+                is_archive: false,
+            })
+            .collect::<Vec<_>>();
+        index.add_batch(&entries).unwrap();
+        index.commit().unwrap();
+
+        let mut paths = HashSet::new();
+        for offset in [0, 200, 400, 600] {
+            let (page, total) = index.search(&["shared".into()], "", offset, 200).unwrap();
+            assert_eq!(total, 650);
+            assert_eq!(page.len(), 200_usize.min(650 - offset as usize));
+            for item in page {
+                assert!(paths.insert(item.path));
+            }
+        }
+        assert_eq!(paths.len(), 650);
+
+        let (logs, total) = index.search(&["shared".into()], "log", 300, 200).unwrap();
+        assert_eq!(total, 325);
+        assert_eq!(logs.len(), 25);
+        assert!(logs.iter().all(|item| item.is_log && !item.is_archive));
+
         drop(index);
         fs::remove_dir_all(directory).unwrap();
     }
