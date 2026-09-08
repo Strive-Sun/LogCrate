@@ -5289,7 +5289,10 @@ fn enrich_visible_metadata(items: &mut [SearchResultItem]) {
         for chunk in items.chunks_mut(chunk_size) {
             scope.spawn(move || {
                 for item in chunk {
-                    let Ok(metadata) = fs::metadata(&item.path) else {
+                    let Ok(file) = fs::File::open(&item.path) else {
+                        continue;
+                    };
+                    let Ok(metadata) = file.metadata() else {
                         continue;
                     };
                     if !metadata.is_file() {
@@ -5297,7 +5300,7 @@ fn enrich_visible_metadata(items: &mut [SearchResultItem]) {
                     }
                     item.size = metadata.len();
                     item.modified_ms = metadata.modified().ok().and_then(system_time_ms);
-                    item.readable = fs::File::open(&item.path).is_ok();
+                    item.readable = true;
                 }
             });
         }
