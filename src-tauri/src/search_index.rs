@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use tantivy::collector::{Count, TopDocs};
 use tantivy::directory::MmapDirectory;
-use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
+use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, INDEXED, STORED,
 };
@@ -45,7 +45,6 @@ pub struct SearchIndex {
     is_log_field: Field,
     is_archive_field: Field,
     ext_field: Field,
-    query_parser: QueryParser,
     tokenizer: Jieba,
     pending_documents: usize,
     last_commit: Instant,
@@ -79,9 +78,6 @@ impl SearchIndex {
             // commit and keep Windows mmap handles alive while the directory is activated.
             .reload_policy(ReloadPolicy::Manual)
             .try_into()?;
-        let mut query_parser = QueryParser::for_index(&index, vec![name_field]);
-        query_parser.set_field_boost(name_field, 4.0);
-        query_parser.set_conjunction_by_default();
         Ok(Self {
             reader,
             writer,
@@ -93,7 +89,6 @@ impl SearchIndex {
             is_log_field,
             is_archive_field,
             ext_field,
-            query_parser,
             tokenizer: Jieba::new(),
             pending_documents: 0,
             last_commit: Instant::now(),
@@ -292,10 +287,20 @@ impl SearchIndex {
     ) -> anyhow::Result<(Vec<SearchIndexEntry>, u64)> {
         let keyword = terms.join(" ");
         let tokens = self.search_tokenize(&keyword);
-        let keyword_query = self
-            .query_parser
-            .parse_query(&tokens)
-            .with_context(|| format!("Orange query parser rejected {keyword:?}"))?;
+        let keyword_query: Box<dyn Query> = Box::new(BooleanQuery::new(
+            tokens
+                .split_whitespace()
+                .map(|token| {
+                    (
+                        Occur::Must,
+                        Box::new(TermQuery::new(
+                            Term::from_field_text(self.name_field, token),
+                            IndexRecordOption::Basic,
+                        )) as Box<dyn Query>,
+                    )
+                })
+                .collect(),
+        ));
         let mut subqueries = vec![(Occur::Must, keyword_query)];
         if filter == "log" {
             subqueries.push((
@@ -443,7 +448,13 @@ impl SearchIndex {
 }
 
 fn normalize_search_text(value: &str) -> String {
-    value.replace(['-', '+', ',', '.', ':', '/', '\\', '_'], " ")
+    value.replace(
+        [
+            '-', '+', ',', '.', ':', '/', '\\', '_', '(', ')', '{', '}', '[', ']', '^', '"', '&',
+            '|', '!', '~', '*', '?',
+        ],
+        " ",
+    )
 }
 
 fn ascii_entry_tokens(entry: &SearchIndexEntry) -> String {
@@ -662,6 +673,57 @@ mod tests {
         assert_eq!(index.num_docs(), 4);
         drop(index);
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn query_parser_treats_filename_fragments_as_literals() {
+        let directory = test_dir();
+        let mut index = SearchIndex::open(&directory).unwrap();
+        index
+            .add_batch(&[
+                SearchIndexEntry {
+                    path: "D:\\logs\\AND.log".into(),
+                    name: "AND.log".into(),
+                    scope_key: "D:\\".into(),
+                    is_log: true,
+                    is_archive: false,
+                },
+                SearchIndexEntry {
+                    path: "D:\\logs\\error(1)\"final.log".into(),
+                    name: "error(1)\"final.log".into(),
+                    scope_key: "D:\\".into(),
+                    is_log: true,
+                    is_archive: false,
+                },
+                SearchIndexEntry {
+                    path: "D:\\logs\\error-final.log".into(),
+                    name: "error-final.log".into(),
+                    scope_key: "D:\\".into(),
+                    is_log: true,
+                    is_archive: false,
+                },
+            ])
+            .unwrap();
+        index.commit().unwrap();
+
+        let (operator, total) = index.search(&["AND".into()], "log", 0, 20).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(operator[0].name, "AND.log");
+
+        let (punctuation, total) = index
+            .search(&["error(1)\"final".into()], "log", 0, 20)
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(punctuation[0].name, "error(1)\"final.log");
+
+        let (multiple, total) = index
+            .search(&["error".into(), "final".into()], "log", 0, 20)
+            .unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(multiple.len(), 2);
+
+        drop(index);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
