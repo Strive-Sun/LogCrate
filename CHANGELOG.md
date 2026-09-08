@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [1.0.37] - 2026-09-08
+
+### Fixed
+
+- Fixed file-search result counts and multi-page pagination so later pages are not truncated.
+- Changed file-search queries to literal term-based matching, preventing user input from being interpreted as query syntax.
+
+### Performance
+
+- Reduced visible-result metadata I/O by opening each matched file once and reading metadata from the existing handle.
+
 ## [1.0.36] - 2026-08-27
 
 ### Fixed
