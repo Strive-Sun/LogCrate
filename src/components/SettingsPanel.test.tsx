@@ -52,6 +52,8 @@ function renderSettings(overrides: Partial<ComponentProps<typeof SettingsPanel>>
     onSearchEnabledChange: () => undefined,
     uiTemplate: 'native',
     onUiTemplateChange: () => undefined,
+    sourceModifiedAction: 'ask',
+    onSourceModifiedActionChange: () => undefined,
     ...overrides,
   };
   return harness.render(
@@ -68,6 +70,22 @@ test('file search is disabled by default and can request enabling', () => {
   assert.equal((toggle as HTMLInputElement).checked, false);
   harness.fireEvent.click(toggle);
   assert.equal(requested, true);
+});
+
+test('external modification preference defaults to ask and reports the chosen action', () => {
+  const chosen: string[] = [];
+  renderSettings({ onSourceModifiedActionChange: (action) => chosen.push(action) });
+  const select = harness.screen.getByRole('combobox', {
+    name: 'When an open file changes externally',
+  }) as HTMLSelectElement;
+  assert.equal(select.value, 'ask');
+  assert.deepEqual(
+    [...select.options].map((option) => option.textContent),
+    ['Ask every time', 'Reload automatically', 'Do not ask or reload'],
+  );
+  harness.fireEvent.change(select, { target: { value: 'reload' } });
+  harness.fireEvent.change(select, { target: { value: 'ignore' } });
+  assert.deepEqual(chosen, ['reload', 'ignore']);
 });
 
 test('pending next-launch state is visible and saving disables the toggle', () => {
@@ -257,6 +275,8 @@ test('disabled search entry cannot be clicked and exposes its settings hint on h
     onSearchEnabledChange: () => undefined,
     uiTemplate: 'native',
     onUiTemplateChange: () => undefined,
+    sourceModifiedAction: 'ask',
+    onSourceModifiedActionChange: () => undefined,
     theme: 'light',
     onToggleTheme: () => undefined,
     count: 0,
@@ -299,6 +319,8 @@ test('enabled search entry opens only through normal button activation without s
     onSearchEnabledChange: () => undefined,
     uiTemplate: 'native',
     onUiTemplateChange: () => undefined,
+    sourceModifiedAction: 'ask',
+    onSourceModifiedActionChange: () => undefined,
     theme: 'light',
     onToggleTheme: () => undefined,
     count: 0,

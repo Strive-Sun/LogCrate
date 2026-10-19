@@ -9,6 +9,7 @@ import {
 import { errorMessage, formatBytes, type UpdateStatus } from '../util/update';
 import { useI18n } from '../i18n/I18nProvider';
 import type { UiTemplate } from '../util/uiTemplate';
+import { isSourceModifiedAction, type SourceModifiedAction } from '../util/sourceModification';
 
 interface Props {
   currentVersion: string;
@@ -29,6 +30,8 @@ interface Props {
   onSearchEnabledChange: (enabled: boolean) => void;
   uiTemplate: UiTemplate;
   onUiTemplateChange: (template: UiTemplate) => void;
+  sourceModifiedAction: SourceModifiedAction;
+  onSourceModifiedActionChange: (action: SourceModifiedAction) => void;
 }
 
 const busyStatuses: UpdateStatus[] = ['checking', 'downloading', 'installing'];
@@ -527,6 +530,27 @@ export function SettingsPanel(props: Props) {
             disabled={!props.searchFeature || props.searchPreferenceSaving}
             onChange={(event) => props.onSearchEnabledChange(event.target.checked)}
           />
+        </label>
+
+        <label className="settings-row">
+          <div>
+            <div className="settings-label">{t('settings.sourceModified')}</div>
+            <div className="settings-hint">{t('settings.sourceModifiedHint')}</div>
+          </div>
+          <select
+            className="language-select"
+            aria-label={t('settings.sourceModified')}
+            value={props.sourceModifiedAction}
+            onChange={(event) => {
+              if (isSourceModifiedAction(event.target.value)) {
+                props.onSourceModifiedActionChange(event.target.value);
+              }
+            }}
+          >
+            <option value="ask">{t('settings.sourceModified.ask')}</option>
+            <option value="reload">{t('settings.sourceModified.reload')}</option>
+            <option value="ignore">{t('settings.sourceModified.ignore')}</option>
+          </select>
         </label>
       </div>
 

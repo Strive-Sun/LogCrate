@@ -54,6 +54,14 @@ import {
   saveUiTemplate,
   type UiTemplate,
 } from './util/uiTemplate';
+import {
+  createSourceReloadQueue,
+  decideSourceRevisionChange,
+  loadSourceModifiedAction,
+  saveSourceModifiedAction,
+  type SourceModifiedAction,
+  type SourceReloadKind,
+} from './util/sourceModification';
 import { useI18n } from './i18n/I18nProvider';
 import { localizeKnownError } from './i18n/errors';
 import {
@@ -146,6 +154,10 @@ export function App() {
   const [aiWorkspaceHost, setAiWorkspaceHost] = useState<HTMLDivElement | null>(null);
   const aiWindowTransition = useRef(false);
   const [uiTemplate, setUiTemplate] = useState(() => loadUiTemplate(localStorage));
+  const [sourceModifiedAction, setSourceModifiedAction] = useState(() =>
+    loadSourceModifiedAction(localStorage),
+  );
+  const sourceModifiedActionRef = useRef(sourceModifiedAction);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [fileSearchMounted, setFileSearchMounted] = useState(false);
   const [searchFeature, setSearchFeature] = useState<FileSearchFeatureState | null>(null);
@@ -207,6 +219,9 @@ export function App() {
   const deletedSourceRef = useRef<(path: string, subtree?: boolean) => void>(() => {});
   const selfDeletedSources = useRef<Array<{ path: string; subtree: boolean }>>([]);
   const pendingRevisionChecks = useRef(new Set<string>());
+  const sourceReloadQueue = useRef(createSourceReloadQueue(sameFilePath));
+  // 自动重载失败的修订；同一修订不再自动重试,源再次变化后才会重新尝试。
+  const failedAutoReloads = useRef<Array<{ path: string; revision: string }>>([]);
   const restoredWorkspaceStarted = useRef(false);
   const [sourcePrompts, setSourcePrompts] = useState<SourceChangePrompt[]>([]);
   const activeKey = tabLayout.active;
@@ -310,6 +325,12 @@ export function App() {
   const changeUiTemplate = useCallback((template: UiTemplate) => {
     setUiTemplate(template);
     saveUiTemplate(localStorage, template);
+  }, []);
+
+  const changeSourceModifiedAction = useCallback((action: SourceModifiedAction) => {
+    sourceModifiedActionRef.current = action;
+    setSourceModifiedAction(action);
+    saveSourceModifiedAction(localStorage, action);
   }, []);
 
   const skipUpdate = useCallback(() => {
@@ -629,8 +650,8 @@ export function App() {
     async (
       entryKey: string,
       unreadId?: string,
-      options?: { force?: boolean; document?: boolean },
-    ) => {
+      options?: { force?: boolean; document?: boolean; quiet?: boolean },
+    ): Promise<boolean> => {
       const existing = tabsRef.current[entryKey];
       const isDocument =
         options?.document ??
@@ -656,7 +677,7 @@ export function App() {
         (existing.status === 'ready' || existing.status === 'opening')
       ) {
         if (unreadId) markSeen(unreadId);
-        return;
+        return true;
       } else {
         const previousRequest = docxOpenRequests.current.get(entryKey);
         if (previousRequest) {
@@ -699,7 +720,7 @@ export function App() {
         if (tabOpenGeneration.current.get(entryKey) !== generation || !tabsRef.current[entryKey]) {
           if (opened.kind === 'docx') await api.closeDocxSession(opened.sessionId);
           else await api.closeLogSession(entryKey, opened.sessionId);
-          return;
+          return true;
         }
         updateTabs((current) => {
           const next = { ...markEvictedSessions(current, opened.evictedSessionIds) };
@@ -714,9 +735,10 @@ export function App() {
           };
           return next;
         });
+        return true;
       } catch (error) {
         if (unreadId) markSeen(unreadId);
-        if (tabOpenGeneration.current.get(entryKey) !== generation) return;
+        if (tabOpenGeneration.current.get(entryKey) !== generation) return true;
         updateTabs((current) => {
           const tab = current[entryKey];
           if (!tab) return current;
@@ -725,7 +747,8 @@ export function App() {
             [entryKey]: { ...tab, session: null, status: 'error', error: String(error) },
           };
         });
-        alert(t('error.cannotOpen', { error: localizedError(error) }));
+        if (!options?.quiet) alert(t('error.cannotOpen', { error: localizedError(error) }));
+        return false;
       } finally {
         if (docxRequestId && docxOpenRequests.current.get(entryKey) === docxRequestId) {
           docxOpenRequests.current.delete(entryKey);
@@ -839,6 +862,85 @@ export function App() {
   );
   deletedSourceRef.current = markSourceDeleted;
 
+  const reloadSourceNow = useCallback(
+    async (sourcePath: string, revision?: string, quiet = false): Promise<boolean> => {
+      const ids = Object.keys(tabsRef.current).filter((id) =>
+        sameFilePath(tabSourcePath(id, tabsRef.current[id]), sourcePath),
+      );
+      const active = tabLayoutRef.current.active;
+      for (const id of ids) {
+        if (id === active) continue;
+        tabOpenGeneration.current.set(id, (tabOpenGeneration.current.get(id) ?? 0) + 1);
+        const session = tabsRef.current[id]?.session;
+        if (session?.kind === 'docx') {
+          await api.closeDocxSession(session.sessionId).catch(() => undefined);
+        } else if (session) {
+          await api.closeLogSession(id, session.sessionId).catch(() => undefined);
+        }
+      }
+      updateTabs((current) => {
+        const next = { ...current };
+        for (const id of ids) {
+          if (id === active) continue;
+          next[id] = {
+            ...next[id],
+            session: null,
+            status: 'dormant',
+            error: undefined,
+            sourceRevision: revision,
+            sourceState: 'current',
+          };
+        }
+        return next;
+      });
+      if (active && ids.includes(active)) {
+        return openEntry(active, undefined, { force: true, quiet });
+      } else {
+        updateTabs((current) =>
+          Object.fromEntries(
+            Object.entries(current).map(([id, tab]) => [
+              id,
+              ids.includes(id) ? { ...tab, sourceRevision: revision, sourceState: 'current' } : tab,
+            ]),
+          ),
+        );
+      }
+      return true;
+    },
+    [openEntry, updateTabs],
+  );
+
+  /** 所有重新加载入口都经过按源串行器；自动重载失败时记录修订以避免对同一修订反复重试。 */
+  const reloadSource = useCallback(
+    (sourcePath: string, revision: string | undefined, kind: SourceReloadKind) =>
+      sourceReloadQueue.current.run(sourcePath, kind, async () => {
+        const reloaded = await reloadSourceNow(sourcePath, revision, kind === 'auto');
+        failedAutoReloads.current = failedAutoReloads.current.filter(
+          (entry) => !sameFilePath(entry.path, sourcePath),
+        );
+        if (!reloaded && kind === 'auto' && revision) {
+          failedAutoReloads.current.push({ path: sourcePath, revision });
+        }
+      }),
+    [reloadSourceNow],
+  );
+
+  const rememberSourceRevision = useCallback(
+    (sourcePath: string, revision: string) => {
+      updateTabs((current) =>
+        Object.fromEntries(
+          Object.entries(current).map(([id, tab]) => [
+            id,
+            sameFilePath(tabSourcePath(id, tab), sourcePath)
+              ? { ...tab, sourceRevision: revision }
+              : tab,
+          ]),
+        ),
+      );
+    },
+    [updateTabs],
+  );
+
   const checkSourceRevision = useCallback(
     (path: string) => {
       const source = Object.entries(tabsRef.current)
@@ -871,16 +973,29 @@ export function App() {
               ),
             );
           } else if (currentRevision.revision && currentRevision.revision !== known) {
-            enqueueSourcePrompt({
-              sourcePath: source,
-              kind: 'modified',
-              revision: currentRevision.revision,
-            });
+            // 重新加载进行中时选项卡仍持有旧修订,完成后由下一次检查基于最新修订判断。
+            if (sourceReloadQueue.current.isRunning(source)) return;
+            const revision = currentRevision.revision;
+            const failedRevision = failedAutoReloads.current.find((entry) =>
+              sameFilePath(entry.path, source),
+            )?.revision;
+            const decision = decideSourceRevisionChange(
+              sourceModifiedActionRef.current,
+              revision,
+              failedRevision,
+            );
+            if (decision === 'prompt') {
+              enqueueSourcePrompt({ sourcePath: source, kind: 'modified', revision });
+            } else if (decision === 'remember') {
+              rememberSourceRevision(source, revision);
+            } else if (decision === 'reload') {
+              void reloadSource(source, revision, 'auto');
+            }
           }
         })
         .finally(() => pendingRevisionChecks.current.delete(source));
     },
-    [enqueueSourcePrompt, markSourceDeleted, updateTabs],
+    [enqueueSourcePrompt, markSourceDeleted, reloadSource, rememberSourceRevision, updateTabs],
   );
   potentialSourceChangeRef.current = checkSourceRevision;
 
@@ -894,52 +1009,6 @@ export function App() {
       window.removeEventListener('focus', verifyActiveSource);
     };
   }, [activeSourcePath, activeSourceState, checkSourceRevision]);
-
-  const reloadSource = useCallback(
-    async (sourcePath: string, revision?: string) => {
-      const ids = Object.keys(tabsRef.current).filter((id) =>
-        sameFilePath(tabSourcePath(id, tabsRef.current[id]), sourcePath),
-      );
-      const active = tabLayoutRef.current.active;
-      for (const id of ids) {
-        if (id === active) continue;
-        tabOpenGeneration.current.set(id, (tabOpenGeneration.current.get(id) ?? 0) + 1);
-        const session = tabsRef.current[id]?.session;
-        if (session?.kind === 'docx') {
-          await api.closeDocxSession(session.sessionId).catch(() => undefined);
-        } else if (session) {
-          await api.closeLogSession(id, session.sessionId).catch(() => undefined);
-        }
-      }
-      updateTabs((current) => {
-        const next = { ...current };
-        for (const id of ids) {
-          if (id === active) continue;
-          next[id] = {
-            ...next[id],
-            session: null,
-            status: 'dormant',
-            error: undefined,
-            sourceRevision: revision,
-            sourceState: 'current',
-          };
-        }
-        return next;
-      });
-      if (active && ids.includes(active)) await openEntry(active, undefined, { force: true });
-      else {
-        updateTabs((current) =>
-          Object.fromEntries(
-            Object.entries(current).map(([id, tab]) => [
-              id,
-              ids.includes(id) ? { ...tab, sourceRevision: revision, sourceState: 'current' } : tab,
-            ]),
-          ),
-        );
-      }
-    },
-    [openEntry, updateTabs],
-  );
 
   useEffect(() => {
     if (restoredWorkspaceStarted.current) return;
@@ -1279,20 +1348,9 @@ export function App() {
   const keepSourceSnapshot = useCallback(() => {
     const prompt = sourcePrompts[0];
     if (!prompt) return;
-    if (prompt.revision) {
-      updateTabs((current) =>
-        Object.fromEntries(
-          Object.entries(current).map(([id, tab]) => [
-            id,
-            sameFilePath(tabSourcePath(id, tab), prompt.sourcePath)
-              ? { ...tab, sourceRevision: prompt.revision }
-              : tab,
-          ]),
-        ),
-      );
-    }
+    if (prompt.revision) rememberSourceRevision(prompt.sourcePath, prompt.revision);
     closeSourcePrompt();
-  }, [closeSourcePrompt, sourcePrompts, updateTabs]);
+  }, [closeSourcePrompt, rememberSourceRevision, sourcePrompts]);
   const saveDeletedSnapshot = useCallback(
     async (prompt: SourceChangePrompt) => {
       if (!prompt.entryKey) return;
@@ -1387,6 +1445,8 @@ export function App() {
         onSearchEnabledChange={(enabled) => void changeSearchEnabled(enabled)}
         uiTemplate={uiTemplate}
         onUiTemplateChange={changeUiTemplate}
+        sourceModifiedAction={sourceModifiedAction}
+        onSourceModifiedActionChange={changeSourceModifiedAction}
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
         onOpenAi={() => void (aiOpen ? closeAiWorkspace() : openAiWorkspace())}
@@ -1472,7 +1532,7 @@ export function App() {
             const prompt = sourcePrompt;
             closeSourcePrompt();
             if (prompt.kind === 'modified') {
-              void reloadSource(prompt.sourcePath, prompt.revision);
+              void reloadSource(prompt.sourcePath, prompt.revision, 'explicit');
             } else if (prompt.kind === 'deleted' && sourcePromptCanSave) {
               void saveDeletedSnapshot(prompt);
             }

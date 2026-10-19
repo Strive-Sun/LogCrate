@@ -4,6 +4,7 @@ import type { UpdateStatus } from '../util/update';
 import { SettingsPanel } from './SettingsPanel';
 import { useI18n } from '../i18n/I18nProvider';
 import type { UiTemplate } from '../util/uiTemplate';
+import type { SourceModifiedAction } from '../util/sourceModification';
 
 interface Props {
   onOpenSearch: () => void;
@@ -13,6 +14,8 @@ interface Props {
   onSearchEnabledChange: (enabled: boolean) => void;
   uiTemplate: UiTemplate;
   onUiTemplateChange: (template: UiTemplate) => void;
+  sourceModifiedAction: SourceModifiedAction;
+  onSourceModifiedActionChange: (action: SourceModifiedAction) => void;
   theme: 'dark' | 'light';
   onToggleTheme: () => void;
   onOpenAi?: () => void;
@@ -178,6 +181,8 @@ export function TopBar(props: Props) {
             onSearchEnabledChange={props.onSearchEnabledChange}
             uiTemplate={props.uiTemplate}
             onUiTemplateChange={props.onUiTemplateChange}
+            sourceModifiedAction={props.sourceModifiedAction}
+            onSourceModifiedActionChange={props.onSourceModifiedActionChange}
           />
         </>
       )}
