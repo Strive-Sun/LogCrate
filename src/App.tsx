@@ -975,6 +975,16 @@ export function App() {
     [reloadSourceNow],
   );
 
+  /** 选项卡右键“重新加载”:与提示框同一路径,不受外部修改处理偏好限制。 */
+  const reloadTab = useCallback(
+    (entryKey: string) => {
+      const tab = tabsRef.current[entryKey];
+      if (!tab || tab.sourceState === 'deleted') return;
+      void reloadSource(tabSourcePath(entryKey, tab), undefined, 'explicit');
+    },
+    [reloadSource],
+  );
+
   const rememberSourceRevision = useCallback(
     (sourcePath: string, revision: string) => {
       updateTabs((current) =>
@@ -1667,6 +1677,7 @@ export function App() {
               activeId={activeKey}
               onActivate={activateLogTab}
               onClose={closeLogTab}
+              onReload={reloadTab}
               onCapacityChange={handleCapacityChange}
             />
             <div className="log-panels">

@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { useI18n } from '../i18n/I18nProvider';
+import { ContextMenu } from './ContextMenu';
 
 export type LogTabStatus = 'opening' | 'ready' | 'dormant' | 'error';
 
@@ -8,6 +9,8 @@ export interface LogTabItem {
   title: string;
   absolutePath: string;
   status: LogTabStatus;
+  /** 磁盘源已被删除时右键菜单中的“重新加载”不可用。 */
+  sourceState?: 'current' | 'deleted';
 }
 
 interface Props {
@@ -17,6 +20,7 @@ interface Props {
   activeId: string | null;
   onActivate: (id: string) => void;
   onClose: (id: string) => void;
+  onReload?: (id: string) => void;
   onCapacityChange: (capacity: number) => void;
 }
 
@@ -30,6 +34,7 @@ export function LogTabs({
   activeId,
   onActivate,
   onClose,
+  onReload,
   onCapacityChange,
 }: Props) {
   const { t } = useI18n();
@@ -37,6 +42,13 @@ export function LogTabs({
   const menuRef = useRef<HTMLDivElement>(null);
   const moreButtonRef = useRef<HTMLButtonElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [tabMenu, setTabMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const menuTab = tabMenu ? tabs[tabMenu.id] : undefined;
+  const openTabMenu = (event: ReactMouseEvent, id: string) => {
+    event.preventDefault();
+    setMenuOpen(false);
+    setTabMenu({ id, x: event.clientX, y: event.clientY });
+  };
   const totalCount = visibleIds.length + overflowIds.length;
 
   useEffect(() => {
@@ -96,6 +108,7 @@ export function LogTabs({
               key={id}
               className={'log-tab' + (activeId === id ? ' active' : '')}
               title={tab.absolutePath}
+              onContextMenu={(event) => openTabMenu(event, id)}
             >
               <button
                 type="button"
@@ -141,7 +154,12 @@ export function LogTabs({
                 const tab = tabs[id];
                 if (!tab) return null;
                 return (
-                  <div key={id} className="log-tabs-menu-item" title={tab.absolutePath}>
+                  <div
+                    key={id}
+                    className="log-tabs-menu-item"
+                    title={tab.absolutePath}
+                    onContextMenu={(event) => openTabMenu(event, id)}
+                  >
                     <button
                       type="button"
                       className="log-tabs-menu-main"
@@ -171,6 +189,22 @@ export function LogTabs({
             </div>
           )}
         </div>
+      )}
+
+      {tabMenu && menuTab && (
+        <ContextMenu
+          x={tabMenu.x}
+          y={tabMenu.y}
+          onClose={() => setTabMenu(null)}
+          items={[
+            {
+              label: t('tabs.reload'),
+              disabled: !onReload || menuTab.sourceState === 'deleted',
+              onClick: () => onReload?.(tabMenu.id),
+            },
+            { label: t('tabs.closeTab'), onClick: () => onClose(tabMenu.id) },
+          ]}
+        />
       )}
     </div>
   );
