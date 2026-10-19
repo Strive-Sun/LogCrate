@@ -561,7 +561,10 @@ export const mockApi = {
     ];
   },
 
-  async openLogSession(entryKey: string): Promise<OpenSessionResult> {
+  async openLogSession(
+    entryKey: string,
+    _options?: { detached?: boolean },
+  ): Promise<OpenSessionResult> {
     const meta = ENTRY_TABLE[entryKey];
     if (!meta) throw new Error(`条目不存在: ${entryKey}`);
     if (!meta.entry.isLog) throw new Error('该条目不是文本日志,无法查看');
@@ -575,6 +578,12 @@ export const mockApi = {
       evictedSessionIds: [],
     };
   },
+
+  async waitForLogSessionIndex(sessionId: string, _indexing: boolean): Promise<number> {
+    return ENTRY_TABLE[sessionId.replace(/^sess:/, '')]?.lineCount ?? 0;
+  },
+
+  adoptLogSession(_entryKey: string, _sessionId: string, _lineCount: number): void {},
 
   async openDocxSession(path: string, _requestId: string) {
     return {

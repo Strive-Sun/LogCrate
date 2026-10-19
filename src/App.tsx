@@ -54,6 +54,7 @@ import {
   saveUiTemplate,
   type UiTemplate,
 } from './util/uiTemplate';
+import { replaceSession } from './util/sessionReplacement';
 import {
   createSourceReloadQueue,
   decideSourceRevisionChange,
@@ -650,7 +651,7 @@ export function App() {
     async (
       entryKey: string,
       unreadId?: string,
-      options?: { force?: boolean; document?: boolean; quiet?: boolean },
+      options?: { force?: boolean; document?: boolean; quiet?: boolean; replace?: boolean },
     ): Promise<boolean> => {
       const existing = tabsRef.current[entryKey];
       const isDocument =
@@ -660,6 +661,55 @@ export function App() {
       updateTabLayout((layout) => openTab(layout, entryKey));
       // 打开压缩包内文件时由 activeKey 高亮该文件本身,不再额外高亮其外层压缩包(避免双重背景色)
       setSelectedArchive(null);
+      const previous = existing?.session;
+      if (options?.replace && previous && previous.kind !== 'docx' && !isDocument) {
+        // 无缝重载:旧会话保持显示,替换会话完成索引后一次性接管;失败时旧会话原样保留。
+        const generation = (tabOpenGeneration.current.get(entryKey) ?? 0) + 1;
+        tabOpenGeneration.current.set(entryKey, generation);
+        try {
+          await replaceSession<OpenSessionResult>(previous.sessionId, {
+            open: async () => {
+              // 读取一行刷新旧会话的 LRU 位置,避免替换会话打开时把仍在显示的旧会话回收。
+              await api.readLines(entryKey, 0, 1).catch(() => undefined);
+              const opened = await api.openLogSession(entryKey, { detached: true });
+              updateTabs((current) => markEvictedSessions(current, opened.evictedSessionIds));
+              return opened;
+            },
+            waitForIndex: (opened) => api.waitForLogSessionIndex(opened.sessionId, opened.indexing),
+            revision: async () =>
+              (await api.fileRevision(tabSourcePath(entryKey, existing))).revision,
+            stillCurrent: () =>
+              tabOpenGeneration.current.get(entryKey) === generation &&
+              tabsRef.current[entryKey]?.sourceState !== 'deleted' &&
+              // 旧会话在等待期间被后端会话上限回收时选项卡已休眠,直接接管就绪的替换会话。
+              (tabsRef.current[entryKey]?.session === null ||
+                tabsRef.current[entryKey]?.session?.sessionId === previous.sessionId),
+            adopt: (opened, lineCount, revision) => {
+              api.adoptLogSession(entryKey, opened.sessionId, lineCount);
+              // 保留 indexing 标记,让 LogContent 订阅并回放终态索引事件以取得检测到的编码。
+              updateTabs((current) => {
+                const next = { ...current };
+                next[entryKey] = {
+                  ...next[entryKey],
+                  session: opened,
+                  sourcePath: opened.sourcePath,
+                  status: 'ready',
+                  error: undefined,
+                  sourceRevision: revision,
+                  sourceState: 'current',
+                };
+                return next;
+              });
+            },
+            close: (sessionId) => api.closeLogSession(entryKey, sessionId),
+          });
+          return true;
+        } catch (error) {
+          if (tabOpenGeneration.current.get(entryKey) !== generation) return true;
+          if (!options?.quiet) alert(t('error.cannotOpen', { error: localizedError(error) }));
+          return false;
+        }
+      }
       if (!existing) {
         updateTabs((current) => ({
           ...current,
@@ -894,7 +944,7 @@ export function App() {
         return next;
       });
       if (active && ids.includes(active)) {
-        return openEntry(active, undefined, { force: true, quiet });
+        return openEntry(active, undefined, { force: true, quiet, replace: true });
       } else {
         updateTabs((current) =>
           Object.fromEntries(

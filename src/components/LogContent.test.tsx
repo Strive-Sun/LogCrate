@@ -1850,3 +1850,322 @@ test('whole-word and case-sensitive options recalculate rendered keyword fragmen
   view.rerender(row(false));
   assert.equal(view.container.querySelectorAll('.log-find-match').length, 2);
 });
+
+function reloadLayout(): LogFieldLayout {
+  return {
+    fields: [
+      {
+        id: 'field-1',
+        name: 'Level',
+        fieldType: 'level',
+        boundary: { start: 0, end: 5 },
+        displayWidth: 5,
+      },
+      {
+        id: 'field-2',
+        name: 'Body',
+        fieldType: 'text',
+        boundary: { start: 6, end: null },
+        displayWidth: 40,
+      },
+    ],
+    pattern: { kind: 'manualColumns' },
+    confidence: 1,
+    source: 'automatic',
+  };
+}
+
+function reloadSession(sessionId: string, entryPath = 'server.log') {
+  return {
+    sessionId,
+    sourcePath: `D:\\logs\\${entryPath}`,
+    entryPath,
+    size: 1024,
+    indexing: false,
+    encoding: 'UTF-8',
+    evictedSessionIds: [],
+  };
+}
+
+function reloadTree(sessionId: string, entryKey = 'server.log') {
+  return (
+    <I18nProvider>
+      <AiWorkspaceProvider>
+        <LogContent
+          active
+          activeKey={entryKey}
+          sourceName={entryKey}
+          status="ready"
+          session={reloadSession(sessionId, entryKey)}
+        />
+      </AiWorkspaceProvider>
+    </I18nProvider>
+  );
+}
+
+function setScrollMetrics(element: HTMLElement, metrics: { height: number; client: number }) {
+  Object.defineProperty(element, 'scrollHeight', { configurable: true, value: metrics.height });
+  Object.defineProperty(element, 'clientHeight', { configurable: true, value: metrics.client });
+}
+
+function runAnimationFramesImmediately() {
+  dom.window.requestAnimationFrame = (callback) => {
+    callback(0);
+    return 0;
+  };
+}
+
+function installReloadFieldApi(layout: LogFieldLayout) {
+  const requests: Array<{ conditions: LogFieldCondition[] }> = [];
+  const anchors: number[] = [];
+  let analyses = 0;
+  let generation = 0;
+  api.analyzeLogFieldLayout = async () => {
+    analyses += 1;
+    return {
+      layout,
+      sampledNonEmptyLines: 3,
+      sampledBytes: 120,
+      mainLayoutLines: 3,
+      unparsedLines: 0,
+    };
+  };
+  api.setLogFieldFilter = async (_entryKey, request) => {
+    requests.push(request);
+    return ++generation;
+  };
+  api.subscribeLogFieldProgress = (_entryKey, currentGeneration, onProgress) => {
+    onProgress({
+      sessionId: 'session',
+      generation: currentGeneration,
+      scannedLines: 3,
+      matchedLines: 2,
+      unparsedLines: 1,
+      totalLines: 3,
+      done: true,
+      failed: false,
+    });
+    return () => undefined;
+  };
+  api.logFieldStatus = async () => ({
+    generation,
+    layout,
+    conditions: [],
+    statistics: [
+      { fieldId: 'field-1', candidates: [{ value: 'INFO', count: 2 }], highCardinality: false },
+    ],
+    scannedLines: 3,
+    matchedLines: 2,
+    unparsedLines: 1,
+    totalLines: 3,
+    done: true,
+    failed: false,
+  });
+  api.locateLogFieldAnchor = async (_entryKey, _generation, originalLineNo) => {
+    anchors.push(originalLineNo);
+    return { viewIndex: 40, lineNo: 41 };
+  };
+  return { requests, anchors, analyses: () => analyses };
+}
+
+async function selectInfoCondition(probe: ReturnType<typeof installReloadFieldApi>) {
+  await harness.waitFor(() => assert.ok(harness.screen.getByRole('button', { name: /^Level ▾$/ })));
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Level ▾$/ }));
+  await harness.waitFor(() => assert.ok(harness.screen.getByText('INFO')));
+  harness.fireEvent.click(harness.screen.getByRole('checkbox', { name: /INFO/ }));
+  await harness.waitFor(() => assert.equal(probe.requests.at(-1)?.conditions.length, 1));
+}
+
+test('seamless reload keeps field conditions, result mode, and the reading position', async () => {
+  const probe = installReloadFieldApi(reloadLayout());
+  runAnimationFramesImmediately();
+  const view = harness.render(reloadTree('session-1'));
+  await selectInfoCondition(probe);
+  harness.fireEvent.change(harness.screen.getByRole('combobox', { name: 'Filter result mode' }), {
+    target: { value: 'highlight' },
+  });
+
+  const scroll = view.container.querySelector('.log-view') as HTMLElement;
+  setScrollMetrics(scroll, { height: 10_000, client: 500 });
+  scroll.scrollTop = 2_000;
+  scroll.scrollLeft = 120;
+  const analysesBefore = probe.analyses();
+  const requestsBefore = probe.requests.length;
+
+  view.rerender(reloadTree('session-2'));
+
+  assert.equal(view.container.querySelector('.log-view'), scroll, 'old view stays mounted');
+  await harness.waitFor(() => assert.equal(scroll.scrollTop, 720));
+  assert.equal(scroll.scrollLeft, 120);
+  assert.equal(probe.analyses(), analysesBefore, 'reload must not re-run layout analysis');
+  assert.equal(probe.requests.length, requestsBefore + 1);
+  const condition = probe.requests.at(-1)?.conditions[0];
+  assert.deepEqual(condition?.kind === 'discrete' ? condition.values : [], ['INFO']);
+  assert.notEqual(probe.anchors.at(-1), Number.MAX_SAFE_INTEGER);
+  assert.equal(
+    (harness.screen.getByRole('combobox', { name: 'Filter result mode' }) as HTMLSelectElement)
+      .value,
+    'highlight',
+  );
+});
+
+test('seamless reload follows the new end when the view was at the bottom', async () => {
+  const probe = installReloadFieldApi(reloadLayout());
+  runAnimationFramesImmediately();
+  const view = harness.render(reloadTree('session-1'));
+  await harness.waitFor(() => assert.ok(probe.requests.length > 0));
+  const scroll = view.container.querySelector('.log-view') as HTMLElement;
+  setScrollMetrics(scroll, { height: 10_000, client: 500 });
+  scroll.scrollTop = 9_300;
+
+  view.rerender(reloadTree('session-2'));
+  setScrollMetrics(scroll, { height: 12_000, client: 500 });
+
+  await harness.waitFor(() => assert.equal(probe.anchors.at(-1), Number.MAX_SAFE_INTEGER));
+  await harness.waitFor(() => assert.equal(scroll.scrollTop, 12_000));
+});
+
+test('seamless reload clears conditions that no longer apply instead of blocking the view', async () => {
+  const probe = installReloadFieldApi(reloadLayout());
+  const view = harness.render(reloadTree('session-1'));
+  await selectInfoCondition(probe);
+
+  const attempts: number[] = [];
+  api.setLogFieldFilter = async (_entryKey, request) => {
+    attempts.push(request.conditions.length);
+    if (request.conditions.length > 0) throw new Error('field missing');
+    return 99;
+  };
+  view.rerender(reloadTree('session-2'));
+
+  await harness.waitFor(() => assert.deepEqual(attempts, [1, 0]));
+  assert.ok(view.container.querySelector('.log-view'));
+});
+
+test('switching to a different entry is not treated as a seamless reload', async () => {
+  const probe = installReloadFieldApi(reloadLayout());
+  const view = harness.render(reloadTree('session-1'));
+  // 每次普通打开都会执行 quick 与 background 两轮布局分析。
+  await harness.waitFor(() => assert.equal(probe.analyses(), 2));
+  view.rerender(reloadTree('session-3', 'other.log'));
+  await harness.waitFor(() => assert.equal(probe.analyses(), 4));
+  assert.notEqual(probe.anchors.at(-1), Number.MAX_SAFE_INTEGER);
+});
+
+test('user filter changes during a pending reload restore are not overridden by the old position', async () => {
+  const probe = installReloadFieldApi(reloadLayout());
+  runAnimationFramesImmediately();
+  const view = harness.render(reloadTree('session-1'));
+  await selectInfoCondition(probe);
+  const scroll = view.container.querySelector('.log-view') as HTMLElement;
+  setScrollMetrics(scroll, { height: 10_000, client: 500 });
+  scroll.scrollTop = 2_000;
+
+  let releaseRestore!: () => void;
+  const restoreGate = new Promise<void>((resolve) => (releaseRestore = resolve));
+  const originalLocate = api.locateLogFieldAnchor;
+  let held = false;
+  api.locateLogFieldAnchor = async (...args) => {
+    if (!held) {
+      held = true;
+      await restoreGate;
+    }
+    return originalLocate(...args);
+  };
+  view.rerender(reloadTree('session-2'));
+  await harness.waitFor(() => assert.equal(held, true));
+
+  scroll.scrollTop = 0;
+  if (!harness.screen.queryByRole('checkbox', { name: /INFO/ })) {
+    harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Level/ }));
+  }
+  harness.fireEvent.click(await harness.screen.findByRole('checkbox', { name: /INFO/ }));
+  releaseRestore();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.notEqual(scroll.scrollTop, 720, 'stale reload snapshot must not move the view');
+});
+
+test('a queued reload scroll restore is cancelled when the user changes the view first', async () => {
+  const probe = installReloadFieldApi(reloadLayout());
+  const frames = new Map<number, FrameRequestCallback>();
+  let nextFrame = 1;
+  dom.window.requestAnimationFrame = (callback) => {
+    frames.set(nextFrame, callback);
+    return nextFrame++;
+  };
+  const originalCancel = dom.window.cancelAnimationFrame;
+  dom.window.cancelAnimationFrame = (handle) => void frames.delete(handle);
+  try {
+    const view = harness.render(reloadTree('session-1'));
+    await selectInfoCondition(probe);
+    const scroll = view.container.querySelector('.log-view') as HTMLElement;
+    setScrollMetrics(scroll, { height: 10_000, client: 500 });
+    scroll.scrollTop = 2_000;
+
+    const requestsBefore = probe.requests.length;
+    view.rerender(reloadTree('session-2'));
+    await harness.waitFor(() => assert.equal(probe.requests.length, requestsBefore + 1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(frames.size > 0, 'restore frame is queued');
+
+    scroll.scrollTop = 0;
+    harness.fireEvent.change(harness.screen.getByRole('combobox', { name: 'Filter result mode' }), {
+      target: { value: 'highlight' },
+    });
+    for (const callback of [...frames.values()]) callback(0);
+    assert.equal(scroll.scrollTop, 0, 'stale frame must not move the view');
+  } finally {
+    dom.window.cancelAnimationFrame = originalCancel;
+  }
+});
+
+test('an adopted replacement session replays its terminal index event to keep the detected encoding', async () => {
+  const probe = installReloadFieldApi(reloadLayout());
+  runAnimationFramesImmediately();
+  const originalSubscribe = api.subscribeIndexProgress;
+  api.subscribeIndexProgress = (_entryKey, onProgress, onDone) => {
+    onProgress({
+      sessionId: 'session-2',
+      percent: 100,
+      indexedLines: 300,
+      done: true,
+      failed: false,
+      detectedEncoding: 'GBK',
+      effectiveEncoding: 'GBK',
+    });
+    onDone(300);
+    return () => undefined;
+  };
+  try {
+    const view = harness.render(reloadTree('session-1'));
+    await harness.waitFor(() => assert.ok(probe.requests.length > 0));
+    const scroll = view.container.querySelector('.log-view') as HTMLElement;
+    setScrollMetrics(scroll, { height: 10_000, client: 500 });
+    scroll.scrollTop = 2_000;
+
+    view.rerender(
+      <I18nProvider>
+        <AiWorkspaceProvider>
+          <LogContent
+            active
+            activeKey="server.log"
+            sourceName="server.log"
+            status="ready"
+            session={{ ...reloadSession('session-2'), indexing: true, encoding: 'Detecting' }}
+          />
+        </AiWorkspaceProvider>
+      </I18nProvider>,
+    );
+
+    assert.equal(view.container.querySelector('.log-view'), scroll);
+    await harness.waitFor(() =>
+      assert.equal(
+        (view.container.querySelector('.encoding-select') as HTMLSelectElement).value,
+        'GBK',
+      ),
+    );
+    await harness.waitFor(() => assert.equal(scroll.scrollTop, 720));
+  } finally {
+    api.subscribeIndexProgress = originalSubscribe;
+  }
+});

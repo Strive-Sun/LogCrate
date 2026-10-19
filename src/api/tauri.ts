@@ -58,6 +58,8 @@ const pathByName = new Map<string, string>();
 const sessionByKey = new Map<string, string>();
 const totalByKey = new Map<string, number>();
 const indexProgress = new IndexProgressStore();
+// 尚未接管选项卡的替换会话的索引等待者;会话被关闭或回收时拒绝,避免重新加载永久挂起。
+const detachedIndexWaiters = new Map<string, (error: Error) => void>();
 const latestEncodingProgress = new Map<string, EncodingProgress>();
 const encodingSubscribers = new Map<string, Set<(progress: EncodingProgress) => void>>();
 const latestLogFieldProgress = new Map<string, LogFieldProgress>();
@@ -331,7 +333,11 @@ export const tauriApi = {
     return [];
   },
 
-  async openLogSession(entryKey: string): Promise<OpenSessionResult> {
+  /** `detached` 只打开后端会话而不接管 entryKey,供重新加载时在旧会话仍显示期间准备替换会话。 */
+  async openLogSession(
+    entryKey: string,
+    options?: { detached?: boolean },
+  ): Promise<OpenSessionResult> {
     let releaseQueue!: () => void;
     const previousOpen = sessionOpenQueue;
     sessionOpenQueue = new Promise<void>((resolve) => {
@@ -362,7 +368,9 @@ export const tauriApi = {
         latestEncodingProgress.delete(evictedSessionId);
         logFieldSubscribers.delete(evictedSessionId);
         latestLogFieldProgress.delete(evictedSessionId);
+        detachedIndexWaiters.get(evictedSessionId)?.(new Error('session evicted'));
       }
+      if (options?.detached) return { ...res, sourcePath };
       sessionByKey.set(entryKey, res.sessionId);
       const total = await invoke<number>('line_count', { sessionId: res.sessionId });
       totalByKey.set(entryKey, indexProgress.getLatest(res.sessionId)?.indexedLines ?? total);
@@ -370,6 +378,34 @@ export const tauriApi = {
     } finally {
       releaseQueue();
     }
+  },
+
+  /** 等待替换会话完成索引并返回总行数;会话失败、被关闭或回收时拒绝。 */
+  async waitForLogSessionIndex(sessionId: string, indexing: boolean): Promise<number> {
+    if (indexing) {
+      await new Promise<void>((resolve, reject) => {
+        let unsubscribe = () => {};
+        const settle = (error?: Error) => {
+          detachedIndexWaiters.delete(sessionId);
+          unsubscribe();
+          if (error) reject(error);
+          else resolve();
+        };
+        detachedIndexWaiters.set(sessionId, settle);
+        unsubscribe = indexProgress.subscribe(sessionId, (progress) => {
+          if (!progress.done) return true;
+          settle(progress.failed ? new Error(progress.error ?? 'index failed') : undefined);
+          return false;
+        });
+      });
+    }
+    return invoke<number>('line_count', { sessionId });
+  },
+
+  /** 让 entryKey 改为指向已就绪的替换会话。 */
+  adoptLogSession(entryKey: string, sessionId: string, lineCount: number): void {
+    sessionByKey.set(entryKey, sessionId);
+    totalByKey.set(entryKey, lineCount);
   },
 
   async openDocxSession(path: string, requestId: string): Promise<OpenDocxSessionResult> {
@@ -408,6 +444,7 @@ export const tauriApi = {
       totalByKey.delete(entryKey);
     }
     if (!sessionId) return;
+    detachedIndexWaiters.get(sessionId)?.(new Error('session closed'));
     indexProgress.clear(sessionId);
     encodingSubscribers.delete(sessionId);
     latestEncodingProgress.delete(sessionId);

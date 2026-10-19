@@ -34,6 +34,24 @@ import { AiMessageContent } from './AiMessageContent';
 import { useAiWorkspace, type AiPendingLogSnippet } from './AiWorkspaceContext';
 import { useI18n } from '../i18n/I18nProvider';
 
+/** 重新加载前位于末尾附近时的锚点:定位到新内容的最后一行。 */
+const RELOAD_FOLLOW_END = Number.MAX_SAFE_INTEGER;
+
+/** 同一条目由旧会话无缝切换到替换会话时需要恢复的查看状态。 */
+interface ReloadViewSnapshot {
+  anchorLine: number;
+  scrollLeft: number;
+  layout: LogFieldLayout | null;
+  conditions: LogFieldCondition[];
+  mode: LogFieldResultMode;
+  includeUnparsed: boolean;
+  fingerprint: string | null;
+}
+
+function plainReloadViewIndex(snapshot: ReloadViewSnapshot, totalLines: number): number {
+  return Math.max(0, Math.min(snapshot.anchorLine, Math.max(1, totalLines)) - 1);
+}
+
 interface Props {
   session: OpenSessionResult | null;
   activeKey: string | null;
@@ -359,6 +377,36 @@ export function LogContent({
   fieldModeRef.current = fieldMode;
   includeUnparsedRef.current = includeUnparsed;
   indexedLinesRef.current = indexedLines;
+  const fieldLayoutRef = useRef<LogFieldLayout | null>(null);
+  const fieldConditionsRef = useRef<LogFieldCondition[]>([]);
+  fieldLayoutRef.current = fieldLayout;
+  fieldConditionsRef.current = fieldConditions;
+  const previousSessionRef = useRef<{ key: string; sessionId: string } | null>(null);
+  const reloadRestore = useRef<ReloadViewSnapshot | null>(null);
+  const encodingRestorePending = useRef(false);
+
+  const reloadRestoreFrame = useRef<number | null>(null);
+  const cancelReloadRestore = useCallback(() => {
+    reloadRestore.current = null;
+    if (reloadRestoreFrame.current !== null) {
+      window.cancelAnimationFrame(reloadRestoreFrame.current);
+      reloadRestoreFrame.current = null;
+    }
+  }, []);
+
+  const completeReloadRestore = useCallback((snapshot: ReloadViewSnapshot, viewIndex: number) => {
+    if (reloadRestore.current !== snapshot) return;
+    reloadRestore.current = null;
+    // 等待新行数渲染为滚动高度后再定位;用户操作或会话切换会取消该帧。
+    reloadRestoreFrame.current = window.requestAnimationFrame(() => {
+      reloadRestoreFrame.current = null;
+      const element = scrollRef.current;
+      if (!element) return;
+      element.scrollTop =
+        snapshot.anchorLine === RELOAD_FOLLOW_END ? element.scrollHeight : viewIndex * 18;
+      element.scrollLeft = snapshot.scrollLeft;
+    });
+  }, []);
 
   const flushAiDeltas = useCallback(
     (generation: number) => {
@@ -573,6 +621,13 @@ export function LogContent({
     pending.current = new Set();
   }, []);
 
+  // 重新加载时编码恢复失败也要继续恢复字段与滚动状态。
+  const releaseEncodingRestore = useCallback(() => {
+    if (!encodingRestorePending.current) return;
+    encodingRestorePending.current = false;
+    setFieldEncodingVersion((value) => value + 1);
+  }, []);
+
   const rebuildForEncoding = useCallback(
     async (entryKey: string, encoding: string) => {
       encodingUnsub.current();
@@ -595,6 +650,7 @@ export function LogContent({
           setEncodingChanging(false);
           if (progress.failed) {
             alert(t('error.encodingFailed', { error: progress.error ?? t('common.unknown') }));
+            releaseEncodingRestore();
             return;
           }
           preferredEncoding.current = progress.encoding;
@@ -602,15 +658,17 @@ export function LogContent({
           setTotalLines(progress.lineCount);
           setIndexedLines(progress.lineCount);
           clearLineCache();
-          scrollRef.current?.scrollTo({ top: 0 });
+          if (!reloadRestore.current) scrollRef.current?.scrollTo({ top: 0 });
+          encodingRestorePending.current = false;
           setFieldEncodingVersion((value) => value + 1);
         });
       } catch (error) {
         setEncodingChanging(false);
         alert(t('error.encodingFailed', { error: String(error) }));
+        releaseEncodingRestore();
       }
     },
-    [clearLineCache, t],
+    [clearLineCache, releaseEncodingRestore, t],
   );
 
   useEffect(
@@ -623,7 +681,12 @@ export function LogContent({
 
   // 打开新条目:重置并按需订阅建索引进度
   useEffect(() => {
+    const previous = previousSessionRef.current;
+    previousSessionRef.current =
+      session && activeKey ? { key: activeKey, sessionId: session.sessionId } : null;
+    cancelReloadRestore();
     if (!session || !activeKey) {
+      encodingRestorePending.current = false;
       clearLineCache();
       setTotalLines(0);
       setIndexedLines(0);
@@ -631,6 +694,25 @@ export function LogContent({
       encodingUnsub.current();
       return;
     }
+    // 同一条目直接由旧会话切换到替换会话即为无缝重载:在重置前记录查看状态。
+    const reloading = previous?.key === activeKey && previous.sessionId !== session.sessionId;
+    const element = scrollRef.current;
+    reloadRestore.current = reloading
+      ? {
+          anchorLine:
+            element &&
+            element.scrollHeight - element.scrollTop - element.clientHeight <= element.clientHeight
+              ? RELOAD_FOLLOW_END
+              : Math.max(1, currentLineRef.current),
+          scrollLeft: element?.scrollLeft ?? 0,
+          layout: fieldLayoutRef.current,
+          conditions: fieldConditionsRef.current,
+          mode: fieldModeRef.current,
+          includeUnparsed: includeUnparsedRef.current,
+          fingerprint: fieldLayoutFingerprint.current,
+        }
+      : null;
+    encodingRestorePending.current = false;
     const encodingToRestore = preferredEncoding.current;
     if (!encodingToRestore) preferredEncoding.current = session.encoding;
     clearLineCache();
@@ -641,7 +723,9 @@ export function LogContent({
     setDetectedEncoding(session.encoding);
     setEncodingChanging(false);
     encodingUnsub.current();
-    scrollRef.current?.scrollTo({ top: 0 });
+    if (!reloading) scrollRef.current?.scrollTo({ top: 0 });
+    const restoreEncoding = Boolean(encodingToRestore && encodingToRestore !== session.encoding);
+    if (restoreEncoding) encodingRestorePending.current = reloading;
 
     if (session.indexing) {
       setIndexing(true);
@@ -660,9 +744,7 @@ export function LogContent({
           setPercent(100);
           setIndexedLines(finalTotal);
           setTotalLines(finalTotal);
-          if (encodingToRestore && encodingToRestore !== session.encoding) {
-            void rebuildForEncoding(activeKey, encodingToRestore);
-          }
+          if (restoreEncoding) void rebuildForEncoding(activeKey, encodingToRestore!);
         },
       );
       return unsub;
@@ -670,23 +752,26 @@ export function LogContent({
       setIndexing(false);
       setPercent(100);
       setIndexedLines(total);
-      if (encodingToRestore && encodingToRestore !== session.encoding) {
-        void rebuildForEncoding(activeKey, encodingToRestore);
-      }
+      if (restoreEncoding) void rebuildForEncoding(activeKey, encodingToRestore!);
     }
-  }, [session, activeKey, rebuildForEncoding, clearLineCache]);
+  }, [session, activeKey, rebuildForEncoding, cancelReloadRestore, clearLineCache]);
 
   const applyFieldFilter = useCallback(
-    async (entryKey: string, layout: LogFieldLayout, conditions: LogFieldCondition[]) => {
+    async (
+      entryKey: string,
+      layout: LogFieldLayout,
+      conditions: LogFieldCondition[],
+    ): Promise<boolean> => {
       const requestGeneration = ++fieldRequestGeneration.current;
+      const restore = reloadRestore.current;
       fieldUnsub.current();
-      fieldAnchor.current = Math.max(1, currentLineRef.current);
+      fieldAnchor.current = restore?.anchorLine ?? Math.max(1, currentLineRef.current);
       setFieldFiltering(true);
       setFieldError(null);
       clearLineCache();
       try {
         const generation = await api.setLogFieldFilter(entryKey, { layout, conditions });
-        if (requestGeneration !== fieldRequestGeneration.current) return;
+        if (requestGeneration !== fieldRequestGeneration.current) return true;
         // Clearing at request start prevents the previous view from lingering, but that render can
         // still enqueue another page read against the previous field generation. Advance the cache
         // namespace again when the backend activates the new generation so that response cannot
@@ -710,6 +795,11 @@ export function LogContent({
             setFieldGeneration(null);
             clearLineCache();
             setTotalLines(indexedLinesRef.current);
+            if (restore) {
+              // 重新加载后原条件无法应用时清空条件,保持全文可查看。
+              setFieldConditions([]);
+              completeReloadRestore(restore, plainReloadViewIndex(restore, progress.totalLines));
+            }
             return;
           }
           void api.logFieldStatus(entryKey).then((status) => {
@@ -724,21 +814,23 @@ export function LogContent({
               includeUnparsedRef.current,
             )
             .then((anchor) => {
-              if (anchor && requestGeneration === fieldRequestGeneration.current) {
-                scrollRef.current?.scrollTo({ top: anchor.viewIndex * 18 });
-              }
+              if (requestGeneration !== fieldRequestGeneration.current) return;
+              if (restore) completeReloadRestore(restore, anchor?.viewIndex ?? 0);
+              else if (anchor) scrollRef.current?.scrollTo({ top: anchor.viewIndex * 18 });
             });
         });
+        return true;
       } catch (error) {
-        if (requestGeneration !== fieldRequestGeneration.current) return;
+        if (requestGeneration !== fieldRequestGeneration.current) return true;
         setFieldFiltering(false);
         setFieldError(String(error));
         setFieldGeneration(null);
         clearLineCache();
         setTotalLines(indexedLinesRef.current);
+        return false;
       }
     },
-    [clearLineCache, t],
+    [clearLineCache, completeReloadRestore, t],
   );
 
   useEffect(() => {
@@ -759,6 +851,52 @@ export function LogContent({
       return;
     }
     let cancelled = false;
+    const restore = reloadRestore.current;
+    if (restore) {
+      // 无缝重载:沿用内存中的布局与条件,不再核对存储布局或做后台分析。
+      fieldLayoutFingerprint.current = restore.fingerprint;
+      fieldModeRef.current = restore.mode;
+      includeUnparsedRef.current = restore.includeUnparsed;
+      setFieldMode(restore.mode);
+      setIncludeUnparsed(restore.includeUnparsed);
+      if (restore.layout) {
+        setFieldLayout(restore.layout);
+        setFieldConditions(restore.conditions);
+      }
+      // 编码重建完成后会再次触发本 effect,届时再按新编码应用条件。
+      if (encodingRestorePending.current) return;
+      const restoreView = async () => {
+        let layout = restore.layout;
+        if (!layout) {
+          setFieldRecognizing(true);
+          const quick = await api.analyzeLogFieldLayout(activeKey, 'quick');
+          if (cancelled) return;
+          layout = quick.layout ?? fallbackBodyLayout(t('fields.body'));
+          fieldLayoutFingerprint.current = quick.layout ? layoutFingerprint(layout) : null;
+          setFieldLayout(layout);
+          setFieldRecognizing(false);
+        }
+        const conditions = restore.layout ? restore.conditions : [];
+        if (await applyFieldFilter(activeKey, layout, conditions)) return;
+        if (cancelled) return;
+        if (conditions.length > 0) {
+          setFieldConditions([]);
+          if (await applyFieldFilter(activeKey, layout, [])) return;
+        }
+        if (!cancelled) {
+          completeReloadRestore(restore, plainReloadViewIndex(restore, api.lineCount(activeKey)));
+        }
+      };
+      void restoreView().catch(() => {
+        if (cancelled) return;
+        setFieldRecognizing(false);
+        completeReloadRestore(restore, plainReloadViewIndex(restore, api.lineCount(activeKey)));
+      });
+      return () => {
+        cancelled = true;
+        fieldUnsub.current();
+      };
+    }
     const saved = loadLogFieldLayout(localStorage, activeKey);
     const start = async () => {
       setFieldRecognizing(true);
@@ -834,7 +972,16 @@ export function LogContent({
       cancelled = true;
       fieldUnsub.current();
     };
-  }, [activeKey, applyFieldFilter, clearLineCache, fieldEncodingVersion, session, status, t]);
+  }, [
+    activeKey,
+    applyFieldFilter,
+    clearLineCache,
+    completeReloadRestore,
+    fieldEncodingVersion,
+    session,
+    status,
+    t,
+  ]);
 
   const rowVirtualizer = useVirtualizer({
     count: totalLines,
@@ -992,8 +1139,15 @@ export function LogContent({
     }
   }, [items, activeKey, cache, totalLines, fieldGeneration, fieldMode, includeUnparsed]);
 
+  // 用户在重新加载恢复完成前主动操作视图时,放弃尚未应用的恢复快照。
+  function abandonReloadRestore() {
+    cancelReloadRestore();
+    if (encodingRestorePending.current) encodingRestorePending.current = false;
+  }
+
   function changeFieldConditions(conditions: LogFieldCondition[]) {
     if (!activeKey || !fieldLayout) return;
+    abandonReloadRestore();
     fieldUserInteracted.current = true;
     fieldAnchor.current = currentLine;
     if (fieldConditions.length === 0 && conditions.length > 0) {
@@ -1008,6 +1162,7 @@ export function LogContent({
     trigger: 'boundary' | 'name' | 'type' | 'split' | 'merge',
   ) {
     if (!activeKey) return;
+    abandonReloadRestore();
     fieldUserInteracted.current = true;
     setFieldLayout(layout);
     setFieldConditions([]);
@@ -1035,6 +1190,7 @@ export function LogContent({
   }
 
   function switchFieldMode(mode: LogFieldResultMode) {
+    abandonReloadRestore();
     setFieldMode(mode);
     fieldModeRef.current = mode;
     clearLineCache();
@@ -1051,6 +1207,7 @@ export function LogContent({
   }
 
   function toggleUnparsed(show: boolean) {
+    abandonReloadRestore();
     setIncludeUnparsed(show);
     includeUnparsedRef.current = show;
     clearLineCache();
@@ -1059,6 +1216,7 @@ export function LogContent({
 
   async function clearFieldFilters() {
     if (!activeKey) return;
+    abandonReloadRestore();
     fieldUnsub.current();
     fieldRequestGeneration.current += 1;
     await api.clearLogFieldFilter(activeKey);
@@ -1075,6 +1233,7 @@ export function LogContent({
 
   async function reanalyzeFieldLayout() {
     if (!activeKey) return;
+    abandonReloadRestore();
     fieldUserInteracted.current = false;
     setFieldRecognizing(true);
     try {
@@ -1121,6 +1280,7 @@ export function LogContent({
 
   async function changeEncoding(encoding: string) {
     if (!activeKey || encoding === effectiveEncoding) return;
+    abandonReloadRestore();
     await rebuildForEncoding(activeKey, encoding);
   }
 
