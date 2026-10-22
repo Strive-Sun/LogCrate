@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
@@ -55,6 +55,13 @@ import {
   type UiTemplate,
 } from './util/uiTemplate';
 import { replaceSession } from './util/sessionReplacement';
+import {
+  loadLogFont,
+  logFontStyle,
+  logRowHeight,
+  saveLogFont,
+  type LogFontPreference,
+} from './util/logFont';
 import {
   createSourceReloadQueue,
   decideSourceRevisionChange,
@@ -159,6 +166,9 @@ export function App() {
     loadSourceModifiedAction(localStorage),
   );
   const sourceModifiedActionRef = useRef(sourceModifiedAction);
+  const [logFont, setLogFont] = useState(() => loadLogFont(localStorage));
+  const logPanelFontStyle = useMemo(() => logFontStyle(logFont), [logFont]);
+  const logPanelRowHeight = logRowHeight(logFont.size);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [fileSearchMounted, setFileSearchMounted] = useState(false);
   const [searchFeature, setSearchFeature] = useState<FileSearchFeatureState | null>(null);
@@ -326,6 +336,11 @@ export function App() {
   const changeUiTemplate = useCallback((template: UiTemplate) => {
     setUiTemplate(template);
     saveUiTemplate(localStorage, template);
+  }, []);
+
+  const changeLogFont = useCallback((preference: LogFontPreference) => {
+    setLogFont(preference);
+    saveLogFont(localStorage, preference);
   }, []);
 
   const changeSourceModifiedAction = useCallback((action: SourceModifiedAction) => {
@@ -1507,6 +1522,8 @@ export function App() {
         onUiTemplateChange={changeUiTemplate}
         sourceModifiedAction={sourceModifiedAction}
         onSourceModifiedActionChange={changeSourceModifiedAction}
+        logFont={logFont}
+        onLogFontChange={changeLogFont}
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
         onOpenAi={() => void (aiOpen ? closeAiWorkspace() : openAiWorkspace())}
@@ -1685,6 +1702,8 @@ export function App() {
                 <LogContent
                   session={null}
                   activeKey={null}
+                  rowHeight={logPanelRowHeight}
+                  fontStyle={logPanelFontStyle}
                   aiOpen={aiOpen}
                   aiWorkspaceHost={aiWorkspaceHost}
                   onAiOpen={openAiWorkspace}
@@ -1705,6 +1724,8 @@ export function App() {
                         <LogContent
                           session={tab.session}
                           activeKey={id}
+                          rowHeight={logPanelRowHeight}
+                          fontStyle={logPanelFontStyle}
                           sourceName={tab.title}
                           active={activeKey === id && !fileSearchOpen}
                           status={tab.status}

@@ -5,6 +5,7 @@ import { SettingsPanel } from './SettingsPanel';
 import { useI18n } from '../i18n/I18nProvider';
 import type { UiTemplate } from '../util/uiTemplate';
 import type { SourceModifiedAction } from '../util/sourceModification';
+import type { LogFontPreference } from '../util/logFont';
 
 interface Props {
   onOpenSearch: () => void;
@@ -16,6 +17,8 @@ interface Props {
   onUiTemplateChange: (template: UiTemplate) => void;
   sourceModifiedAction: SourceModifiedAction;
   onSourceModifiedActionChange: (action: SourceModifiedAction) => void;
+  logFont: LogFontPreference;
+  onLogFontChange: (preference: LogFontPreference) => void;
   theme: 'dark' | 'light';
   onToggleTheme: () => void;
   onOpenAi?: () => void;
@@ -183,6 +186,8 @@ export function TopBar(props: Props) {
             onUiTemplateChange={props.onUiTemplateChange}
             sourceModifiedAction={props.sourceModifiedAction}
             onSourceModifiedActionChange={props.onSourceModifiedActionChange}
+            logFont={props.logFont}
+            onLogFontChange={props.onLogFontChange}
           />
         </>
       )}

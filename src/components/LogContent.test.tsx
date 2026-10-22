@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import test, { afterEach, before, beforeEach } from 'node:test';
 import { JSDOM } from 'jsdom';
 import { useState } from 'react';
-import type { ComponentProps } from 'react';
+import type { ComponentProps, CSSProperties } from 'react';
 import {
   api,
   type AiLogSnippetInput,
@@ -2371,4 +2371,34 @@ test('a row height change during a pending reload keeps the in-row offset propor
   release();
   // 2000 / 18 = 索引 111 再下移 2px(行内 1/9);锚点视图索引 40,行高 24 时偏移 24/9。
   await harness.waitFor(() => assert.ok(Math.abs(scroll.scrollTop - (40 * 24 + 24 / 9)) < 1e-6));
+});
+
+test('font style variables are applied to the log panel only', () => {
+  installReloadFieldApi(reloadLayout());
+  const view = harness.render(
+    <I18nProvider>
+      <AiWorkspaceProvider>
+        <LogContent
+          active
+          activeKey="server.log"
+          sourceName="server.log"
+          status="ready"
+          session={reloadSession('session-1')}
+          rowHeight={23}
+          fontStyle={{ '--log-font-size': '15px', '--log-font': 'serif' } as CSSProperties}
+        />
+      </AiWorkspaceProvider>
+    </I18nProvider>,
+  );
+  const panel = view.container.querySelector('.log-content-panel') as HTMLElement;
+  assert.equal(panel.style.getPropertyValue('--log-font-size'), '15px');
+  assert.equal(panel.style.getPropertyValue('--log-font'), 'serif');
+  assert.equal(panel.style.getPropertyValue('--log-row-height'), '23px');
+});
+
+test('App passes the log font preference to every log panel', () => {
+  const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+  assert.equal(app.match(/rowHeight=\{logPanelRowHeight\}/g)?.length, 2);
+  assert.equal(app.match(/fontStyle=\{logPanelFontStyle\}/g)?.length, 2);
+  assert.match(app, /logRowHeight\(logFont\.size\)/);
 });

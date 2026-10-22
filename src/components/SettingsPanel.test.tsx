@@ -54,6 +54,8 @@ function renderSettings(overrides: Partial<ComponentProps<typeof SettingsPanel>>
     onUiTemplateChange: () => undefined,
     sourceModifiedAction: 'ask',
     onSourceModifiedActionChange: () => undefined,
+    logFont: { family: 'default', size: 12 },
+    onLogFontChange: () => undefined,
     ...overrides,
   };
   return harness.render(
@@ -277,6 +279,8 @@ test('disabled search entry cannot be clicked and exposes its settings hint on h
     onUiTemplateChange: () => undefined,
     sourceModifiedAction: 'ask',
     onSourceModifiedActionChange: () => undefined,
+    logFont: { family: 'default', size: 12 },
+    onLogFontChange: () => undefined,
     theme: 'light',
     onToggleTheme: () => undefined,
     count: 0,
@@ -321,6 +325,8 @@ test('enabled search entry opens only through normal button activation without s
     onUiTemplateChange: () => undefined,
     sourceModifiedAction: 'ask',
     onSourceModifiedActionChange: () => undefined,
+    logFont: { family: 'default', size: 12 },
+    onLogFontChange: () => undefined,
     theme: 'light',
     onToggleTheme: () => undefined,
     count: 0,
@@ -353,4 +359,30 @@ test('enabled search entry opens only through normal button activation without s
   assert.equal(opened, 0);
   harness.fireEvent.click(search);
   assert.equal(opened, 1);
+});
+
+test('log font and size preferences show the current choice and report changes', () => {
+  const changes: unknown[] = [];
+  renderSettings({
+    logFont: { family: 'consolas', size: 14 },
+    onLogFontChange: (preference) => changes.push(preference),
+  });
+  const family = harness.screen.getByRole('combobox', { name: 'Log font' }) as HTMLSelectElement;
+  const size = harness.screen.getByRole('combobox', { name: 'Log font size' }) as HTMLSelectElement;
+  assert.equal(family.value, 'consolas');
+  assert.equal(size.value, '14');
+  assert.deepEqual(
+    [...family.options].map((option) => option.textContent),
+    ['Default monospace', 'Consolas', 'Lucida Console', 'Microsoft YaHei'],
+  );
+  assert.deepEqual(
+    [...size.options].map((option) => option.value),
+    ['12', '13', '14', '15', '16', '18', '20'],
+  );
+  harness.fireEvent.change(family, { target: { value: 'yahei' } });
+  harness.fireEvent.change(size, { target: { value: '18' } });
+  assert.deepEqual(changes, [
+    { family: 'yahei', size: 14 },
+    { family: 'consolas', size: 18 },
+  ]);
 });

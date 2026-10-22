@@ -10,6 +10,13 @@ import { errorMessage, formatBytes, type UpdateStatus } from '../util/update';
 import { useI18n } from '../i18n/I18nProvider';
 import type { UiTemplate } from '../util/uiTemplate';
 import { isSourceModifiedAction, type SourceModifiedAction } from '../util/sourceModification';
+import {
+  LOG_FONT_FAMILIES,
+  LOG_FONT_SIZES,
+  isLogFontFamily,
+  isLogFontSize,
+  type LogFontPreference,
+} from '../util/logFont';
 
 interface Props {
   currentVersion: string;
@@ -32,6 +39,8 @@ interface Props {
   onUiTemplateChange: (template: UiTemplate) => void;
   sourceModifiedAction: SourceModifiedAction;
   onSourceModifiedActionChange: (action: SourceModifiedAction) => void;
+  logFont: LogFontPreference;
+  onLogFontChange: (preference: LogFontPreference) => void;
 }
 
 const busyStatuses: UpdateStatus[] = ['checking', 'downloading', 'installing'];
@@ -550,6 +559,50 @@ export function SettingsPanel(props: Props) {
             <option value="ask">{t('settings.sourceModified.ask')}</option>
             <option value="reload">{t('settings.sourceModified.reload')}</option>
             <option value="ignore">{t('settings.sourceModified.ignore')}</option>
+          </select>
+        </label>
+
+        <label className="settings-row">
+          <div>
+            <div className="settings-label">{t('settings.logFont')}</div>
+            <div className="settings-hint">{t('settings.logFontHint')}</div>
+          </div>
+          <select
+            className="language-select"
+            aria-label={t('settings.logFont')}
+            value={props.logFont.family}
+            onChange={(event) => {
+              const family = event.target.value;
+              if (isLogFontFamily(family)) props.onLogFontChange({ ...props.logFont, family });
+            }}
+          >
+            {LOG_FONT_FAMILIES.map((family) => (
+              <option key={family} value={family}>
+                {t(`settings.logFont.${family}`)}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="settings-row">
+          <div>
+            <div className="settings-label">{t('settings.logFontSize')}</div>
+            <div className="settings-hint">{t('settings.logFontSizeHint')}</div>
+          </div>
+          <select
+            className="language-select"
+            aria-label={t('settings.logFontSize')}
+            value={props.logFont.size}
+            onChange={(event) => {
+              const size = Number(event.target.value);
+              if (isLogFontSize(size)) props.onLogFontChange({ ...props.logFont, size });
+            }}
+          >
+            {LOG_FONT_SIZES.map((size) => (
+              <option key={size} value={size}>
+                {size}px
+              </option>
+            ))}
           </select>
         </label>
       </div>
