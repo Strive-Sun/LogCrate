@@ -6,6 +6,8 @@ import { useI18n } from '../i18n/I18nProvider';
 
 interface Props {
   top: number;
+  /** 行高(px),需与虚拟列表测量一致。 */
+  height?: number;
   lineNo: number;
   line: LogLine | undefined;
   ready: boolean;
@@ -20,6 +22,7 @@ interface Props {
 /** 单行日志:行号固定在左、内容可横向滚动、级别着色、截断标记 */
 export const LogRow = memo(function LogRow({
   top,
+  height = 18,
   lineNo,
   line,
   ready,
@@ -71,7 +74,7 @@ export const LogRow = memo(function LogRow({
   return (
     <div
       className={fieldMatched ? 'log-line log-field-matched' : 'log-line'}
-      style={{ position: 'absolute', top, left: 0, right: 0, height: 18 }}
+      style={{ position: 'absolute', top, left: 0, right: 0, height }}
     >
       <span className="ln">{lineNo}</span>
       <span className="txt">

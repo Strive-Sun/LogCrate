@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { api } from '../api';
@@ -41,7 +41,7 @@ const RELOAD_FOLLOW_END = Number.MAX_SAFE_INTEGER;
 interface ReloadViewSnapshot {
   /** 视口顶部可见行的原始行号(不含虚拟列表 overscan 行)。 */
   anchorLine: number;
-  /** 顶部可见行已滚出视口的像素,恢复时保持同样的半行偏移。 */
+  /** 顶部可见行已滚出视口的比例(0–1),恢复时按当时的行高换算,行高中途变化也保持行内位置。 */
   rowOffset: number;
   scrollLeft: number;
   layout: LogFieldLayout | null;
@@ -67,6 +67,8 @@ interface Props {
   onAiOpen?: () => Promise<void>;
   onAiClose?: () => Promise<void>;
   sourceName?: string;
+  /** 日志行高(px);虚拟列表测量与全部滚动定位均使用该值。 */
+  rowHeight?: number;
 }
 
 const PAGE = 200;
@@ -248,9 +250,12 @@ export function LogContent({
   onAiOpen,
   onAiClose,
   sourceName = '日志选区',
+  rowHeight = 18,
 }: Props) {
   const { t } = useI18n();
   const scrollRef = useRef<HTMLDivElement>(null);
+  // 回调与 effect 通过 ref 读取最新行高,行高变化时由下方布局 effect 统一处理滚动换算。
+  const rowHeightRef = useRef(rowHeight);
   const [percent, setPercent] = useState(100);
   const [indexedLines, setIndexedLines] = useState(0);
   const [totalLines, setTotalLines] = useState(0);
@@ -416,7 +421,7 @@ export function LogContent({
       element.scrollTop =
         snapshot.anchorLine === RELOAD_FOLLOW_END
           ? element.scrollHeight
-          : viewIndex * 18 + snapshot.rowOffset;
+          : (viewIndex + snapshot.rowOffset) * rowHeightRef.current;
       element.scrollLeft = snapshot.scrollLeft;
       setReloadSettleTick((tick) => tick + 1);
     });
@@ -722,7 +727,7 @@ export function LogContent({
     }
     const element = scrollRef.current;
     // 以 scrollTop 计算视口顶部行;currentLine 来自含 overscan 的首个虚拟项,会比可见首行偏上。
-    const topIndex = element ? Math.floor(element.scrollTop / 18) : 0;
+    const topIndex = element ? Math.floor(element.scrollTop / rowHeightRef.current) : 0;
     const atEnd =
       element !== null &&
       element.scrollHeight - element.scrollTop - element.clientHeight <= element.clientHeight;
@@ -731,7 +736,10 @@ export function LogContent({
           anchorLine: atEnd
             ? RELOAD_FOLLOW_END
             : (cacheRef.current.get(topIndex)?.lineNo ?? topIndex + 1),
-          rowOffset: element && !atEnd ? element.scrollTop - topIndex * 18 : 0,
+          rowOffset:
+            element && !atEnd
+              ? (element.scrollTop - topIndex * rowHeightRef.current) / rowHeightRef.current
+              : 0,
           scrollLeft: element?.scrollLeft ?? 0,
           layout: fieldLayoutRef.current,
           conditions: fieldConditionsRef.current,
@@ -846,7 +854,9 @@ export function LogContent({
             .then((anchor) => {
               if (requestGeneration !== fieldRequestGeneration.current) return;
               if (restore) completeReloadRestore(restore, anchor?.viewIndex ?? 0);
-              else if (anchor) scrollRef.current?.scrollTo({ top: anchor.viewIndex * 18 });
+              else if (anchor) {
+                scrollRef.current?.scrollTo({ top: anchor.viewIndex * rowHeightRef.current });
+              }
             });
         });
         return true;
@@ -1016,9 +1026,32 @@ export function LogContent({
   const rowVirtualizer = useVirtualizer({
     count: totalLines,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 18,
+    estimateSize: () => rowHeight,
     overscan: 20,
   });
+
+  // 行高变化时按旧行高记录顶部可见行与行内比例,重新测量后按新行高恢复,保持阅读位置。
+  // 尚未应用到 scrollTop 的逻辑位置(以行为单位);连续多次变化时沿用它,避免混用新旧坐标。
+  const pendingRowPosition = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const previous = rowHeightRef.current;
+    rowHeightRef.current = rowHeight;
+    if (previous === rowHeight) return;
+    const element = scrollRef.current;
+    const position = pendingRowPosition.current ?? (element ? element.scrollTop / previous : 0);
+    pendingRowPosition.current = position;
+    rowVirtualizer.measure();
+    if (!element) {
+      pendingRowPosition.current = null;
+      return;
+    }
+    // 等待新的总高度渲染后再设置,避免目标位置被旧高度截断。
+    const frame = window.requestAnimationFrame(() => {
+      pendingRowPosition.current = null;
+      element.scrollTop = Math.round(position * rowHeight);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [rowHeight, rowVirtualizer]);
 
   useEffect(() => {
     if (!active || !session || !activeKey) {
@@ -1240,7 +1273,7 @@ export function LogContent({
       void api
         .locateLogFieldAnchor(activeKey, fieldGeneration, currentLine, mode, includeUnparsed)
         .then((anchor) => {
-          if (anchor) scrollRef.current?.scrollTo({ top: anchor.viewIndex * 18 });
+          if (anchor) scrollRef.current?.scrollTo({ top: anchor.viewIndex * rowHeightRef.current });
         });
     }
   }
@@ -1267,7 +1300,7 @@ export function LogContent({
     setTotalLines(indexedLines);
     const restoreLine = fieldRestoreAnchor.current ?? fieldAnchor.current;
     fieldRestoreAnchor.current = null;
-    scrollRef.current?.scrollTo({ top: Math.max(0, restoreLine - 1) * 18 });
+    scrollRef.current?.scrollTo({ top: Math.max(0, restoreLine - 1) * rowHeightRef.current });
   }
 
   async function reanalyzeFieldLayout() {
@@ -1639,7 +1672,10 @@ export function LogContent({
 
   if (!session && !activeKey) {
     return (
-      <div className="col log-content-panel">
+      <div
+        className="col log-content-panel"
+        style={{ '--log-row-height': `${rowHeight}px` } as CSSProperties}
+      >
         <div className="empty-state">
           <div className="big">📄</div>
           <div className="desc">{t('log.choose')}</div>
@@ -1656,7 +1692,10 @@ export function LogContent({
           ? t('log.dormant')
           : t('log.opening');
     return (
-      <div className="col log-content-panel">
+      <div
+        className="col log-content-panel"
+        style={{ '--log-row-height': `${rowHeight}px` } as CSSProperties}
+      >
         <div className="empty-state log-session-state">
           {status === 'error' && <div className="big">⚠</div>}
           <div className="desc">{message}</div>
@@ -1666,7 +1705,10 @@ export function LogContent({
   }
 
   return (
-    <div className="col log-content-panel">
+    <div
+      className="col log-content-panel"
+      style={{ '--log-row-height': `${rowHeight}px` } as CSSProperties}
+    >
       {indexing && !staleLines && (
         <div className="index-bar">
           <span>
@@ -1820,6 +1862,7 @@ export function LogContent({
               <LogRow
                 key={vi.index}
                 top={vi.start}
+                height={rowHeight}
                 lineNo={line?.lineNo ?? vi.index + 1}
                 line={line}
                 ready={fieldGeneration ? true : ready}

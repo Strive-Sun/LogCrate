@@ -2253,3 +2253,122 @@ test('seamless reload keeps showing the previous rows until the new session rows
     else delete (proto as { offsetWidth?: number }).offsetWidth;
   }
 });
+
+// App 在只改变字号时保持同一 session 对象,测试按 sessionId 复用以模拟这一点。
+const rowHeightSessions = new Map<string, ReturnType<typeof reloadSession>>();
+function rowHeightTree(sessionId: string, rowHeight: number) {
+  if (!rowHeightSessions.has(sessionId)) rowHeightSessions.set(sessionId, reloadSession(sessionId));
+  return (
+    <I18nProvider>
+      <AiWorkspaceProvider>
+        <LogContent
+          active
+          activeKey="server.log"
+          sourceName="server.log"
+          status="ready"
+          session={rowHeightSessions.get(sessionId)!}
+          rowHeight={rowHeight}
+        />
+      </AiWorkspaceProvider>
+    </I18nProvider>
+  );
+}
+
+test('log rows and the panel use the configured row height', () => {
+  const row = harness.render(
+    <I18nProvider>
+      <LogRow
+        top={48}
+        height={24}
+        lineNo={3}
+        line={{ lineNo: 3, content: 'x', truncated: false }}
+        ready
+      />
+    </I18nProvider>,
+  );
+  assert.equal((row.container.querySelector('.log-line') as HTMLElement).style.height, '24px');
+  row.unmount();
+
+  installReloadFieldApi(reloadLayout());
+  const view = harness.render(rowHeightTree('session-1', 24));
+  const panel = view.container.querySelector('.log-content-panel') as HTMLElement;
+  assert.equal(panel.style.getPropertyValue('--log-row-height'), '24px');
+});
+
+test('changing the row height keeps the visible top row and in-row position', async () => {
+  installReloadFieldApi(reloadLayout());
+  runAnimationFramesImmediately();
+  const view = harness.render(rowHeightTree('session-1', 18));
+  const scroll = view.container.querySelector('.log-view') as HTMLElement;
+  setScrollMetrics(scroll, { height: 1_000_000, client: 600 });
+  scroll.scrollTop = 1_000 * 18 + 9;
+
+  view.rerender(rowHeightTree('session-1', 24));
+  await harness.waitFor(() => assert.equal(scroll.scrollTop, 1_000 * 24 + 12));
+
+  view.rerender(rowHeightTree('session-1', 18));
+  await harness.waitFor(() => assert.equal(scroll.scrollTop, 1_000 * 18 + 9));
+});
+
+test('seamless reload restores the position using the configured row height', async () => {
+  const probe = installReloadFieldApi(reloadLayout());
+  runAnimationFramesImmediately();
+  const view = harness.render(rowHeightTree('session-1', 24));
+  await harness.waitFor(() => assert.ok(probe.requests.length > 0));
+  const scroll = view.container.querySelector('.log-view') as HTMLElement;
+  setScrollMetrics(scroll, { height: 100_000, client: 500 });
+  scroll.scrollTop = 2_000;
+
+  view.rerender(rowHeightTree('session-2', 24));
+  // 2000 / 24 = 第 84 行(索引 83)顶部再下移 8px;锚点视图索引 40。
+  await harness.waitFor(() => assert.equal(probe.anchors.at(-1), 84));
+  await harness.waitFor(() => assert.equal(scroll.scrollTop, 40 * 24 + 8));
+});
+
+test('rapid successive row height changes keep the original reading row', async () => {
+  installReloadFieldApi(reloadLayout());
+  const frames = new Map<number, FrameRequestCallback>();
+  let nextFrame = 1;
+  dom.window.requestAnimationFrame = (callback) => {
+    frames.set(nextFrame, callback);
+    return nextFrame++;
+  };
+  const originalCancel = dom.window.cancelAnimationFrame;
+  dom.window.cancelAnimationFrame = (handle) => void frames.delete(handle);
+  try {
+    const view = harness.render(rowHeightTree('session-1', 18));
+    const scroll = view.container.querySelector('.log-view') as HTMLElement;
+    setScrollMetrics(scroll, { height: 1_000_000, client: 600 });
+    scroll.scrollTop = 1_000 * 18;
+
+    view.rerender(rowHeightTree('session-1', 24));
+    view.rerender(rowHeightTree('session-1', 18));
+    for (const callback of [...frames.values()]) callback(0);
+    assert.equal(scroll.scrollTop, 1_000 * 18);
+  } finally {
+    dom.window.cancelAnimationFrame = originalCancel;
+  }
+});
+
+test('a row height change during a pending reload keeps the in-row offset proportional', async () => {
+  const probe = installReloadFieldApi(reloadLayout());
+  runAnimationFramesImmediately();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const originalLocate = api.locateLogFieldAnchor;
+  const view = harness.render(rowHeightTree('session-1', 18));
+  await harness.waitFor(() => assert.ok(probe.requests.length > 0));
+  const scroll = view.container.querySelector('.log-view') as HTMLElement;
+  setScrollMetrics(scroll, { height: 100_000, client: 500 });
+  scroll.scrollTop = 2_000;
+  api.locateLogFieldAnchor = async (...args) => {
+    await gate;
+    return originalLocate(...args);
+  };
+
+  view.rerender(rowHeightTree('session-2', 18));
+  view.rerender(rowHeightTree('session-2', 24));
+  release();
+  // 2000 / 18 = 索引 111 再下移 2px(行内 1/9);锚点视图索引 40,行高 24 时偏移 24/9。
+  await harness.waitFor(() => assert.ok(Math.abs(scroll.scrollTop - (40 * 24 + 24 / 9)) < 1e-6));
+});
