@@ -39,7 +39,10 @@ const RELOAD_FOLLOW_END = Number.MAX_SAFE_INTEGER;
 
 /** 同一条目由旧会话无缝切换到替换会话时需要恢复的查看状态。 */
 interface ReloadViewSnapshot {
+  /** 视口顶部可见行的原始行号(不含虚拟列表 overscan 行)。 */
   anchorLine: number;
+  /** 顶部可见行已滚出视口的像素,恢复时保持同样的半行偏移。 */
+  rowOffset: number;
   scrollLeft: number;
   layout: LogFieldLayout | null;
   conditions: LogFieldCondition[];
@@ -381,6 +384,8 @@ export function LogContent({
   const fieldConditionsRef = useRef<LogFieldCondition[]>([]);
   fieldLayoutRef.current = fieldLayout;
   fieldConditionsRef.current = fieldConditions;
+  const cacheRef = useRef(cache);
+  cacheRef.current = cache;
   const previousSessionRef = useRef<{ key: string; sessionId: string } | null>(null);
   const reloadRestore = useRef<ReloadViewSnapshot | null>(null);
   const encodingRestorePending = useRef(false);
@@ -403,7 +408,9 @@ export function LogContent({
       const element = scrollRef.current;
       if (!element) return;
       element.scrollTop =
-        snapshot.anchorLine === RELOAD_FOLLOW_END ? element.scrollHeight : viewIndex * 18;
+        snapshot.anchorLine === RELOAD_FOLLOW_END
+          ? element.scrollHeight
+          : viewIndex * 18 + snapshot.rowOffset;
       element.scrollLeft = snapshot.scrollLeft;
     });
   }, []);
@@ -697,13 +704,17 @@ export function LogContent({
     // 同一条目直接由旧会话切换到替换会话即为无缝重载:在重置前记录查看状态。
     const reloading = previous?.key === activeKey && previous.sessionId !== session.sessionId;
     const element = scrollRef.current;
+    // 以 scrollTop 计算视口顶部行;currentLine 来自含 overscan 的首个虚拟项,会比可见首行偏上。
+    const topIndex = element ? Math.floor(element.scrollTop / 18) : 0;
+    const atEnd =
+      element !== null &&
+      element.scrollHeight - element.scrollTop - element.clientHeight <= element.clientHeight;
     reloadRestore.current = reloading
       ? {
-          anchorLine:
-            element &&
-            element.scrollHeight - element.scrollTop - element.clientHeight <= element.clientHeight
-              ? RELOAD_FOLLOW_END
-              : Math.max(1, currentLineRef.current),
+          anchorLine: atEnd
+            ? RELOAD_FOLLOW_END
+            : (cacheRef.current.get(topIndex)?.lineNo ?? topIndex + 1),
+          rowOffset: element && !atEnd ? element.scrollTop - topIndex * 18 : 0,
           scrollLeft: element?.scrollLeft ?? 0,
           layout: fieldLayoutRef.current,
           conditions: fieldConditionsRef.current,
@@ -783,11 +794,13 @@ export function LogContent({
           setFieldScanned(progress.scannedLines);
           setFieldMatched(progress.matchedLines);
           setFieldUnparsed(progress.unparsedLines);
-          setTotalLines(
+          const viewTotal =
             fieldModeRef.current === 'highlight'
               ? Math.max(indexedLinesRef.current, progress.totalLines)
-              : progress.matchedLines + (includeUnparsedRef.current ? progress.unparsedLines : 0),
-          );
+              : progress.matchedLines + (includeUnparsedRef.current ? progress.unparsedLines : 0);
+          // 重新加载恢复期间扫描未完成时不缩小行数,避免浏览器把滚动位置夹到中途的较小高度。
+          if (restore && !progress.done) setTotalLines((current) => Math.max(current, viewTotal));
+          else setTotalLines(viewTotal);
           if (!progress.done) return;
           setFieldFiltering(false);
           if (progress.failed) {

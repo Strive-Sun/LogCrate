@@ -1995,7 +1995,9 @@ test('seamless reload keeps field conditions, result mode, and the reading posit
   view.rerender(reloadTree('session-2'));
 
   assert.equal(view.container.querySelector('.log-view'), scroll, 'old view stays mounted');
-  await harness.waitFor(() => assert.equal(scroll.scrollTop, 720));
+  // scrollTop 2000 = 第 112 行(索引 111)顶部再下移 2px。
+  await harness.waitFor(() => assert.equal(scroll.scrollTop, 722));
+  assert.equal(probe.anchors.at(-1), 112);
   assert.equal(scroll.scrollLeft, 120);
   assert.equal(probe.analyses(), analysesBefore, 'reload must not re-run layout analysis');
   assert.equal(probe.requests.length, requestsBefore + 1);
@@ -2082,7 +2084,7 @@ test('user filter changes during a pending reload restore are not overridden by 
   harness.fireEvent.click(await harness.screen.findByRole('checkbox', { name: /INFO/ }));
   releaseRestore();
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.notEqual(scroll.scrollTop, 720, 'stale reload snapshot must not move the view');
+  assert.notEqual(scroll.scrollTop, 722, 'stale reload snapshot must not move the view');
 });
 
 test('a queued reload scroll restore is cancelled when the user changes the view first', async () => {
@@ -2164,8 +2166,31 @@ test('an adopted replacement session replays its terminal index event to keep th
         'GBK',
       ),
     );
-    await harness.waitFor(() => assert.equal(scroll.scrollTop, 720));
+    await harness.waitFor(() => assert.equal(scroll.scrollTop, 722));
   } finally {
     api.subscribeIndexProgress = originalSubscribe;
+  }
+});
+
+test('repeated seamless reloads keep the visible top row instead of drifting upward', async () => {
+  const probe = installReloadFieldApi(reloadLayout());
+  // 与后端高亮/全量视图一致:视图索引即原始行号减一。
+  api.locateLogFieldAnchor = async (_entryKey, _generation, originalLineNo) => {
+    probe.anchors.push(originalLineNo);
+    return { viewIndex: originalLineNo - 1, lineNo: originalLineNo };
+  };
+  runAnimationFramesImmediately();
+  const view = harness.render(reloadTree('session-1'));
+  await harness.waitFor(() => assert.ok(probe.requests.length > 0));
+  const scroll = view.container.querySelector('.log-view') as HTMLElement;
+  setScrollMetrics(scroll, { height: 400_000, client: 800 });
+  scroll.scrollTop = 18_840 * 18 + 5;
+
+  for (const sessionId of ['session-2', 'session-3', 'session-4']) {
+    const before = probe.anchors.length;
+    view.rerender(reloadTree(sessionId));
+    await harness.waitFor(() => assert.equal(probe.anchors.length, before + 1));
+    assert.equal(probe.anchors.at(-1), 18_841);
+    await harness.waitFor(() => assert.equal(scroll.scrollTop, 18_840 * 18 + 5));
   }
 });
