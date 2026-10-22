@@ -2015,7 +2015,7 @@ test('seamless reload follows the new end when the view was at the bottom', asyn
   const probe = installReloadFieldApi(reloadLayout());
   runAnimationFramesImmediately();
   const view = harness.render(reloadTree('session-1'));
-  await harness.waitFor(() => assert.ok(probe.requests.length > 0));
+  await harness.waitFor(() => assert.ok(probe.requests.length > 0, 'field filter requested'));
   const scroll = view.container.querySelector('.log-view') as HTMLElement;
   setScrollMetrics(scroll, { height: 10_000, client: 500 });
   scroll.scrollTop = 9_300;
@@ -2140,7 +2140,7 @@ test('an adopted replacement session replays its terminal index event to keep th
   };
   try {
     const view = harness.render(reloadTree('session-1'));
-    await harness.waitFor(() => assert.ok(probe.requests.length > 0));
+    await harness.waitFor(() => assert.ok(probe.requests.length > 0, 'field filter requested'));
     const scroll = view.container.querySelector('.log-view') as HTMLElement;
     setScrollMetrics(scroll, { height: 10_000, client: 500 });
     scroll.scrollTop = 2_000;
@@ -2181,7 +2181,7 @@ test('repeated seamless reloads keep the visible top row instead of drifting upw
   };
   runAnimationFramesImmediately();
   const view = harness.render(reloadTree('session-1'));
-  await harness.waitFor(() => assert.ok(probe.requests.length > 0));
+  await harness.waitFor(() => assert.ok(probe.requests.length > 0, 'field filter requested'));
   const scroll = view.container.querySelector('.log-view') as HTMLElement;
   setScrollMetrics(scroll, { height: 400_000, client: 800 });
   scroll.scrollTop = 18_840 * 18 + 5;
@@ -2314,7 +2314,7 @@ test('seamless reload restores the position using the configured row height', as
   const probe = installReloadFieldApi(reloadLayout());
   runAnimationFramesImmediately();
   const view = harness.render(rowHeightTree('session-1', 24));
-  await harness.waitFor(() => assert.ok(probe.requests.length > 0));
+  await harness.waitFor(() => assert.ok(probe.requests.length > 0, 'field filter requested'));
   const scroll = view.container.querySelector('.log-view') as HTMLElement;
   setScrollMetrics(scroll, { height: 100_000, client: 500 });
   scroll.scrollTop = 2_000;
@@ -2357,7 +2357,7 @@ test('a row height change during a pending reload keeps the in-row offset propor
   const gate = new Promise<void>((resolve) => (release = resolve));
   const originalLocate = api.locateLogFieldAnchor;
   const view = harness.render(rowHeightTree('session-1', 18));
-  await harness.waitFor(() => assert.ok(probe.requests.length > 0));
+  await harness.waitFor(() => assert.ok(probe.requests.length > 0, 'field filter requested'));
   const scroll = view.container.querySelector('.log-view') as HTMLElement;
   setScrollMetrics(scroll, { height: 100_000, client: 500 });
   scroll.scrollTop = 2_000;
@@ -2370,7 +2370,9 @@ test('a row height change during a pending reload keeps the in-row offset propor
   view.rerender(rowHeightTree('session-2', 24));
   release();
   // 2000 / 18 = 索引 111 再下移 2px(行内 1/9);锚点视图索引 40,行高 24 时偏移 24/9。
-  await harness.waitFor(() => assert.ok(Math.abs(scroll.scrollTop - (40 * 24 + 24 / 9)) < 1e-6));
+  await harness.waitFor(() =>
+    assert.ok(Math.abs(scroll.scrollTop - (40 * 24 + 24 / 9)) < 1e-6, 'proportional offset'),
+  );
 });
 
 test('font style variables are applied to the log panel only', () => {
@@ -2385,7 +2387,7 @@ test('font style variables are applied to the log panel only', () => {
           status="ready"
           session={reloadSession('session-1')}
           rowHeight={23}
-          fontStyle={{ '--log-font-size': '15px', '--log-font': 'serif' } as CSSProperties}
+          panelStyle={{ '--log-font-size': '15px', '--log-font': 'serif' } as CSSProperties}
         />
       </AiWorkspaceProvider>
     </I18nProvider>,
@@ -2399,6 +2401,7 @@ test('font style variables are applied to the log panel only', () => {
 test('App passes the log font preference to every log panel', () => {
   const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
   assert.equal(app.match(/rowHeight=\{logPanelRowHeight\}/g)?.length, 2);
-  assert.equal(app.match(/fontStyle=\{logPanelFontStyle\}/g)?.length, 2);
+  assert.equal(app.match(/panelStyle=\{logPanelStyle\}/g)?.length, 2);
+  assert.match(app, /logColorStyle\(logColors\)/);
   assert.match(app, /logRowHeight\(logFont\.size\)/);
 });

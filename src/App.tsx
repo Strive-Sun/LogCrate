@@ -63,6 +63,12 @@ import {
   type LogFontPreference,
 } from './util/logFont';
 import {
+  loadLogColors,
+  logColorStyle,
+  saveLogColors,
+  type LogColorPreference,
+} from './util/logColors';
+import {
   createSourceReloadQueue,
   decideSourceRevisionChange,
   loadSourceModifiedAction,
@@ -167,7 +173,11 @@ export function App() {
   );
   const sourceModifiedActionRef = useRef(sourceModifiedAction);
   const [logFont, setLogFont] = useState(() => loadLogFont(localStorage));
-  const logPanelFontStyle = useMemo(() => logFontStyle(logFont), [logFont]);
+  const [logColors, setLogColors] = useState(() => loadLogColors(localStorage));
+  const logPanelStyle = useMemo(
+    () => ({ ...logFontStyle(logFont), ...logColorStyle(logColors) }),
+    [logColors, logFont],
+  );
   const logPanelRowHeight = logRowHeight(logFont.size);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [fileSearchMounted, setFileSearchMounted] = useState(false);
@@ -341,6 +351,11 @@ export function App() {
   const changeLogFont = useCallback((preference: LogFontPreference) => {
     setLogFont(preference);
     saveLogFont(localStorage, preference);
+  }, []);
+
+  const changeLogColors = useCallback((colors: LogColorPreference) => {
+    setLogColors(colors);
+    saveLogColors(localStorage, colors);
   }, []);
 
   const changeSourceModifiedAction = useCallback((action: SourceModifiedAction) => {
@@ -1524,6 +1539,8 @@ export function App() {
         onSourceModifiedActionChange={changeSourceModifiedAction}
         logFont={logFont}
         onLogFontChange={changeLogFont}
+        logColors={logColors}
+        onLogColorsChange={changeLogColors}
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
         onOpenAi={() => void (aiOpen ? closeAiWorkspace() : openAiWorkspace())}
@@ -1703,7 +1720,7 @@ export function App() {
                   session={null}
                   activeKey={null}
                   rowHeight={logPanelRowHeight}
-                  fontStyle={logPanelFontStyle}
+                  panelStyle={logPanelStyle}
                   aiOpen={aiOpen}
                   aiWorkspaceHost={aiWorkspaceHost}
                   onAiOpen={openAiWorkspace}
@@ -1725,7 +1742,7 @@ export function App() {
                           session={tab.session}
                           activeKey={id}
                           rowHeight={logPanelRowHeight}
-                          fontStyle={logPanelFontStyle}
+                          panelStyle={logPanelStyle}
                           sourceName={tab.title}
                           active={activeKey === id && !fileSearchOpen}
                           status={tab.status}

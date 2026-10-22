@@ -69,8 +69,8 @@ interface Props {
   sourceName?: string;
   /** 日志行高(px);虚拟列表测量与全部滚动定位均使用该值。 */
   rowHeight?: number;
-  /** 日志正文字体相关 CSS 变量,只作用于本面板。 */
-  fontStyle?: CSSProperties;
+  /** 日志正文字体与颜色相关 CSS 变量,只作用于本面板。 */
+  panelStyle?: CSSProperties;
 }
 
 const PAGE = 200;
@@ -253,7 +253,7 @@ export function LogContent({
   onAiClose,
   sourceName = '日志选区',
   rowHeight = 18,
-  fontStyle,
+  panelStyle,
 }: Props) {
   const { t } = useI18n();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1677,7 +1677,7 @@ export function LogContent({
     return (
       <div
         className="col log-content-panel"
-        style={{ ...fontStyle, '--log-row-height': `${rowHeight}px` } as CSSProperties}
+        style={{ ...panelStyle, '--log-row-height': `${rowHeight}px` } as CSSProperties}
       >
         <div className="empty-state">
           <div className="big">📄</div>
@@ -1697,7 +1697,7 @@ export function LogContent({
     return (
       <div
         className="col log-content-panel"
-        style={{ ...fontStyle, '--log-row-height': `${rowHeight}px` } as CSSProperties}
+        style={{ ...panelStyle, '--log-row-height': `${rowHeight}px` } as CSSProperties}
       >
         <div className="empty-state log-session-state">
           {status === 'error' && <div className="big">⚠</div>}
@@ -1710,7 +1710,7 @@ export function LogContent({
   return (
     <div
       className="col log-content-panel"
-      style={{ ...fontStyle, '--log-row-height': `${rowHeight}px` } as CSSProperties}
+      style={{ ...panelStyle, '--log-row-height': `${rowHeight}px` } as CSSProperties}
     >
       {indexing && !staleLines && (
         <div className="index-bar">

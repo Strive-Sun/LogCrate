@@ -17,6 +17,12 @@ import {
   isLogFontSize,
   type LogFontPreference,
 } from '../util/logFont';
+import {
+  LOG_COLOR_KEYS,
+  themeLogColor,
+  withLogColor,
+  type LogColorPreference,
+} from '../util/logColors';
 
 interface Props {
   currentVersion: string;
@@ -41,6 +47,8 @@ interface Props {
   onSourceModifiedActionChange: (action: SourceModifiedAction) => void;
   logFont: LogFontPreference;
   onLogFontChange: (preference: LogFontPreference) => void;
+  logColors: LogColorPreference;
+  onLogColorsChange: (colors: LogColorPreference) => void;
 }
 
 const busyStatuses: UpdateStatus[] = ['checking', 'downloading', 'installing'];
@@ -86,6 +94,14 @@ type ProviderFeedback = {
 
 export function SettingsPanel(props: Props) {
   const { preference, setPreference, t } = useI18n();
+  // 跟随主题的取色器参考色需在主题属性写入后重新读取,否则会停留在切换前的主题颜色。
+  const [, setThemeVersion] = useState(0);
+  useEffect(() => {
+    const root = document.documentElement;
+    const observer = new MutationObserver(() => setThemeVersion((version) => version + 1));
+    observer.observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => observer.disconnect();
+  }, []);
   const busy = busyStatuses.includes(props.status);
   const [providers, setProviders] = useState<AiProviderConfig[]>([]);
   const [provider, setProvider] = useState<AiProviderConfig>({
@@ -605,6 +621,47 @@ export function SettingsPanel(props: Props) {
             ))}
           </select>
         </label>
+      </div>
+
+      <div className="settings-section" role="group" aria-label={t('settings.logColors')}>
+        <div className="settings-row">
+          <div>
+            <div className="settings-label">{t('settings.logColors')}</div>
+            <div className="settings-hint">{t('settings.logColorsHint')}</div>
+          </div>
+        </div>
+        {LOG_COLOR_KEYS.map((key) => {
+          const name = t(`settings.logColor.${key}`);
+          const custom = props.logColors[key];
+          return (
+            <div className="settings-row" key={key}>
+              <div className="settings-label">{name}</div>
+              <div className="settings-color-controls">
+                <span className="settings-hint">
+                  {custom ? custom.toUpperCase() : t('settings.logColorFollowTheme')}
+                </span>
+                <input
+                  type="color"
+                  className="settings-color-input"
+                  aria-label={name}
+                  value={custom ?? themeLogColor(key)}
+                  onChange={(event) =>
+                    props.onLogColorsChange(withLogColor(props.logColors, key, event.target.value))
+                  }
+                />
+                <button
+                  type="button"
+                  className="settings-button"
+                  aria-label={t('settings.logColorResetLabel', { name })}
+                  disabled={!custom}
+                  onClick={() => props.onLogColorsChange(withLogColor(props.logColors, key, null))}
+                >
+                  {t('settings.logColorReset')}
+                </button>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       <div className="settings-section settings-template-section">

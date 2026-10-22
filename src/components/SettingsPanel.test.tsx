@@ -22,6 +22,7 @@ before(async () => {
     navigator: dom.window.navigator,
     HTMLElement: dom.window.HTMLElement,
     Node: dom.window.Node,
+    MutationObserver: dom.window.MutationObserver,
     localStorage: dom.window.localStorage,
     IS_REACT_ACT_ENVIRONMENT: true,
   })) {
@@ -56,6 +57,8 @@ function renderSettings(overrides: Partial<ComponentProps<typeof SettingsPanel>>
     onSourceModifiedActionChange: () => undefined,
     logFont: { family: 'default', size: 12 },
     onLogFontChange: () => undefined,
+    logColors: {},
+    onLogColorsChange: () => undefined,
     ...overrides,
   };
   return harness.render(
@@ -281,6 +284,8 @@ test('disabled search entry cannot be clicked and exposes its settings hint on h
     onSourceModifiedActionChange: () => undefined,
     logFont: { family: 'default', size: 12 },
     onLogFontChange: () => undefined,
+    logColors: {},
+    onLogColorsChange: () => undefined,
     theme: 'light',
     onToggleTheme: () => undefined,
     count: 0,
@@ -327,6 +332,8 @@ test('enabled search entry opens only through normal button activation without s
     onSourceModifiedActionChange: () => undefined,
     logFont: { family: 'default', size: 12 },
     onLogFontChange: () => undefined,
+    logColors: {},
+    onLogColorsChange: () => undefined,
     theme: 'light',
     onToggleTheme: () => undefined,
     count: 0,
@@ -385,4 +392,54 @@ test('log font and size preferences show the current choice and report changes',
     { family: 'yahei', size: 14 },
     { family: 'consolas', size: 18 },
   ]);
+});
+
+test('log color controls follow the theme by default and support custom colors with reset', () => {
+  const changes: unknown[] = [];
+  renderSettings({
+    logColors: { error: '#ff0000' },
+    onLogColorsChange: (colors) => changes.push(colors),
+  });
+  const group = harness.screen.getByRole('group', { name: 'Log colors' });
+  for (const name of ['Plain text', 'ERROR', 'WARN', 'INFO', 'DEBUG / TRACE']) {
+    assert.ok(harness.within(group).getByLabelText(name));
+  }
+  const info = harness.within(group).getByLabelText('INFO') as HTMLInputElement;
+  assert.equal(info.type, 'color');
+  const infoReset = harness.within(group).getByRole('button', { name: 'Reset INFO color' });
+  assert.equal(
+    (infoReset as HTMLButtonElement).disabled,
+    true,
+    'theme colors have nothing to reset',
+  );
+  assert.equal(
+    (harness.within(group).getByLabelText('ERROR') as HTMLInputElement).value,
+    '#ff0000',
+  );
+  assert.ok(harness.within(group).getByText('#FF0000'));
+
+  // 测试环境无主题变量,跟随主题时参考值为 #000000,因此选一个不同的颜色。
+  harness.fireEvent.input(info, { target: { value: '#123456' } });
+  harness.fireEvent.click(harness.within(group).getByRole('button', { name: 'Reset ERROR color' }));
+  assert.deepEqual(changes, [{ error: '#ff0000', info: '#123456' }, {}]);
+});
+
+test('follow-theme color swatches refresh when the theme changes while settings is open', async () => {
+  const root = document.documentElement;
+  const style = document.createElement('style');
+  style.textContent = ":root { --info: #55aa99; } :root[data-theme='light'] { --info: #008877; }";
+  document.head.appendChild(style);
+  root.dataset.theme = 'dark';
+  try {
+    renderSettings();
+    const info = harness.screen.getByLabelText('INFO') as HTMLInputElement;
+    assert.equal(info.value, '#55aa99');
+    // 等待挂载时的异步加载完成,确保后续刷新只可能来自主题变化。
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    root.dataset.theme = 'light';
+    await harness.waitFor(() => assert.equal(info.value, '#008877', 'light theme reference'));
+  } finally {
+    style.remove();
+    delete root.dataset.theme;
+  }
 });

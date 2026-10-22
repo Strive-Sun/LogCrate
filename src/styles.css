@@ -2733,19 +2733,21 @@ body.resizing {
 }
 .log-line .txt {
   padding-right: 24px;
+  /* 未自定义时 currentColor 等同继承,保持主题原有正文色。 */
+  color: var(--log-color-body, currentColor);
 }
 .log-line .txt .lvl-ERROR {
-  color: var(--error);
+  color: var(--log-color-error, var(--error));
 }
 .log-line .txt .lvl-WARN {
-  color: var(--warn);
+  color: var(--log-color-warn, var(--warn));
 }
 .log-line .txt .lvl-INFO {
-  color: var(--info);
+  color: var(--log-color-info, var(--info));
 }
 .log-line .txt .lvl-DEBUG,
 .log-line .txt .lvl-TRACE {
-  color: var(--debug);
+  color: var(--log-color-debug, var(--debug));
 }
 .log-line .log-find-match {
   border-radius: 2px;
@@ -3902,6 +3904,26 @@ body.resizing {
 .settings-button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+.settings-color-controls {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+.settings-color-controls .settings-hint {
+  margin-top: 0;
+  min-width: 56px;
+  text-align: right;
+}
+.settings-color-input {
+  width: 32px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+  cursor: pointer;
 }
 .settings-button.primary {
   border-color: var(--accent);
