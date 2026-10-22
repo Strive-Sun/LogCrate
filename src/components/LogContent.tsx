@@ -386,6 +386,11 @@ export function LogContent({
   fieldConditionsRef.current = fieldConditions;
   const cacheRef = useRef(cache);
   cacheRef.current = cache;
+  // 无缝重载期间的旧行兜底:新会话的可见行读回前继续显示旧内容,避免“加载中”闪烁。
+  const [staleLines, setStaleLines] = useState<Map<number, LogLine> | null>(null);
+  const staleLinesRef = useRef(staleLines);
+  staleLinesRef.current = staleLines;
+  const [reloadSettleTick, setReloadSettleTick] = useState(0);
   const previousSessionRef = useRef<{ key: string; sessionId: string } | null>(null);
   const reloadRestore = useRef<ReloadViewSnapshot | null>(null);
   const encodingRestorePending = useRef(false);
@@ -393,6 +398,7 @@ export function LogContent({
   const reloadRestoreFrame = useRef<number | null>(null);
   const cancelReloadRestore = useCallback(() => {
     reloadRestore.current = null;
+    setStaleLines(null);
     if (reloadRestoreFrame.current !== null) {
       window.cancelAnimationFrame(reloadRestoreFrame.current);
       reloadRestoreFrame.current = null;
@@ -412,6 +418,7 @@ export function LogContent({
           ? element.scrollHeight
           : viewIndex * 18 + snapshot.rowOffset;
       element.scrollLeft = snapshot.scrollLeft;
+      setReloadSettleTick((tick) => tick + 1);
     });
   }, []);
 
@@ -703,6 +710,16 @@ export function LogContent({
     }
     // 同一条目直接由旧会话切换到替换会话即为无缝重载:在重置前记录查看状态。
     const reloading = previous?.key === activeKey && previous.sessionId !== session.sessionId;
+    if (reloading) {
+      // 连续重载时合并上一轮尚未释放的兜底行。
+      const merged = new Map([...(staleLinesRef.current ?? []), ...cacheRef.current]);
+      // 与行缓存同样设上限,优先保留最近一轮的行。
+      for (const key of merged.keys()) {
+        if (merged.size <= MAX_CACHED_LINES) break;
+        if (!cacheRef.current.has(key)) merged.delete(key);
+      }
+      setStaleLines(merged);
+    }
     const element = scrollRef.current;
     // 以 scrollTop 计算视口顶部行;currentLine 来自含 overscan 的首个虚拟项,会比可见首行偏上。
     const topIndex = element ? Math.floor(element.scrollTop / 18) : 0;
@@ -1123,6 +1140,15 @@ export function LogContent({
 
   // 按可视区批量拉取未缓存的行(窗口化加载)
   const items = rowVirtualizer.getVirtualItems();
+
+  // 恢复完成且可见行均已从新会话读回后释放旧行兜底。
+  useEffect(() => {
+    if (!staleLines || reloadRestore.current || reloadRestoreFrame.current !== null) return;
+    if (encodingRestorePending.current) return;
+    if (items.every((item) => item.index >= totalLines || cache.has(item.index))) {
+      setStaleLines(null);
+    }
+  }, [cache, items, reloadSettleTick, staleLines, totalLines]);
   useEffect(() => {
     if (!activeKey || items.length === 0) return;
     const first = items[0].index;
@@ -1641,7 +1667,7 @@ export function LogContent({
 
   return (
     <div className="col log-content-panel">
-      {indexing && (
+      {indexing && !staleLines && (
         <div className="index-bar">
           <span>
             {t(activeKey?.includes('::') ? 'log.extractingAndIndexing' : 'log.indexing', {
@@ -1655,7 +1681,7 @@ export function LogContent({
         </div>
       )}
 
-      {encodingChanging && (
+      {encodingChanging && !staleLines && (
         <div className="index-bar">
           <span>{t('log.reencoding', { percent: encodingPercent })}</span>
           <div className="track">
@@ -1788,7 +1814,7 @@ export function LogContent({
           }}
         >
           {items.map((vi) => {
-            const line = cache.get(vi.index);
+            const line = cache.get(vi.index) ?? staleLines?.get(vi.index);
             const ready = vi.index < indexedLines || !indexing;
             return (
               <LogRow

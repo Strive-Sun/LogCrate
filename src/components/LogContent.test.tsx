@@ -2194,3 +2194,62 @@ test('repeated seamless reloads keep the visible top row instead of drifting upw
     await harness.waitFor(() => assert.equal(scroll.scrollTop, 18_840 * 18 + 5));
   }
 });
+
+test('seamless reload keeps showing the previous rows until the new session rows arrive', async () => {
+  installReloadFieldApi(reloadLayout());
+  runAnimationFramesImmediately();
+  const proto = dom.window.HTMLElement.prototype;
+  const originalHeight = Object.getOwnPropertyDescriptor(proto, 'offsetHeight');
+  const originalWidth = Object.getOwnPropertyDescriptor(proto, 'offsetWidth');
+  Object.defineProperty(proto, 'offsetHeight', { configurable: true, get: () => 360 });
+  Object.defineProperty(proto, 'offsetWidth', { configurable: true, get: () => 800 });
+  const originalReadLines = api.readLines;
+  const originalLineCount = api.lineCount;
+  const originalReadMarked = api.readLinesWithFieldMatches;
+  const originalReadFiltered = api.readFilteredLines;
+  let generation = 'old';
+  let release!: () => void;
+  let held: Promise<void> = Promise.resolve();
+  const rows = async (start: number, count: number) => {
+    const label = generation;
+    await held;
+    return Array.from({ length: count }, (_, offset) => ({
+      lineNo: start + offset + 1,
+      content: `${label} row ${start + offset + 1}`,
+      truncated: false,
+    }));
+  };
+  api.lineCount = () => 500;
+  api.readLines = async (_key, start, count) => rows(start, count);
+  api.readLinesWithFieldMatches = async (_key, _generation, start, count) =>
+    (await rows(start, count)).map((line) => ({
+      ...line,
+      fieldMatched: false,
+      fieldUnparsed: false,
+    }));
+  api.readFilteredLines = async (_key, _generation, start, count) => rows(start, count);
+  try {
+    const view = harness.render(reloadTree('session-1'));
+    await harness.waitFor(() => assert.ok(harness.screen.getByText('old row 1')));
+
+    generation = 'new';
+    held = new Promise<void>((resolve) => (release = resolve));
+    view.rerender(reloadTree('session-2'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(harness.screen.getByText('old row 1'), 'previous rows stay visible');
+    assert.equal(harness.screen.queryByText('Loading…'), null);
+
+    release();
+    await harness.waitFor(() => assert.ok(harness.screen.getByText('new row 1')));
+    assert.equal(harness.screen.queryByText('old row 1'), null);
+  } finally {
+    api.readLines = originalReadLines;
+    api.lineCount = originalLineCount;
+    api.readLinesWithFieldMatches = originalReadMarked;
+    api.readFilteredLines = originalReadFiltered;
+    if (originalHeight) Object.defineProperty(proto, 'offsetHeight', originalHeight);
+    else delete (proto as { offsetHeight?: number }).offsetHeight;
+    if (originalWidth) Object.defineProperty(proto, 'offsetWidth', originalWidth);
+    else delete (proto as { offsetWidth?: number }).offsetWidth;
+  }
+});
