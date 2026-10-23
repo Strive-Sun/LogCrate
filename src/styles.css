@@ -308,15 +308,15 @@ button {
   ).is-scrolling::-webkit-scrollbar-thumb:hover {
   background-color: var(--scrollbar-thumb-hover);
 }
-/* 日志正文使用更宽、带最小长度的滑块:大文件下按比例计算的滑块会缩成很短一截。
-   Chromium 在设置了标准 scrollbar-width/scrollbar-color 时会忽略 ::-webkit-scrollbar,
-   因此这里恢复为 auto,让下面的尺寸与最小长度生效;颜色仍由 --scrollbar-thumb-color 控制渐隐。 */
+/* 日志正文:纵向使用自绘滚动条 .log-vscroll(点击轨道直接跳转),原生纵向滚动条宽度设为 0;
+   横向仍用原生滚动条。Chromium 在设置了标准 scrollbar-width/scrollbar-color 时会忽略
+   ::-webkit-scrollbar,因此恢复为 auto,让下面的尺寸生效;颜色仍由 --scrollbar-thumb-color 控制渐隐。 */
 .log-view {
   scrollbar-width: auto;
   scrollbar-color: auto;
 }
 .log-view::-webkit-scrollbar {
-  width: 18px;
+  width: 0;
   height: 18px;
 }
 .log-view::-webkit-scrollbar-thumb {
@@ -324,8 +324,56 @@ button {
   min-height: 48px;
   border-width: 3px;
 }
+.log-view-frame {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.log-view-frame > .log-view {
+  flex: 1;
+  min-width: 0;
+}
+.log-vscroll {
+  position: relative;
+  flex: 0 0 18px;
+  /* 继承父容器的显示色;自身过渡负责悬停移出后的渐隐。 */
+  --scrollbar-thumb-color: inherit;
+  transition: --scrollbar-thumb-color 450ms ease;
+  /* 底部留白由 LogScrollbar 按横向滚动条实际高度设置,使轨道与正文可见区域对齐。 */
+  touch-action: none;
+}
+.log-vscroll-thumb {
+  position: absolute;
+  top: 0;
+  left: 3px;
+  right: 3px;
+  border-radius: 999px;
+  background-color: var(--scrollbar-thumb-color);
+  will-change: transform;
+}
+.log-vscroll-thumb[hidden] {
+  display: none;
+}
+/* 滑块颜色跟随正文的 is-scrolling 状态,沿用全局渐隐;拖动时持续滚动因而保持可见。 */
+.log-view-frame:has(> .log-view.is-scrolling) {
+  --scrollbar-thumb-color: var(--scrollbar-thumb-visible);
+  transition-duration: 0s;
+}
+.log-view-frame {
+  --scrollbar-thumb-color: transparent;
+  transition: --scrollbar-thumb-color 450ms ease;
+}
+.log-view-frame:has(> .log-view.is-scrolling) .log-vscroll-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+}
+/* 悬停在轨道上时立即显示滑块(使用悬停色),移出后由 .log-vscroll 的过渡渐隐。 */
+.log-vscroll:hover {
+  --scrollbar-thumb-color: var(--scrollbar-thumb-hover);
+  transition-duration: 0s;
+}
 @media (prefers-reduced-motion: reduce) {
-  :where(.col-body, .log-view, .log-tabs-menu, .update-notes) {
+  :where(.col-body, .log-view, .log-tabs-menu, .update-notes, .log-view-frame, .log-vscroll) {
     transition-duration: 0s;
   }
 }

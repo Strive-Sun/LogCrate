@@ -1,6 +1,6 @@
 ## 1. 实现
 
-- [ ] 1.1 新增 `scrollbarGeometry.ts`（滑块长度、位置、指针位置反算 scrollTop、边界夹取、内容不足一屏）与 `LogScrollbar` 组件（自绘轨道与滑块、轨道点击跳转并继续拖动、滑块抓取拖动、主键限定、滚轮转发、rAF 合并更新与 ResizeObserver）；`LogContent` 隐藏原生纵向滚动条并接入轨道列，渐隐沿用 `.log-view.is-scrolling` 与现有颜色变量、悬停轨道时显示滑块、减少动态效果；补充几何与组件交互测试，完成前端 L3 门禁
+- [x] 1.1 新增 `scrollbarGeometry.ts`（滑块长度、位置、指针位置反算 scrollTop、边界夹取、内容不足一屏）与 `LogScrollbar` 组件（自绘轨道与滑块、轨道点击跳转并继续拖动、滑块抓取拖动、主键限定、滚轮转发、rAF 合并更新与 ResizeObserver）；`LogContent` 隐藏原生纵向滚动条并接入轨道列，渐隐沿用 `.log-view.is-scrolling` 与现有颜色变量、悬停轨道时显示滑块、减少动态效果；补充几何与组件交互测试，完成前端 L3 门禁
 
 ## 2. 真机验收
 

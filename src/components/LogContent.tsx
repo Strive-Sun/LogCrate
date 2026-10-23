@@ -28,6 +28,7 @@ import {
   type StoredLogFieldLayout,
 } from '../util/logFieldLayoutStorage';
 import { LogFieldFilterBar } from './LogFieldFilterBar';
+import { LogScrollbar } from './LogScrollbar';
 import { LogRow } from './LogRow';
 import { ContextMenu } from './ContextMenu';
 import { AiMessageContent } from './AiMessageContent';
@@ -1829,59 +1830,62 @@ export function LogContent({
         </form>
       )}
 
-      <div
-        className="log-view"
-        ref={scrollRef}
-        tabIndex={-1}
-        onScroll={(event) => setLogScrollLeft(event.currentTarget.scrollLeft)}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          setLogContextMenu({
-            x: event.clientX,
-            y: event.clientY,
-            selectedText: window.getSelection()?.toString() ?? '',
-          });
-        }}
-      >
-        {fieldGeneration && !fieldFiltering && fieldMode === 'compact' && totalLines === 0 && (
-          <div className="log-field-empty">
-            <span>{t('fields.noResults')}</span>
-            <button type="button" onClick={() => void clearFieldFilters()}>
-              {t('fields.clear')}
-            </button>
-          </div>
-        )}
+      <div className="log-view-frame">
         <div
-          style={{
-            height: rowVirtualizer.getTotalSize(),
-            position: 'relative',
-            minWidth: 'max-content',
+          className="log-view"
+          ref={scrollRef}
+          tabIndex={-1}
+          onScroll={(event) => setLogScrollLeft(event.currentTarget.scrollLeft)}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setLogContextMenu({
+              x: event.clientX,
+              y: event.clientY,
+              selectedText: window.getSelection()?.toString() ?? '',
+            });
           }}
         >
-          {items.map((vi) => {
-            const line = cache.get(vi.index) ?? staleLines?.get(vi.index);
-            const ready = vi.index < indexedLines || !indexing;
-            return (
-              <LogRow
-                key={vi.index}
-                top={vi.start}
-                height={rowHeight}
-                lineNo={line?.lineNo ?? vi.index + 1}
-                line={line}
-                ready={fieldGeneration ? true : ready}
-                fieldMatched={
-                  fieldMode === 'highlight' &&
-                  Boolean((line as LogFieldMarkedLine | undefined)?.fieldMatched)
-                }
-                match={findMatch}
-                findQuery={findQuery}
-                findWholeWord={findWholeWord}
-                findCaseSensitive={findCaseSensitive}
-                showAllFindMatches={findOpen}
-              />
-            );
-          })}
+          {fieldGeneration && !fieldFiltering && fieldMode === 'compact' && totalLines === 0 && (
+            <div className="log-field-empty">
+              <span>{t('fields.noResults')}</span>
+              <button type="button" onClick={() => void clearFieldFilters()}>
+                {t('fields.clear')}
+              </button>
+            </div>
+          )}
+          <div
+            style={{
+              height: rowVirtualizer.getTotalSize(),
+              position: 'relative',
+              minWidth: 'max-content',
+            }}
+          >
+            {items.map((vi) => {
+              const line = cache.get(vi.index) ?? staleLines?.get(vi.index);
+              const ready = vi.index < indexedLines || !indexing;
+              return (
+                <LogRow
+                  key={vi.index}
+                  top={vi.start}
+                  height={rowHeight}
+                  lineNo={line?.lineNo ?? vi.index + 1}
+                  line={line}
+                  ready={fieldGeneration ? true : ready}
+                  fieldMatched={
+                    fieldMode === 'highlight' &&
+                    Boolean((line as LogFieldMarkedLine | undefined)?.fieldMatched)
+                  }
+                  match={findMatch}
+                  findQuery={findQuery}
+                  findWholeWord={findWholeWord}
+                  findCaseSensitive={findCaseSensitive}
+                  showAllFindMatches={findOpen}
+                />
+              );
+            })}
+          </div>
         </div>
+        <LogScrollbar targetRef={scrollRef} contentKey={rowVirtualizer.getTotalSize()} />
       </div>
 
       {logContextMenu && (
