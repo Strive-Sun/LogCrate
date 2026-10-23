@@ -20,6 +20,7 @@
   - 在轨道（非滑块）按下：目标滑块位置 = 指针位置 − 滑块长度 / 2，立即设置 `scrollTop`，随后按“抓住滑块中心”继续跟随指针移动直至松开。
   - 在滑块按下：记录按下点相对滑块顶部的偏移，拖动时保持偏移不变。
   - 仅响应主键；滚轮在轨道上时把 `deltaY` 转发给正文。
+- 鼠标悬停在轨道 `.log-vscroll` 上时也显示滑块（`:hover` 设为可见色、无过渡），移出后按 450ms 渐隐；悬停时滑块使用 `--scrollbar-thumb-hover`。
 - 滑块的显示通过兄弟选择器跟随 `.log-view.is-scrolling`，沿用现有 `--scrollbar-thumb-visible/-hover` 颜色变量和 450ms 渐隐；拖动期间持续产生滚动事件，因此保持可见。`prefers-reduced-motion` 下取消过渡。
 - 滑块几何在正文 `scroll`、尺寸变化（ResizeObserver）以及行数或行高变化后，通过 `requestAnimationFrame` 合并更新，直接写入滑块元素样式，不触发 React 重渲染。
 
