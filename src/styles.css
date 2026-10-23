@@ -2721,6 +2721,10 @@ body.resizing {
   min-height: 0;
   font-family: var(--log-font);
 }
+/* 正文可通过点击或脚本获得焦点(tabIndex=-1,不在 Tab 顺序中),不显示焦点框。 */
+.log-view:focus {
+  outline: none;
+}
 .log-line {
   display: flex;
   font-size: var(--log-font-size);

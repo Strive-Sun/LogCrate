@@ -2405,3 +2405,8 @@ test('App passes the log font preference to every log panel', () => {
   assert.match(app, /logColorStyle\(logColors\)/);
   assert.match(app, /logRowHeight\(logFont\.size\)/);
 });
+
+test('clicking the log body does not draw a focus outline around it', () => {
+  const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  assert.match(css, /\.log-view:focus \{\s*outline: none;\s*\}/);
+});
