@@ -4,6 +4,33 @@
 
 ## [Unreleased]
 
+## [1.0.38] - 2026-10-23
+
+### Added
+
+- Added a "When an open file changes externally" setting with three options: ask every time, reload automatically, or neither ask nor reload.
+- Added Reload and Close to the log tab context menu; Reload is unavailable when the source file has been deleted.
+- Added log font and font size settings, with Default monospace, Consolas, Lucida Console, and Microsoft YaHei presets and sizes from 12 to 20 px; line height follows the font size.
+- Added custom colors for plain log text and for ERROR, WARN, INFO, and DEBUG/TRACE lines, each of which can be reset to follow the theme.
+- Grouped the log font, font size, and color settings into a collapsible Log display section in Settings.
+
+### Changed
+
+- Reloading a log now keeps the previous content on screen until the new content is ready, and preserves the reading position, horizontal scroll, encoding, field layout and filters, result mode, and Show unparsed; a view at the end follows the new end.
+- Clicking the log body's vertical scrollbar track now jumps directly to the clicked position and continues as a drag while held, instead of paging; the scrollbar also appears when hovered.
+- Widened the log body's vertical scrollbar and gave its thumb a minimum length so it stays usable in large logs.
+
+### Fixed
+
+- Fixed the reading position drifting upward by about 20 lines on every automatic reload.
+- Fixed the "Loading…" placeholder flashing in visible rows during automatic reloads.
+- Fixed the scrollbar thumb stopping short of the bottom when the log has no horizontal scrollbar.
+- Removed the focus outline drawn around the log body when it is clicked.
+
+### Engineering
+
+- Reduced the frontend test suite from about nine minutes to about twenty seconds by giving polled assertions explicit messages, which stops Node from re-parsing the test file on every retry.
+
 ## [1.0.37] - 2026-09-08
 
 ### Fixed
