@@ -68,6 +68,10 @@ function renderSettings(overrides: Partial<ComponentProps<typeof SettingsPanel>>
   );
 }
 
+function expandLogDisplay() {
+  harness.fireEvent.click(harness.screen.getByRole('button', { name: /^Log display/ }));
+}
+
 test('file search is disabled by default and can request enabling', () => {
   let requested: boolean | null = null;
   renderSettings({ onSearchEnabledChange: (enabled) => (requested = enabled) });
@@ -374,6 +378,7 @@ test('log font and size preferences show the current choice and report changes',
     logFont: { family: 'consolas', size: 14 },
     onLogFontChange: (preference) => changes.push(preference),
   });
+  expandLogDisplay();
   const family = harness.screen.getByRole('combobox', { name: 'Log font' }) as HTMLSelectElement;
   const size = harness.screen.getByRole('combobox', { name: 'Log font size' }) as HTMLSelectElement;
   assert.equal(family.value, 'consolas');
@@ -400,6 +405,7 @@ test('log color controls follow the theme by default and support custom colors w
     logColors: { error: '#ff0000' },
     onLogColorsChange: (colors) => changes.push(colors),
   });
+  expandLogDisplay();
   const group = harness.screen.getByRole('group', { name: 'Log colors' });
   for (const name of ['Plain text', 'ERROR', 'WARN', 'INFO', 'DEBUG / TRACE']) {
     assert.ok(harness.within(group).getByLabelText(name));
@@ -432,6 +438,7 @@ test('follow-theme color swatches refresh when the theme changes while settings 
   root.dataset.theme = 'dark';
   try {
     renderSettings();
+    expandLogDisplay();
     const info = harness.screen.getByLabelText('INFO') as HTMLInputElement;
     assert.equal(info.value, '#55aa99');
     // 等待挂载时的异步加载完成,确保后续刷新只可能来自主题变化。
@@ -442,4 +449,35 @@ test('follow-theme color swatches refresh when the theme changes while settings 
     style.remove();
     delete root.dataset.theme;
   }
+});
+
+test('log font, size, and colors are grouped in a collapsed log display section', () => {
+  renderSettings({
+    logFont: { family: 'yahei', size: 15 },
+    logColors: { body: '#19191a', info: '#0c0d0d' },
+  });
+  const disclosure = harness.screen.getByRole('button', { name: /^Log display/ });
+  assert.equal(disclosure.getAttribute('aria-expanded'), 'false');
+  assert.ok(harness.within(disclosure).getByText('Microsoft YaHei · 15px · 2 custom colors'));
+  for (const name of ['Log font', 'Log font size']) {
+    assert.equal(harness.screen.queryByRole('combobox', { name }), null);
+  }
+  assert.equal(harness.screen.queryByRole('group', { name: 'Log colors' }), null);
+  assert.ok(harness.screen.getByRole('combobox', { name: 'When an open file changes externally' }));
+
+  harness.fireEvent.click(disclosure);
+  assert.equal(disclosure.getAttribute('aria-expanded'), 'true');
+  const region = document.getElementById(disclosure.getAttribute('aria-controls')!)!;
+  assert.ok(harness.within(region).getByRole('combobox', { name: 'Log font' }));
+  assert.ok(harness.within(region).getByRole('combobox', { name: 'Log font size' }));
+  assert.ok(harness.within(region).getByRole('group', { name: 'Log colors' }));
+
+  harness.fireEvent.click(disclosure);
+  assert.equal(harness.screen.queryByRole('group', { name: 'Log colors' }), null);
+});
+
+test('log display summary reports theme colors when nothing is customized', () => {
+  renderSettings();
+  const disclosure = harness.screen.getByRole('button', { name: /^Log display/ });
+  assert.ok(harness.within(disclosure).getByText('Default monospace · 12px · theme colors'));
 });

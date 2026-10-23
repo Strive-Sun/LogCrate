@@ -118,6 +118,8 @@ export function SettingsPanel(props: Props) {
   const [providerFeedback, setProviderFeedback] = useState<ProviderFeedback | null>(null);
   const [providerBusy, setProviderBusy] = useState(false);
   const [providerExpanded, setProviderExpanded] = useState(false);
+  const [logDisplayExpanded, setLogDisplayExpanded] = useState(false);
+  const customColorCount = LOG_COLOR_KEYS.filter((key) => props.logColors[key]).length;
   useEffect(() => {
     void api
       .listAiProviders()
@@ -577,91 +579,125 @@ export function SettingsPanel(props: Props) {
             <option value="ignore">{t('settings.sourceModified.ignore')}</option>
           </select>
         </label>
-
-        <label className="settings-row">
-          <div>
-            <div className="settings-label">{t('settings.logFont')}</div>
-            <div className="settings-hint">{t('settings.logFontHint')}</div>
-          </div>
-          <select
-            className="language-select"
-            aria-label={t('settings.logFont')}
-            value={props.logFont.family}
-            onChange={(event) => {
-              const family = event.target.value;
-              if (isLogFontFamily(family)) props.onLogFontChange({ ...props.logFont, family });
-            }}
-          >
-            {LOG_FONT_FAMILIES.map((family) => (
-              <option key={family} value={family}>
-                {t(`settings.logFont.${family}`)}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="settings-row">
-          <div>
-            <div className="settings-label">{t('settings.logFontSize')}</div>
-            <div className="settings-hint">{t('settings.logFontSizeHint')}</div>
-          </div>
-          <select
-            className="language-select"
-            aria-label={t('settings.logFontSize')}
-            value={props.logFont.size}
-            onChange={(event) => {
-              const size = Number(event.target.value);
-              if (isLogFontSize(size)) props.onLogFontChange({ ...props.logFont, size });
-            }}
-          >
-            {LOG_FONT_SIZES.map((size) => (
-              <option key={size} value={size}>
-                {size}px
-              </option>
-            ))}
-          </select>
-        </label>
       </div>
 
-      <div className="settings-section" role="group" aria-label={t('settings.logColors')}>
-        <div className="settings-row">
+      <div className="settings-section">
+        <button
+          type="button"
+          className="settings-row settings-disclosure settings-disclosure-first"
+          aria-expanded={logDisplayExpanded}
+          aria-controls="log-display-settings"
+          onClick={() => setLogDisplayExpanded((expanded) => !expanded)}
+        >
           <div>
-            <div className="settings-label">{t('settings.logColors')}</div>
-            <div className="settings-hint">{t('settings.logColorsHint')}</div>
-          </div>
-        </div>
-        {LOG_COLOR_KEYS.map((key) => {
-          const name = t(`settings.logColor.${key}`);
-          const custom = props.logColors[key];
-          return (
-            <div className="settings-row" key={key}>
-              <div className="settings-label">{name}</div>
-              <div className="settings-color-controls">
-                <span className="settings-hint">
-                  {custom ? custom.toUpperCase() : t('settings.logColorFollowTheme')}
-                </span>
-                <input
-                  type="color"
-                  className="settings-color-input"
-                  aria-label={name}
-                  value={custom ?? themeLogColor(key)}
-                  onChange={(event) =>
-                    props.onLogColorsChange(withLogColor(props.logColors, key, event.target.value))
-                  }
-                />
-                <button
-                  type="button"
-                  className="settings-button"
-                  aria-label={t('settings.logColorResetLabel', { name })}
-                  disabled={!custom}
-                  onClick={() => props.onLogColorsChange(withLogColor(props.logColors, key, null))}
-                >
-                  {t('settings.logColorReset')}
-                </button>
-              </div>
+            <div className="settings-label">{t('settings.logDisplay')}</div>
+            <div className="settings-hint">
+              {t('settings.logDisplaySummary', {
+                font: t(`settings.logFont.${props.logFont.family}`),
+                size: props.logFont.size,
+                colors:
+                  customColorCount > 0
+                    ? t('settings.logDisplayCustomColors', { count: customColorCount })
+                    : t('settings.logDisplayThemeColors'),
+              })}
             </div>
-          );
-        })}
+          </div>
+          <span className="settings-disclosure-icon" aria-hidden="true">
+            {logDisplayExpanded ? '▾' : '›'}
+          </span>
+        </button>
+
+        {logDisplayExpanded && (
+          <div id="log-display-settings" className="settings-disclosure-content">
+            <label className="settings-row">
+              <div>
+                <div className="settings-label">{t('settings.logFont')}</div>
+                <div className="settings-hint">{t('settings.logFontHint')}</div>
+              </div>
+              <select
+                className="language-select"
+                aria-label={t('settings.logFont')}
+                value={props.logFont.family}
+                onChange={(event) => {
+                  const family = event.target.value;
+                  if (isLogFontFamily(family)) props.onLogFontChange({ ...props.logFont, family });
+                }}
+              >
+                {LOG_FONT_FAMILIES.map((family) => (
+                  <option key={family} value={family}>
+                    {t(`settings.logFont.${family}`)}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="settings-row">
+              <div>
+                <div className="settings-label">{t('settings.logFontSize')}</div>
+                <div className="settings-hint">{t('settings.logFontSizeHint')}</div>
+              </div>
+              <select
+                className="language-select"
+                aria-label={t('settings.logFontSize')}
+                value={props.logFont.size}
+                onChange={(event) => {
+                  const size = Number(event.target.value);
+                  if (isLogFontSize(size)) props.onLogFontChange({ ...props.logFont, size });
+                }}
+              >
+                {LOG_FONT_SIZES.map((size) => (
+                  <option key={size} value={size}>
+                    {size}px
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="settings-subgroup" role="group" aria-label={t('settings.logColors')}>
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">{t('settings.logColors')}</div>
+                  <div className="settings-hint">{t('settings.logColorsHint')}</div>
+                </div>
+              </div>
+              {LOG_COLOR_KEYS.map((key) => {
+                const name = t(`settings.logColor.${key}`);
+                const custom = props.logColors[key];
+                return (
+                  <div className="settings-row" key={key}>
+                    <div className="settings-label">{name}</div>
+                    <div className="settings-color-controls">
+                      <span className="settings-hint">
+                        {custom ? custom.toUpperCase() : t('settings.logColorFollowTheme')}
+                      </span>
+                      <input
+                        type="color"
+                        className="settings-color-input"
+                        aria-label={name}
+                        value={custom ?? themeLogColor(key)}
+                        onChange={(event) =>
+                          props.onLogColorsChange(
+                            withLogColor(props.logColors, key, event.target.value),
+                          )
+                        }
+                      />
+                      <button
+                        type="button"
+                        className="settings-button"
+                        aria-label={t('settings.logColorResetLabel', { name })}
+                        disabled={!custom}
+                        onClick={() =>
+                          props.onLogColorsChange(withLogColor(props.logColors, key, null))
+                        }
+                      >
+                        {t('settings.logColorReset')}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="settings-section settings-template-section">

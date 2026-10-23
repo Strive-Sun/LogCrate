@@ -2993,6 +2993,12 @@ body.resizing {
 .settings-disclosure-content {
   padding: 0 0 12px;
 }
+.settings-disclosure-first {
+  border-top: 0;
+}
+.settings-subgroup {
+  border-top: 1px solid var(--border);
+}
 .settings-provider-option {
   display: flex;
   align-items: center;
