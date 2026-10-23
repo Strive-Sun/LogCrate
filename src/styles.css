@@ -308,6 +308,22 @@ button {
   ).is-scrolling::-webkit-scrollbar-thumb:hover {
   background-color: var(--scrollbar-thumb-hover);
 }
+/* 日志正文使用更宽、带最小长度的滑块:大文件下按比例计算的滑块会缩成很短一截。
+   Chromium 在设置了标准 scrollbar-width/scrollbar-color 时会忽略 ::-webkit-scrollbar,
+   因此这里恢复为 auto,让下面的尺寸与最小长度生效;颜色仍由 --scrollbar-thumb-color 控制渐隐。 */
+.log-view {
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+.log-view::-webkit-scrollbar {
+  width: 18px;
+  height: 18px;
+}
+.log-view::-webkit-scrollbar-thumb {
+  min-width: 48px;
+  min-height: 48px;
+  border-width: 3px;
+}
 @media (prefers-reduced-motion: reduce) {
   :where(.col-body, .log-view, .log-tabs-menu, .update-notes) {
     transition-duration: 0s;
